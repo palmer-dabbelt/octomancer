@@ -13,17 +13,17 @@ doc/tentacle-notes.md for the evidence and for what is still unknown.
 
 Two payload types carry a clock:
 
-    0x22, 9 bytes -- frame-resolution timecode
+    0x22, 9 bytes -- timecode, good to a few milliseconds
         byte 0   type 0x22
-        byte 1   flags/unit    0x3d on four boxes, 0x7d on one
-        byte 2   constant      0x58 on every box seen
+        byte 1   flags         low 6 bits 0x3d; bit 0x40 changes over minutes
+        byte 2   frame rate    low 6 bits = fps (0x18 = 24); bit 0x40 as above
         byte 3   hours         plain binary, NOT BCD
         byte 4   minutes
         byte 5   seconds
         byte 6   frames
-        byte 7-8 sub-frame position (see notes; not needed to read timecode)
+        byte 7-8 microseconds within the frame, big-endian
 
-    0x32, 8 bytes -- microsecond-resolution clock, seen on a Track E
+    0x32, 8 bytes -- microsecond clock, seen on a Track E
         byte 0   type 0x32
         byte 1-2 as above
         byte 3-7 microseconds since midnight, 40-bit big-endian
@@ -80,10 +80,32 @@ def decode(data):
         if h > 23 or m > 59 or s > 59:
             out["note"] = "out of range: %d:%d:%d" % (h, m, s)
             return out
-        out["sod"] = float(h * 3600 + m * 60 + s)
-        out["display"] = "%02d:%02d:%02d:%02d" % (h, m, s, f)
-        out["frames"] = f
+        fps = data[2] & 0x3F
+        if not 1 <= fps <= 60:
+            out["note"] = "implausible frame rate %d" % fps
+            return out
+
+        sod = float(h * 3600 + m * 60 + s) + f / float(fps)
+        out["fps"] = fps
         out["flags"] = data[1]
+        out["frames"] = f
+
+        # Bytes 7-8 are microseconds within the frame. Including them takes
+        # this from frame resolution (~42 ms) to a few ms: fitting the decoded
+        # time against the host clock, residual drops 3-18x on every box
+        # tested. There is an unexplained ~3.6 ms floor in the field (its
+        # observed minimum is ~3600, not 0), so treat the absolute value as
+        # carrying a small constant bias; the rate is what matters for sync.
+        if len(data) >= 9:
+            micros = int.from_bytes(data[7:9], "big")
+            out["micros"] = micros
+            sod += micros / 1e6
+            out["display"] = ("%02d:%02d:%02d:%02d.%03d"
+                              % (h, m, s, f, micros // 1000))
+        else:
+            out["display"] = "%02d:%02d:%02d:%02d" % (h, m, s, f)
+
+        out["sod"] = sod
         return out
 
     if data[0] == TYPE_MICROS and len(data) >= 8:
@@ -121,6 +143,8 @@ class Box:
         self.types = set()
         self.flags = set()
         self.max_frame = -1
+        self.reported_fps = None
+        self.micros_seen = False
         self.notes = set()
 
     def add(self, data, rssi, when):
@@ -137,6 +161,10 @@ class Box:
         self.decoded += 1
         self.last = info
         self.flags.add(info.get("flags"))
+        if info.get("fps"):
+            self.reported_fps = info["fps"]
+        if info.get("micros") is not None:
+            self.micros_seen = True
         if info["frames"] is not None:
             self.max_frame = max(self.max_frame, info["frames"])
         self.deltas.append(wrap_delta(info["sod"] - secs_of_day(when)))
@@ -147,19 +175,19 @@ class Box:
         if TYPE_MICROS in self.types:
             return "microsecond"
         if TYPE_TIMECODE in self.types:
-            return "frame"
+            # Bytes 7-8 carry microseconds within the frame, so this is not
+            # frame-limited despite the frame field.
+            return "frame+us" if self.micros_seen else "frame"
         return "none"
 
-    def guess_fps(self):
-        """Infer frame rate from the largest frame number seen.
+    def fps(self):
+        """Frame rate as the box reports it, in byte 2.
 
-        Only meaningful once enough adverts have arrived to have plausibly hit
-        the top of the count, so stay quiet when the sample is thin.
+        Read it rather than inferring it from the largest frame number seen:
+        a box heard only a few times may never show a high frame, which is how
+        a 24 fps box gets misreported as 22 fps.
         """
-        if self.max_frame < 0 or self.decoded < 12:
-            return None
-        top = self.max_frame + 1
-        return top if top in (24, 25, 30, 48, 50, 60) else None
+        return self.reported_fps
 
 
 async def scan(args):
@@ -230,11 +258,8 @@ async def scan(args):
             print("  clock:        %s, %+.2fs from this Mac (range %+.2f..%+.2f)"
                   % (b.last["display"], b.deltas[-1], lo, hi))
             if b.max_frame >= 0:
-                fps = b.guess_fps()
-                print("  frames:       0..%d seen%s"
-                      % (b.max_frame,
-                         " -> %d fps" % fps if fps
-                         else " (too few adverts to infer a frame rate)"))
+                print("  frames:       0..%d seen, box reports %s fps"
+                      % (b.max_frame, b.fps() or "?"))
         if b.notes:
             print("  not decoded:  %s" % "; ".join(sorted(b.notes)))
         if b.last_seen:
@@ -270,17 +295,19 @@ async def scan(args):
                   % (b.name[:20], offset(b), gap, base.name[:12],
                      "   <- reference" if b is base else ""))
 
-        # Frame-resolution boxes report whole seconds, so their offset carries
-        # up to a second of quantisation on top of any real difference.
+        # Every payload type carries sub-frame microseconds, so offsets are
+        # good to milliseconds -- unless a box was heard only as the truncated
+        # 7-byte form, which is frame-limited.
         quantised = any(b.resolution == "frame" for b in synced)
-        limit = 1.5 if quantised else 0.2
+        limit = 1.5 if quantised else 0.05
         print()
         if worst <= limit:
-            print("  All boxes agree to within %.2fs -- they are jammed" % worst)
+            print("  All boxes agree to within %.3fs -- they are jammed"
+                  % worst)
             print("  together.")
             if quantised:
-                print("  The 0x22 boxes only report whole seconds, so about a")
-                print("  second of that spread is quantisation, not drift.")
+                print("  One box was heard without microseconds, so about a")
+                print("  frame of that spread is quantisation, not drift.")
         else:
             print("  Up to %.2fs apart -- these are NOT all jammed to the same"
                   % worst)

@@ -1,163 +1,291 @@
-# Tentacle Sync over Bluetooth LE
+# The Tentacle Sync BLE protocol
 
-Reverse-engineered on 2026-08-24 against a bench of five boxes, using
-`scripts/tentacle_scan.py`. Nothing here comes from documentation — it is all
-inferred from what the boxes put on the air, so the confidence level of each
-claim is stated.
+Reverse-engineered on 2026-08-24 against a bench of five boxes. There is no
+documentation for any of this — every claim below comes from captured traffic,
+and each one says what the evidence is and how strong it is.
 
-## The short version
+Captures were taken with `scripts/tentacle_capture.py`, which writes raw
+adverts to JSONL so the same data can be re-examined without going back to the
+radio. The headline figures come from a 150-second capture of 591 adverts
+across all five boxes.
 
-Tentacles broadcast their timecode in the **advertising payload**, as BLE
-**service data** under the 16-bit UUID `FDAC`. That makes reading them
-completely passive: no connection, no pairing, no bonding, and no limit on how
-many boxes you listen to at once. A laptop can sit in the corner and read every
-box in the room at the same time.
+## 1. Transport
 
-**The timecode is plain binary, not BCD.** This is the opposite of Blackmagic,
-which packs BCD into the same kind of field. Byte `0x15` here means 21, not 15.
-Getting this backwards produces a plausible-looking wrong answer rather than an
-obvious error, which is why it is worth saying twice.
+Tentacles put their clock in the **BLE advertising payload**, as **service
+data** under the 16-bit UUID `FDAC` (`0000fdac-0000-1000-8000-00805f9b34fb`).
 
-## Finding them
+The consequences are worth stating plainly, because they shape everything built
+on top:
 
-Do **not** match on the device name. Tentacles advertise under the name of the
-camera they are strapped to, so the bench looks like a rack of cameras:
+* **It is passive.** No connection, no pairing, no bonding, no GATT. You cannot
+  disturb a box by reading it, and a box cannot refuse you.
+* **It is unlimited.** Every box in radio range is readable simultaneously.
+  Reading five is no harder than reading one.
+* **It survives anything.** No session to drop, no reconnection logic, no
+  timeout handling.
 
-| Advertised name | Address (macOS UUID) | RSSI | Type |
+This is the opposite of the Blackmagic side of this project, where reading
+timecode needs a connection, and it makes the Tentacle the natural clock source
+in any pairing of the two.
+
+## 2. Finding the boxes
+
+**Never match on the device name.** Tentacles advertise under the name of the
+camera they are strapped to, so a bench of them looks like a rack of cameras:
+
+| Advertised name | Address (macOS UUID) | Median RSSI | Payload type |
 | --- | --- | --- | --- |
-| `BMPCC` | `B80D95C9-7D0B-140A-0351-2F4D55A1114E` | −40 | frame |
-| `Krysta` | `F1139A0E-2275-1188-1855-9C5A0794D7FF` | −67 | microsecond |
-| `FS5` | `E7EEBE32-6DCC-F159-B304-B45ACE7FCA0A` | −72 | frame |
-| `F55` | `97A75BDD-1262-468A-4775-B53ADB34509F` | −73 | frame |
-| `FS7` | `42723B20-45C0-272F-4313-973390EB1542` | −81 | frame |
+| `BMPCC` | `B80D95C9-7D0B-140A-0351-2F4D55A1114E` | −41 | `0x22` |
+| `Krysta` | `F1139A0E-2275-1188-1855-9C5A0794D7FF` | −64 | `0x32` |
+| `F55` | `97A75BDD-1262-468A-4775-B53ADB34509F` | −73 | `0x22` |
+| `FS7` | `42723B20-45C0-272F-4313-973390EB1542` | −75 | `0x22` |
+| `FS5` | `E7EEBE32-6DCC-F159-B304-B45ACE7FCA0A` | −78 | `0x22` |
 
-Four of those five names are cameras. None of them is a camera. The real
+Four of those five names are camera models. None of them is a camera. The real
 Blackmagic 6K Pro in the same room advertises as `A:1EAE18A7`.
 
-Match on **FDAC service data** instead. Addresses shown are CoreBluetooth
-UUIDs, which macOS generates per host — they will differ on another machine, so
-they are not identifiers to hardcode either.
+Match on **FDAC service data**. The addresses above are CoreBluetooth UUIDs
+that macOS generates per host, so they are not portable identifiers either —
+they will differ on another machine.
 
-Reception is the practical limit, not the protocol: at −81 dBm the FS7 produced
-a single advert in 45 seconds, while the box at −40 produced 75.
+## 3. Advertising behaviour
 
-## Payload formats
+From the 150 s capture, after collapsing consecutive duplicate payloads (macOS
+re-reports the same advert several times):
 
-Three payload types were observed, distinguished by byte 0. All share the same
-three-byte header.
+| Box | adverts | unique | median interval | unique rate |
+| --- | --- | --- | --- | --- |
+| BMPCC | 243 | 124 | 1.17 s | 0.83/s |
+| Krysta | 207 | 110 | 1.48 s | 0.75/s |
+| FS7 | 62 | 42 | 3.27 s | 0.28/s |
+| F55 | 59 | 43 | 3.05 s | 0.29/s |
+| FS5 | 20 | 15 | 7.49 s | 0.13/s |
 
-### `0x22` — frame-resolution timecode, 9 bytes
+Roughly one new payload per second from a strong box. The rate falls off with
+signal, not because the box slows down but because adverts are missed: at −78
+dBm the worst gap was 20 s, and at −83 dBm in an earlier session one box
+produced a single advert in 45 s.
+
+**Practical consequence:** listen for at least 10 s to be confident of hearing
+every box in a room, and 45 s or more if you care about the weak ones.
+
+## 4. Packet types
+
+Byte 0 is a type tag. Three values were seen. All three share a three-byte
+header.
+
+### `0x22` — timecode, 9 bytes
 
 ```
-22 7d 58 15 00 3a 0a a3 92
-^  ^  ^  ^  ^  ^  ^  ^^^^^
-|  |  |  |  |  |  |  sub-frame position (see below)
+22 3d 18 15 00 3a a3 92
+^  ^  ^  ^  ^  ^  ^  ^^^^^  bytes 7-8: microseconds into the frame, big-endian
 |  |  |  |  |  |  frames
 |  |  |  |  |  seconds
 |  |  |  |  minutes
-|  |  |  hours          -- 0x15 = 21, plain binary
-|  |  constant 0x58 on every box seen
-|  flags/unit: 0x3d on four boxes, 0x7d on one
+|  |  |  hours              0x15 = 21. Plain binary, NOT BCD.
+|  |  frame rate            low 6 bits: 0x18 = 24 fps
+|  flags                    see below
 type
 ```
 
-Decoded, that is `21:00:58:10`.
+Full example: `22 7d 18 15 00 3a 0a a3 92` decodes to **21:00:58:10.041**.
 
-**Confidence: high.** Four physically separate boxes decode to the same
-timecode within a second of each other, all sit the same −8.6 s from the host
-clock, and the seconds field advances exactly once per second across minute and
-hour rollovers. A wrong layout would not do all of that at once.
+### `0x32` — microsecond clock, 8 bytes
 
-### `0x32` — microsecond-resolution clock, 8 bytes
-
-Seen on one box (`Krysta`, a Track E, which also records audio).
+Seen on the Track E, which also records audio.
 
 ```
-32 3d 58 11 a2 23 f1 57
-^  ^  ^  ^^^^^^^^^^^^^^
-|  |  |  microseconds since midnight, 40-bit big-endian
-|  |  constant 0x58
+32 3d 18 11 a2 23 f1 57
+^  ^  ^  ^^^^^^^^^^^^^^  microseconds since midnight, 40-bit big-endian
+|  |  frame rate
 |  flags
 type
 ```
 
-`0x11a223f157` = 75 878 138 199 µs = 21:04:38.138.
-
-**Confidence: high.** Fitting the counter against the host clock over 70
-seconds gives **999 998 ticks/s — 1.0000 MHz** with a maximum residual of 3 ms.
-A 40-bit field covers a full day (86 400 s needs 37 bits). Nothing but a
-microsecond-of-day counter fits that rate and that range.
-
-This box is the more useful sync reference of the two formats: it gives
-sub-millisecond time, where the `0x22` boxes give whole frames.
+`0x11a223f157` = 75,878,138,199 µs = **21:04:38.138**.
 
 ### `0x42` — static, 9 bytes
 
 ```
-42 7d 00 26 02 15 02 a1 00
-42 3d 00 26 02 15 02 a1 00      <- different box, same payload
+42 3d 00 26 02 15 02 a1 00
+42 7d 00 26 02 15 02 a1 00     <- a different box, otherwise byte-identical
 ```
 
-Interleaved with the timecode adverts. Contains no clock: the payload is
-byte-identical across boxes and never changes over time, apart from the flags
-byte in position 1. Not decoded, and there is no obvious reason to.
+Interleaved with the timecode adverts at roughly one in every thirteen. Carries
+no clock: the payload never changes over time, and is identical across boxes
+apart from the flags byte. Byte 2 is `0x00` here rather than a frame rate, so
+byte 2's meaning is type-specific. Not decoded — most likely a product or
+capability identifier.
 
-## What is still unknown
+## 5. The timecode is plain binary, not BCD
 
-**Bytes 7–8 of `0x22` carry sub-frame position, but the scale is unresolved.**
-Treating them as a fraction and adding it to the whole timecode improves the
-linear fit against host time from 23 ms of residual to **3 ms** — an eight-fold
-improvement, so they are certainly timing rather than payload. But the observed
-range runs to 44 946, which exceeds one frame at 24 fps (41 666 µs), so they
-are not simply microseconds-within-frame. Not pursued further; reading whole
-frames does not require them.
+This is the single most important thing to get right, and it is worth stating
+separately because of how it fails. Blackmagic packs timecode as BCD in a
+structurally similar field; Tentacle does not. Byte `0x15` means **21**, not 15.
 
-**Byte 1 is per-unit but not unique.** `0x7d` on one box, `0x3d` on the other
-four, stable per box across a session. Too coarse to be a serial number —
-possibly a group, a link role, or a status bitfield.
+Decoding these as BCD does not raise an error. It produces a plausible-looking
+wrong time that drifts in a plausible-looking way, and every value below 0x0A
+decodes identically under both schemes, so casual spot checks pass. Any code
+handling both vendors should keep the two decoders visibly separate.
 
-**Byte 2 is `0x58` on every box**, in every payload type. A protocol version or
-a fixed marker, but nothing observed varies it.
+**Evidence:** four physically separate boxes decode to the same timecode within
+milliseconds of each other and all sit at the same offset from the host clock,
+across minute and hour rollovers, with 0 of 212 payloads violating
+`HH ≤ 23, MM ≤ 59, SS ≤ 59`. A wrong layout cannot do all of that at once.
 
-**Frame rate is inferred, not read.** The frames field was seen spanning 0..23
-on the strongest box, which means 24 fps (or 23.976). Which byte encodes the
-rate, if any, was not identified — a box running at another rate would settle
-it immediately.
+## 6. Byte 2 is the frame rate
 
-## Sync observations
+Low six bits of byte 2 = frames per second. Observed `0x18` = 24 on all five
+boxes, consistent with the frames field spanning 0..23.
 
-The four `0x22` boxes are jammed together tightly: their offsets from the host
-clock agreed within **0.2 s** of each other (−8.56 to −8.74 s), which is inside
-the one-second quantisation of a whole-seconds field.
+**Read it rather than inferring the rate from the largest frame number seen.** A
+box heard only a few times may never show a high frame: in one capture that
+made a 24 fps box look like 22 fps, which then corrupted every downstream
+calculation that divided by it.
 
-`Krysta` was **+76.8 s** away from that group — a real difference, far too
-large to be a sampling artefact, and measured at microsecond resolution. It is
-simply jammed to a different reference.
+Bit `0x40` of byte 2 is separate from the rate — see below.
 
-Two methodology notes that cost time and are easy to get wrong:
+## 7. Bytes 7–8 are microseconds within the frame
 
-* **Compare offsets, not readings.** Comparing each box's most recent timecode
-  charges every box for how stale its last advert was — a box last heard 4 s
-  ago appears 4 s out of sync when it is fine. Comparing each box's offset
-  *from the host clock at its own moment of receipt* cancels the staleness.
-  Doing this wrong made three well-synced boxes look 2–4 s apart.
-* **A whole-seconds field cannot resolve sub-second sync.** The `0x22` boxes
-  quantise to the second, so about a second of apparent spread between them is
-  the format, not the boxes.
+This took three attempts to get right and is the most useful finding here,
+because it takes the `0x22` boxes from frame resolution (42 ms) to a few
+milliseconds.
 
-Unexplained coincidence, recorded only so it is not rediscovered as if new: the
-76.8 s Krysta gap is suspiciously close to the 75 s offset the Blackmagic camera
-applies to RTC writes (see `protocol-notes.md`). No mechanism connects them —
-different devices, different direction, different protocol — and the most likely
-explanation by far is that Krysta was jammed at a different time. Treat as
-coincidence unless something else turns up.
+The value is a 16-bit big-endian count of **microseconds elapsed into the
+current frame**.
 
-## Reproducing
+**Evidence.** Fitting decoded time against host monotonic time, and comparing
+the residual with and without the microsecond term:
+
+| Box | frames only | with µs | improvement |
+| --- | --- | --- | --- |
+| BMPCC | 12.1 ms | 4.2 ms | 2.9× |
+| FS7 | 9.7 ms | 0.9 ms | 11× |
+| F55 | 11.5 ms | 1.0 ms | 12× |
+| FS5 | 12.6 ms | 0.7 ms | 18× |
+
+Fitting the scale as a free parameter instead of assuming it gives 0.963,
+0.982, 0.992 and 0.992 µs per unit on the four boxes — all within 4 % of
+exactly 1 µs, from four independent devices.
+
+**Two caveats, both honest.**
+
+*The zero point is offset by about 3.6 ms.* Observed values run roughly
+3600..45300 rather than 0..41666. The span matches one frame at 24 fps
+(41,667 µs) almost exactly, so the scale is right, but the field does not start
+at zero. A linear fit absorbs this into its intercept, so it does not affect
+rate or drift measurements — but treat the absolute sub-frame value as carrying
+a small constant bias of unknown origin.
+
+*They are not a checksum, which was ruled out rather than assumed.* Two
+identical 7-byte prefixes were observed carrying different suffixes, which
+alone disproves any function of the preceding bytes. Beyond that, all 65,536
+CRC-16 polynomials were tested in both bit orders and both endiannesses, using
+the linearity trick that lets init and xorout cancel out — no match. Byte sum
+and XOR match 0 of 212 payloads.
+
+## 8. The flags bit
+
+Byte 1 reads `0x3d` or `0x7d`; byte 2 reads `0x18` or `0x58`. In both cases the
+difference is bit `0x40`, and in both cases it is stable within a capture but
+changes between captures taken about twenty minutes apart.
+
+Between those two captures the bench was re-jammed (see below), and the bit
+flipped on every box. That is suggestive but not proof, and the direction was
+not consistent across boxes: `BMPCC` held `0x7d` while the others held `0x3d`
+in the first capture, and the reverse in the second.
+
+**Unresolved.** Candidates are a jam-sync state, a link role, or a
+slowly-toggling counter. Deliberately not guessed at further. It has no bearing
+on decoding the time.
+
+## 9. Clock quality and jam-sync behaviour
+
+The Track E's microsecond counter makes it possible to measure the boxes rather
+than just read them.
+
+* **Rate accuracy:** the 40-bit counter ran at 1,000,002.3 ticks/s against the
+  host clock — 2.3 ppm fast, over a 148-second window, with a maximum residual
+  of 2,316 ticks (2.3 ms).
+* **Stability:** its offset from the host clock varied by 5 ms across 110
+  adverts, and the drift between the first and second halves of the capture was
+  −2.91 ppm.
+* **Agreement:** with all five boxes decoded to microseconds, their offsets
+  from the host clock agreed to within **2 ms**, and in a later run to within
+  **1 ms**.
+
+Five independently-clocked devices converging to a millisecond is also the
+strongest single piece of evidence that the decode is correct — a wrong layout
+would not produce agreement, only coincidence.
+
+**Jam state is not permanent, and this bit them.** Earlier in the same session
+the Track E sat **+76.8 s** away from the other four boxes: a real difference,
+far too large to be a sampling artefact, and measured at microsecond
+resolution. Some time later it was back in agreement at −6.23 s along with
+everything else. Nothing in the protocol announced either state.
+
+So: **a box being precise says nothing about it being correct.** Any tool that
+picks a sync reference should check that the rest of the bench agrees with the
+box it picked, rather than trusting resolution alone. `tentacle_ref.py` does
+this and refuses to quietly use a reference that disagrees with the majority.
+
+## 10. Comparing boxes correctly
+
+Two methodology traps, both of which produced confidently wrong numbers here
+before being caught.
+
+**Compare offsets, not readings.** Ranking boxes by their most recent decoded
+timecode charges each box for how stale its last advert was — a box last heard
+4 s ago looks 4 s out of sync when it is fine. Compare each box's offset *from
+the host clock sampled at that box's own moment of receipt*; the staleness then
+cancels. Getting this wrong made three well-synced boxes appear 2–4 s apart.
+
+**Take a median per box, then across boxes.** A strong box contributes ten
+times as many adverts as a weak one, so pooling all adverts lets the strongest
+box outvote the bench. Reducing each box to its own median first, then taking
+the median of those, gives every box one vote and ignores a single box that is
+jammed elsewhere.
+
+## 11. What is still unknown
+
+* **Byte 1 flags, and bit `0x40` of byte 2** — section 8.
+* **The ~3.6 ms offset in the sub-frame field** — section 7.
+* **The `0x42` static payload** — `26 02 15 02 a1 00` is identical on every box
+  and never changes. No hypothesis worth recording.
+* **Whether any box reports its own jam state.** Nothing observed distinguished
+  the Track E's 76.8 s excursion from normal operation.
+* **Behaviour at other frame rates.** Everything here was captured at 24 fps.
+  Byte 2 should simply read a different value, and the sub-frame span should
+  change to match, but that is a prediction, not an observation.
+* **Drop-frame.** No candidate field identified. At 24 fps it does not arise.
+
+## 12. Corrections to earlier versions of this document
+
+Recorded because the mistakes are instructive, and because anyone re-deriving
+this will probably make the same ones.
+
+* **"Byte 2 is a constant `0x58`."** Wrong. It is the frame rate in the low six
+  bits plus a flag bit. It looked constant because every box was in the same
+  state during the first capture.
+* **"Bytes 7–8 are unidentified, possibly a checksum."** Wrong. They are
+  microseconds into the frame. An early fit appeared to confirm a sub-frame
+  scale, then a later scan appeared to refute it — the refutation was itself
+  flawed, because it required the divisor to exceed the largest observed value
+  and so excluded the correct answer.
+* **"The frame-resolution boxes can only pin an offset to about ±1 s."** Wrong,
+  and it mattered: it made the Track E look uniquely valuable as a sync source
+  when in fact every box gives millisecond-grade time.
+* **"The Track E is 76.8 s out of sync."** True when measured, but it is a
+  transient state and not a property of the device or the protocol.
+
+## 13. Reproducing
 
 ```
-.venv/bin/python scripts/tentacle_scan.py 45          # scan and decode
-.venv/bin/python scripts/tentacle_scan.py 30 --raw    # every advert, raw bytes
+.venv/bin/python scripts/tentacle_scan.py 45           # scan and decode
+.venv/bin/python scripts/tentacle_scan.py 30 --raw     # every advert, raw bytes
+.venv/bin/python scripts/tentacle_capture.py 150 -o cap.jsonl   # for analysis
+.venv/bin/python scripts/tentacle_ref.py 30            # pick a sync reference
 ```
 
-Give it 45 seconds or more if you want the weak boxes: at −81 dBm a box may
+Give the scan 45 s or more if you want the weak boxes; at −80 dBm a box may
 only be heard once a minute.

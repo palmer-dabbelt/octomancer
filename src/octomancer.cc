@@ -25,7 +25,9 @@
 #include <thread>
 #include <vector>
 
+#include "agents.h"
 #include "bmd.h"
+#include "camconf.h"
 #include "client.h"
 #include "control.h"
 #include "proto.h"
@@ -39,6 +41,7 @@ void on_signal(int) { g_stop = 1; }
 struct Options {
   std::string socket_path = octo::default_control_socket_path();
   std::vector<std::string> cameras;
+  std::string daemon = "all";
   double timeout = 180.0;
   bool json = false;
   bool color = false;
@@ -53,6 +56,17 @@ void usage(FILE* out) {
       "                        doing (the default)\n"
       "  list-cameras          one line per camera the daemon knows about\n"
       "  sync                  correct the clock now, even if it looks fine\n"
+      "  start | stop | restart\n"
+      "                        the daemons themselves. These go through\n"
+      "                        launchd rather than a socket, for the obvious\n"
+      "                        reason. `start` installs the LaunchAgent if it\n"
+      "                        is not there yet, so it also survives a reboot.\n"
+      "  writes [on|off]       whether octomancer may change this camera at\n"
+      "                        all -- its clock and its timecode source. New\n"
+      "                        cameras are off, so this is the first thing to\n"
+      "                        run. With no argument, reports the file.\n"
+      "  reload                re-read the camera configuration, for when it\n"
+      "                        has been edited by hand\n"
       "  source [MODE]         report or set the camera's timecode source.\n"
       "                        MODE is `time-of-day` (the timecode follows the\n"
       "                        camera's clock, which is what lets it be\n"
@@ -62,6 +76,9 @@ void usage(FILE* out) {
       "  --camera ID|NAME      which camera, repeatable. Without it, sync and\n"
       "                        source act on whichever camera the daemon is\n"
       "                        following.\n"
+      "  --daemon WHICH        `all` (the default), `bench` for octomancerd,\n"
+      "                        or `sync` for octomancer-sync. Only start,\n"
+      "                        stop and restart look at this.\n"
       "  --socket PATH         the daemon's control socket (default %s)\n"
       "  --timeout SEC         how long to wait for a request (default 180)\n"
       "  --no-wait             queue the request and exit without waiting\n"
@@ -69,8 +86,8 @@ void usage(FILE* out) {
       "  --no-color            plain text even on a terminal\n"
       "  --version, --help\n"
       "\n"
-      "The daemon is octomancer-sync. If nothing answers, start it with\n"
-      "`make install-agent`, or run it in a terminal to watch it work.\n",
+      "The daemon is octomancer-sync. If nothing answers: `octomancer start`.\n"
+      "Run it in a terminal instead to watch it work.\n",
       octo::default_control_socket_path().c_str());
 }
 
@@ -281,13 +298,21 @@ std::string camera_args(const Options& opt) {
   return out;
 }
 
+// Same, but for the places that can carry on without a daemon -- writing the
+// configuration file does not need one.
+bool fetch_status_quiet(const Options& opt, octo::Status* out) {
+  std::string reply, err;
+  if (!octo::query(opt.socket_path, "status", &reply, &err, 3.0)) return false;
+  return octo::parse_status(reply, out, &err);
+}
+
 int fetch_status(const Options& opt, octo::Status* out) {
   std::string reply, err;
   if (!octo::query(opt.socket_path, "status", &reply, &err, 5.0)) {
     std::fprintf(stderr,
                  "octomancer: %s\n"
-                 "  Is octomancer-sync running? Start it with"
-                 " `make install-agent`.\n",
+                 "  Is octomancer-sync running? `octomancer start` will"
+                 " start it.\n",
                  err.c_str());
     return 1;
   }
@@ -298,6 +323,196 @@ int fetch_status(const Options& opt, octo::Status* out) {
   return 0;
 }
 
+// -------------------------------------------------------------- the daemons
+
+// Start, stop and restart do not go through a socket: a daemon that is not
+// running cannot be asked to start. They go to launchd, and they report what
+// happened per agent rather than as one verdict, because "one of the two came
+// up" is a different situation from either "both did" or "neither did".
+int run_agent_command(const Options& opt, const std::string& verb,
+                      const Paint& p) {
+  std::vector<octo::Agent> which;
+  if (!octo::parse_agent_selection(opt.daemon, &which)) {
+    std::fprintf(stderr,
+                 "octomancer: unknown daemon '%s'. Use `all`, `bench` or"
+                 " `sync`.\n", opt.daemon.c_str());
+    return 2;
+  }
+
+  int failures = 0;
+  for (const octo::Agent a : which) {
+    std::string err;
+    bool ok = false;
+    if (verb == "start") {
+      ok = octo::agent_start(a, &err);
+    } else if (verb == "stop") {
+      ok = octo::agent_stop(a, &err);
+    } else {
+      ok = octo::agent_restart(a, &err);
+    }
+
+    if (!ok) {
+      ++failures;
+      std::fprintf(stderr, "%s%-22s%s %s\n", p(kRed), octo::agent_label(a),
+                   p(kReset), err.c_str());
+      continue;
+    }
+
+    // Report what is actually true afterwards rather than that the command
+    // was accepted. launchctl exits 0 for a great many things that do not end
+    // with a running process.
+    const octo::AgentState state = octo::agent_state(a);
+    const char* colour = kGreen;
+    std::string said;
+    if (verb == "stop") {
+      said = state.loaded ? "still loaded" : "stopped";
+      if (state.loaded) colour = kYellow;
+    } else if (state.running) {
+      said = "running, pid " + std::to_string(state.pid);
+    } else if (state.loaded) {
+      // launchd has it but there is no process. Usually it just exited, and
+      // the exit code is the only thing that explains why.
+      said = "loaded, but not running";
+      if (state.last_exit != 0) {
+        said += " (last exit " + std::to_string(state.last_exit) + ")";
+      }
+      colour = kYellow;
+    } else {
+      said = "not loaded";
+      colour = kYellow;
+    }
+    std::printf("%s%-22s%s %s  %s(%s)%s\n", p(colour), octo::agent_label(a),
+                p(kReset), said.c_str(), p(kDim), octo::agent_description(a),
+                p(kReset));
+  }
+  return failures == 0 ? 0 : 1;
+}
+
+// ---------------------------------------------------------- the config file
+//
+// Written here and never by the daemon, which is the whole point of keeping it
+// separate from the daemon's own notebook: a permission cannot quietly become
+// something else because a measurement moved.
+int run_writes_command(const Options& opt, const std::string& argument,
+                       const Paint& p) {
+  octo::CamConf conf;
+  std::string err;
+  if (!conf.load(octo::default_camera_config_path(), &err)) {
+    std::fprintf(stderr, "octomancer: %s\n", err.c_str());
+    return 1;
+  }
+
+  // No argument is a question.
+  if (argument.empty()) {
+    std::printf("%s%s\n", conf.path().c_str(),
+                conf.file_exists() ? "" : "  (does not exist yet)");
+    std::printf("  %-38s %s\n", "default",
+                conf.default_writes_enabled() ? "on" : "off");
+    for (const octo::CameraConfig& c : conf.cameras()) {
+      std::printf("  %-38s %s%s%s%s%s\n", c.id.c_str(),
+                  p(c.writes_enabled ? kGreen : kDim),
+                  c.writes_enabled ? "on" : "off", p(kReset),
+                  c.name.empty() ? "" : "  ", c.name.c_str());
+    }
+    if (!conf.any_writes_enabled()) {
+      std::printf("\n%sNo camera may be changed, so nothing will be synced.%s\n"
+                  "Enable one with: octomancer writes on --camera <id>\n",
+                  p(kYellow), p(kReset));
+    }
+    return 0;
+  }
+
+  bool enable = false;
+  if (argument == "on" || argument == "enable" || argument == "yes") {
+    enable = true;
+  } else if (argument == "off" || argument == "disable" || argument == "no") {
+    enable = false;
+  } else {
+    std::fprintf(stderr, "octomancer: say `on` or `off`, not '%s'\n",
+                 argument.c_str());
+    return 2;
+  }
+
+  // Which cameras. Naming none is only unambiguous when the daemon knows about
+  // exactly one; otherwise "all of them" and "the one I mean" are too easy to
+  // confuse for something that grants permission to change hardware.
+  std::vector<std::pair<std::string, std::string>> targets;  // id, name
+  if (!opt.cameras.empty()) {
+    octo::Status s;
+    const bool have_status = fetch_status_quiet(opt, &s);
+    for (const std::string& want : opt.cameras) {
+      std::string id = want, name;
+      if (have_status) {
+        for (const octo::CameraStatus& c : s.cameras) {
+          if (c.id == want || c.name == want) {
+            id = c.id;
+            name = c.name;
+            break;
+          }
+        }
+      }
+      targets.emplace_back(id, name);
+    }
+  } else {
+    octo::Status s;
+    if (!fetch_status_quiet(opt, &s) || s.cameras.empty()) {
+      std::fprintf(stderr,
+                   "octomancer: name a camera with --camera. Without a running"
+                   " daemon there is nothing to look one up in.\n");
+      return 2;
+    }
+    if (s.cameras.size() > 1) {
+      std::fprintf(stderr,
+                   "octomancer: %zu cameras are known, so --camera is required."
+                   " `octomancer list-cameras` shows them.\n",
+                   s.cameras.size());
+      return 2;
+    }
+    targets.emplace_back(s.cameras[0].id, s.cameras[0].name);
+  }
+
+  for (const auto& target : targets) {
+    if (!conf.set_writes(target.first, target.second, enable, &err)) {
+      std::fprintf(stderr, "octomancer: %s\n", err.c_str());
+      return 1;
+    }
+    std::printf("%s%s%s writes %s\n", p(enable ? kGreen : kYellow),
+                (target.second.empty() ? target.first : target.second).c_str(),
+                p(kReset), enable ? "enabled" : "disabled");
+  }
+  std::printf("saved to %s\n", conf.path().c_str());
+
+  // Tell the running daemon, if there is one. Not being able to is not a
+  // failure: the file is written, and the daemon will read it when it starts.
+  std::string reply, ignored;
+  if (octo::query(opt.socket_path, "reload", &reply, &ignored, 3.0)) {
+    std::printf("the running daemon has been told to re-read it\n");
+  } else {
+    std::printf("no daemon answered, so this takes effect when one starts\n");
+  }
+  return 0;
+}
+
+void print_agent_states(const Paint& p) {
+  for (const octo::Agent a : {octo::Agent::kBench, octo::Agent::kSync}) {
+    const octo::AgentState state = octo::agent_state(a);
+    const char* colour = state.running ? kGreen : kYellow;
+    std::string said;
+    if (state.running) {
+      said = "running, pid " + std::to_string(state.pid);
+    } else if (state.loaded) {
+      said = "loaded, not running";
+    } else if (state.installed) {
+      said = "installed, not loaded";
+    } else {
+      said = "not installed";
+    }
+    if (state.installed) said += ", starts at boot";
+    std::printf("  %-22s %s%s%s\n", octo::agent_program(a), p(colour),
+                said.c_str(), p(kReset));
+  }
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -305,11 +520,12 @@ int main(int argc, char** argv) {
   opt.color = isatty(1);
 
   enum {
-    kCamera = 1000, kSocket, kTimeout, kJson, kNoColor, kNoWait,
+    kCamera = 1000, kSocket, kTimeout, kJson, kNoColor, kNoWait, kDaemon,
     kVersion, kHelp,
   };
   static const struct option longs[] = {
       {"camera", required_argument, nullptr, kCamera},
+      {"daemon", required_argument, nullptr, kDaemon},
       {"socket", required_argument, nullptr, kSocket},
       {"timeout", required_argument, nullptr, kTimeout},
       {"json", no_argument, nullptr, kJson},
@@ -324,6 +540,7 @@ int main(int argc, char** argv) {
     if (c == -1) break;
     switch (c) {
       case kCamera: opt.cameras.push_back(optarg); break;
+      case kDaemon: opt.daemon = optarg; break;
       case kSocket: opt.socket_path = optarg; break;
       case kTimeout: opt.timeout = std::atof(optarg); break;
       case kJson: opt.json = true; break;
@@ -357,12 +574,43 @@ int main(int argc, char** argv) {
     }
     octo::Status s;
     const int rc = fetch_status(opt, &s);
-    if (rc != 0) return rc;
-    if (command == "status") {
-      print_status(s, paint);
-    } else {
+    if (command == "list-cameras") {
+      if (rc != 0) return rc;
       print_camera_list(s, paint);
+      return 0;
     }
+    // A status that cannot reach the daemon is still worth printing: whether
+    // the agents are loaded is exactly the question somebody has at that
+    // moment, and it does not come from the socket.
+    if (rc != 0) {
+      std::fprintf(stderr, "\n");
+      print_agent_states(paint);
+      return rc;
+    }
+    print_status(s, paint);
+    std::printf("  daemons\n");
+    print_agent_states(paint);
+    return 0;
+  }
+
+  if (command == "start" || command == "stop" || command == "restart") {
+    return run_agent_command(opt, command, paint);
+  }
+
+  if (command == "writes") {
+    return run_writes_command(opt, argument, paint);
+  }
+
+  if (command == "reload") {
+    std::string reply, err;
+    if (!octo::query(opt.socket_path, "reload", &reply, &err, 5.0)) {
+      std::fprintf(stderr, "octomancer: %s\n", err.c_str());
+      return 1;
+    }
+    // The daemon re-reads between cycles, not on the socket thread, so this
+    // says what was asked for rather than what has happened.
+    std::printf("asked the daemon to re-read %s\n",
+                octo::default_camera_config_path().c_str());
     return 0;
   }
 

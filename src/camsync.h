@@ -186,6 +186,7 @@ void forget_drift(SyncState* state);
 
 enum class Action {
   kWrite,
+  kSkipWritesDisabled,
   kSkipRecording,
   kSkipTimecodeSource,
   kSkipExternal,
@@ -203,6 +204,16 @@ struct Conditions {
   explicit Conditions(bool rec) : recording(rec) {}
 
   bool recording = false;
+
+  // Whether anyone has said this camera may be changed at all. This is not a
+  // fact about the camera; it is permission, and it comes from camconf.h --
+  // which the daemon reads and never writes.
+  //
+  // It defaults to true here because these are *conditions*, and a caller
+  // that has not been given a permission to apply has not been told to
+  // withhold one either. The daemon sets it explicitly on every cycle; the
+  // safe default lives in CamConf, where a camera nobody has named is off.
+  bool writes_enabled = true;
 
   // 4.7, which decides whether the camera's timecode follows its RTC at all.
   //

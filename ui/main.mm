@@ -17,11 +17,14 @@
 #import <AppKit/AppKit.h>
 #import <UserNotifications/UserNotifications.h>
 
+#include <algorithm>
 #include <set>
 #include <string>
 #include <vector>
 
+#include "agents.h"
 #include "bmd.h"
+#include "camconf.h"
 #include "client.h"
 #include "control.h"
 #include "proto.h"
@@ -41,10 +44,38 @@ NSString* const kPrefSyncFailed = @"notify.sync-failed";
 NSString* const kPrefFirstSync = @"notify.first-sync";
 NSString* const kPrefCameraLost = @"notify.camera-lost";
 
-NSString* const kAgentLabels[] = {
-    @"com.dabbelt.octomancerd",
-    @"com.dabbelt.octomancer-sync",
-};
+// ...and two about the bench rather than a camera.
+NSString* const kPrefBenchDisagree = @"notify.bench-disagree";
+NSString* const kPrefBenchDrift = @"notify.bench-drift";
+
+// The menu-bar item is a shortcut to the window, not the program. Someone who
+// drives all of this from `octomancer` on the command line has no use for it,
+// and the menu bar is short.
+NSString* const kPrefShowStatusItem = @"ui.show-status-item";
+
+// How far apart the boxes have to be before they are not jammed to the same
+// source any more.
+//
+// Boxes actually jammed together sit within a few milliseconds of each other;
+// this bench runs at about 12 ms, which is where advertisement timing alone
+// puts it. A box that has been left unjammed is out by seconds, not tens of
+// milliseconds, so the threshold only has to clear the noise floor by enough
+// not to cry wolf. The gap between the two is hysteresis, so a bench sitting
+// on the line does not alternate.
+constexpr double kSpreadAlertEnter = 0.050;
+constexpr double kSpreadAlertExit = 0.035;
+
+// How fast the bench and this Mac may pull apart before it is worth saying so.
+//
+// Parts per million, because the absolute offset between them is a constant
+// with no meaning (timecode-of-day against wall clock) and only its *rate* of
+// change says anything. 25 ppm is about two seconds a day: fast enough to
+// matter over a shoot, slow enough that an ordinary crystal will not trip it.
+// The daemon has already refused to report drift measured over too short an
+// arm, which is the part that would otherwise invent hundreds of ppm.
+constexpr double kDriftAlertEnter = 25.0;
+constexpr double kDriftAlertExit = 15.0;
+
 
 NSString* ns(const std::string& s) {
   return [NSString stringWithUTF8String:s.c_str()] ?: @"";
@@ -120,6 +151,8 @@ NSTextField* mono_label(NSString* text) {
   std::string _benchError;
   bool _benchUp;
   std::set<std::string> _alerting;
+  bool _benchDisagreeing;
+  bool _benchDrifting;
 
   // --- the cameras, from octomancer-sync -----------------------------
   octo::Status _status;
@@ -149,14 +182,22 @@ NSTextField* mono_label(NSString* text) {
   NSButton* _notifyFailed;
   NSButton* _notifyFirst;
   NSButton* _notifyLost;
+  NSButton* _notifyBenchDisagree;
+  NSButton* _notifyBenchDrift;
   NSButton* _startAtBoot;
   NSTextField* _bootNote;
+  NSButton* _showStatusItem;
+  NSTextField* _statusNote;
+  NSTextField* _daemonState;
+  NSButton* _writesEnabled;
 }
 
 - (instancetype)init {
   self = [super init];
   if (self) {
     _benchUp = false;
+    _benchDisagreeing = false;
+    _benchDrifting = false;
     _controlUp = false;
     _notificationsReady = false;
     _busy = false;
@@ -177,6 +218,9 @@ NSTextField* mono_label(NSString* text) {
       kPrefSyncFailed : @YES,
       kPrefFirstSync : @YES,
       kPrefCameraLost : @YES,
+      kPrefBenchDisagree : @YES,
+      kPrefBenchDrift : @YES,
+      kPrefShowStatusItem : @YES,
     }];
   }
   return self;
@@ -184,15 +228,10 @@ NSTextField* mono_label(NSString* text) {
 
 - (void)applicationDidFinishLaunching:(NSNotification*)note {
   (void)note;
-  _statusItem = [[NSStatusBar systemStatusBar]
-      statusItemWithLength:NSVariableStatusItemLength];
-  _statusItem.button.title = @"◷";
-  _statusItem.button.toolTip = @"Octomancer";
-
   _menu = [[NSMenu alloc] init];
   _menu.delegate = self;
-  _statusItem.menu = _menu;
 
+  [self applyStatusItemVisibility];
   [self requestNotificationPermission];
   [self rebuildMenu];
 
@@ -281,7 +320,10 @@ NSTextField* mono_label(NSString* text) {
       [self updateStatusItem];
       [self rebuildMenu];
       [self updateWindow];
-      if (bench_ok) [self notifyForNewAlerts];
+      if (bench_ok) {
+        [self notifyForNewAlerts];
+        [self notifyForBenchConditions];
+      }
     });
   });
 }
@@ -353,6 +395,68 @@ NSTextField* mono_label(NSString* text) {
        }];
 }
 
+// Two conditions about the bench as a whole, rather than about one box.
+//
+// Both are edge-triggered with hysteresis, for the same reason the daemon's
+// per-box alerts are: a bench parked on a threshold must not be able to send a
+// notification every two seconds. They are computed here rather than in
+// octomancerd because both are one line of arithmetic over a snapshot it
+// already publishes, and adding a second alerting mechanism to the daemon to
+// save that line would be the worse trade.
+- (void)notifyForBenchConditions {
+  NSUserDefaults* defaults = [NSUserDefaults standardUserDefaults];
+
+  // 1. The boxes disagree with each other. Nothing about the Mac is involved:
+  //    this is the bench failing to be one bench, which no amount of syncing
+  //    against it can fix.
+  if (_snapshot.has_bench && _snapshot.live >= 2) {
+    const double spread = _snapshot.bench_spread;
+    const bool over = spread > kSpreadAlertEnter;
+    const bool under = spread < kSpreadAlertExit;
+    if (over && !_benchDisagreeing) {
+      _benchDisagreeing = true;
+      if ([defaults boolForKey:kPrefBenchDisagree]) {
+        [self postNotification:@"Tentacle boxes disagree"
+                          body:[NSString stringWithFormat:
+                                             @"%d boxes are spread over %@. "
+                                             @"They are not all jammed to the "
+                                             @"same source.",
+                                             _snapshot.live,
+                                             offset_text(spread)]
+                    identifier:@"bench-disagree"];
+      }
+    } else if (under && _benchDisagreeing) {
+      _benchDisagreeing = false;
+    }
+  }
+
+  // 2. The bench and this Mac are pulling apart. The median across boxes that
+  //    have a drift figure at all -- the daemon refuses to produce one from a
+  //    short arm, so anything here has a real lever behind it.
+  std::vector<double> ppm;
+  for (const octo::DeviceSnapshot& d : _snapshot.device) {
+    if (d.live && d.has_drift) ppm.push_back(d.drift_ppm);
+  }
+  if (!ppm.empty()) {
+    std::sort(ppm.begin(), ppm.end());
+    const double median = ppm[ppm.size() / 2];
+    const double mag = fabs(median);
+    if (mag > kDriftAlertEnter && !_benchDrifting) {
+      _benchDrifting = true;
+      if ([defaults boolForKey:kPrefBenchDrift]) {
+        [self postNotification:@"Bench drifting from this Mac"
+                          body:[NSString stringWithFormat:
+                                             @"%+.0f ppm — about %.1f s a day. "
+                                             @"One of the two clocks is wrong.",
+                                             median, fabs(median) * 0.0864]
+                    identifier:@"bench-drift"];
+      }
+    } else if (mag < kDriftAlertExit && _benchDrifting) {
+      _benchDrifting = false;
+    }
+  }
+}
+
 - (void)notifyForNewAlerts {
   std::set<std::string> current;
   for (const octo::DeviceSnapshot& d : _snapshot.device) {
@@ -375,7 +479,70 @@ NSTextField* mono_label(NSString* text) {
 
 // ------------------------------------------------------------------ menu bar
 
+// Show or hide the menu-bar item.
+//
+// Hidden, the app is still running -- it just has nothing on screen. That is
+// the useful state for someone who drives everything from `octomancer` on the
+// command line: no clutter, and notifications keep arriving, which they could
+// not do otherwise. Posting one needs a bundled, signed application, so this
+// process is the only thing here that can, and quitting it is what turns them
+// off.
+//
+// Getting back to the window is opening Octomancer.app again. A second launch
+// does not start a second copy; macOS reactivates this one, and
+// applicationShouldHandleReopen below puts the window up.
+//
+// None of this touches the daemons. They hold the clocks and they do not care
+// whether anybody is watching.
+- (void)applyStatusItemVisibility {
+  const BOOL show =
+      [[NSUserDefaults standardUserDefaults] boolForKey:kPrefShowStatusItem];
+
+  if (show) {
+    if (_statusItem == nil) {
+      _statusItem = [[NSStatusBar systemStatusBar]
+          statusItemWithLength:NSVariableStatusItemLength];
+      _statusItem.button.title = @"◷";
+      _statusItem.button.toolTip = @"Octomancer";
+      _statusItem.menu = _menu;
+      [self updateStatusItem];
+    }
+    _statusNote.stringValue =
+        @"Uncheck to keep the menu bar clear. Octomancer keeps running and "
+        @"keeps notifying; open the app again to get this window back.";
+    return;
+  }
+
+  if (_statusItem != nil) {
+    [[NSStatusBar systemStatusBar] removeStatusItem:_statusItem];
+    _statusItem = nil;
+  }
+  _statusNote.stringValue =
+      @"Nothing in the menu bar. Open Octomancer.app again for this window. "
+      @"Syncing is the daemon's job either way.";
+}
+
+// Opening the app while it is already running. Without this a second launch of
+// an accessory app does nothing visible, which reads as the app being broken.
+- (BOOL)applicationShouldHandleReopen:(NSApplication*)app
+                    hasVisibleWindows:(BOOL)visible {
+  (void)app;
+  (void)visible;
+  [self showWindow:nil];
+  return YES;
+}
+
+- (void)showStatusItemToggled:(id)sender {
+  (void)sender;
+  [[NSUserDefaults standardUserDefaults]
+      setBool:_showStatusItem.state == NSControlStateValueOn
+       forKey:kPrefShowStatusItem];
+  [self applyStatusItemVisibility];
+  [self rebuildMenu];
+}
+
 - (void)updateStatusItem {
+  if (_statusItem == nil) return;
   if (!_benchUp && !_controlUp) {
     _statusItem.button.title = @"◷ ?";
     _statusItem.button.toolTip = @"Octomancer: no daemon answering";
@@ -496,6 +663,14 @@ NSTextField* mono_label(NSString* text) {
   _detail.rowSpacing = 6;
   [_detail columnAtIndex:0].xPlacement = NSGridCellPlacementTrailing;
 
+  // The permission switch, next to the controls it governs rather than in a
+  // preferences pane: "why will this not sync?" and "let it sync" should be
+  // the same glance.
+  _writesEnabled =
+      [NSButton checkboxWithTitle:@"Let octomancer change this camera"
+                           target:self
+                           action:@selector(writesToggled:)];
+
   _syncButton = [NSButton buttonWithTitle:@"Sync Now"
                                    target:self
                                    action:@selector(syncNow:)];
@@ -508,7 +683,7 @@ NSTextField* mono_label(NSString* text) {
   actions.alignment = NSLayoutAttributeCenterY;
 
   NSStackView* cameraStack = [NSStackView stackViewWithViews:@[
-    _cameraPicker, _detail, actions,
+    _cameraPicker, _detail, _writesEnabled, actions,
   ]];
   cameraStack.orientation = NSUserInterfaceLayoutOrientationVertical;
   cameraStack.alignment = NSLayoutAttributeLeading;
@@ -533,8 +708,24 @@ NSTextField* mono_label(NSString* text) {
   _notifyLost.state = [defaults boolForKey:kPrefCameraLost] ? NSControlStateValueOn
                                                             : NSControlStateValueOff;
 
+  _notifyBenchDisagree =
+      [NSButton checkboxWithTitle:@"the Tentacle boxes disagree with each other"
+                           target:self
+                           action:@selector(notifyToggled:)];
+  _notifyBenchDrift =
+      [NSButton checkboxWithTitle:@"the bench drifts away from this Mac"
+                           target:self
+                           action:@selector(notifyToggled:)];
+  _notifyBenchDisagree.state = [defaults boolForKey:kPrefBenchDisagree]
+                                   ? NSControlStateValueOn
+                                   : NSControlStateValueOff;
+  _notifyBenchDrift.state = [defaults boolForKey:kPrefBenchDrift]
+                                ? NSControlStateValueOn
+                                : NSControlStateValueOff;
+
   NSStackView* notifyStack = [NSStackView stackViewWithViews:@[
     _notifyFailed, _notifyFirst, _notifyLost,
+    _notifyBenchDisagree, _notifyBenchDrift,
   ]];
   notifyStack.orientation = NSUserInterfaceLayoutOrientationVertical;
   notifyStack.alignment = NSLayoutAttributeLeading;
@@ -547,18 +738,48 @@ NSTextField* mono_label(NSString* text) {
   _bootNote = dim_label(@"Runs both daemons as LaunchAgents in your session.");
   _bootNote.font = [NSFont systemFontOfSize:NSFont.smallSystemFontSize];
 
-  NSStackView* bootStack = [NSStackView stackViewWithViews:@[ _startAtBoot, _bootNote ]];
+  _daemonState = dim_label(@"…");
+  _daemonState.font = [NSFont monospacedDigitSystemFontOfSize:
+                                  NSFont.smallSystemFontSize
+                                                       weight:NSFontWeightRegular];
+  NSStackView* daemonButtons = [NSStackView stackViewWithViews:@[
+    [NSButton buttonWithTitle:@"Start" target:self action:@selector(startDaemons:)],
+    [NSButton buttonWithTitle:@"Stop" target:self action:@selector(stopDaemons:)],
+    [NSButton buttonWithTitle:@"Restart" target:self action:@selector(restartDaemons:)],
+  ]];
+  daemonButtons.orientation = NSUserInterfaceLayoutOrientationHorizontal;
+  daemonButtons.spacing = 8;
+
+  NSStackView* bootStack = [NSStackView stackViewWithViews:@[
+    _daemonState, daemonButtons, _startAtBoot, _bootNote,
+  ]];
   bootStack.orientation = NSUserInterfaceLayoutOrientationVertical;
   bootStack.alignment = NSLayoutAttributeLeading;
   bootStack.spacing = 2;
   bootStack.edgeInsets = NSEdgeInsetsMake(8, 8, 8, 8);
+
+  _showStatusItem = [NSButton checkboxWithTitle:@"Show the icon in the menu bar"
+                                         target:self
+                                         action:@selector(showStatusItemToggled:)];
+  _showStatusItem.state =
+      [defaults boolForKey:kPrefShowStatusItem] ? NSControlStateValueOn
+                                                : NSControlStateValueOff;
+  _statusNote = dim_label(@"");
+  _statusNote.font = [NSFont systemFontOfSize:NSFont.smallSystemFontSize];
+
+  NSStackView* menuBarStack =
+      [NSStackView stackViewWithViews:@[ _showStatusItem, _statusNote ]];
+  menuBarStack.orientation = NSUserInterfaceLayoutOrientationVertical;
+  menuBarStack.alignment = NSLayoutAttributeLeading;
+  menuBarStack.spacing = 2;
+  menuBarStack.edgeInsets = NSEdgeInsetsMake(8, 8, 8, 8);
 
   NSStackView* root = [NSStackView stackViewWithViews:@[
     _daemonLine,
     _benchLine,
     [self boxTitled:@"Camera" content:cameraStack],
     [self boxTitled:@"Notify me when…" content:notifyStack],
-    [self boxTitled:@"Startup" content:bootStack],
+    [self boxTitled:@"Daemons" content:bootStack],
   ]];
   root.orientation = NSUserInterfaceLayoutOrientationVertical;
   root.alignment = NSLayoutAttributeLeading;
@@ -578,7 +799,7 @@ NSTextField* mono_label(NSString* text) {
   [_window setContentMinSize:NSMakeSize(420, 520)];
   [_window center];
 
-  [self refreshStartAtBootCheckbox];
+  [self refreshDaemonState];
 }
 
 - (void)updateWindow {
@@ -702,14 +923,23 @@ NSTextField* mono_label(NSString* text) {
     }
   }
 
+  _writesEnabled.state =
+      c->writes_enabled ? NSControlStateValueOn : NSControlStateValueOff;
+  _writesEnabled.enabled = _controlUp && !_busy;
+  // Nothing acts on a camera that has not been permitted, so offering the
+  // buttons would be offering something that will be refused.
+  _syncButton.enabled = _syncButton.enabled && c->writes_enabled;
+  _sourcePicker.enabled = _sourcePicker.enabled && c->writes_enabled;
+
   NSString* cycle = c->action.empty() ? @"--" : ns(c->action);
+  if (!c->writes_enabled) cycle = @"writes disabled — reading only";
   if (c->recording) cycle = @"RECORDING — the clock will not be touched";
   if (c->has_source && c->source != octo::bmd::kTimecodeSourceTimeOfDay) {
     cycle = @"timecode does not follow the clock — cannot sync";
   }
   _cycleValue.stringValue = cycle;
   _cycleValue.textColor =
-      (c->recording ||
+      (c->recording || !c->writes_enabled ||
        (c->has_source && c->source != octo::bmd::kTimecodeSourceTimeOfDay))
           ? [NSColor systemOrangeColor]
           : [NSColor labelColor];
@@ -820,6 +1050,49 @@ NSTextField* mono_label(NSString* text) {
       describing:@"Setting timecode source"];
 }
 
+// Permission is written to the configuration file, not sent over the socket:
+// the daemon only ever reads that file. Then it is told to re-read it, so the
+// change takes effect on the next cycle rather than at the next restart.
+- (void)writesToggled:(id)sender {
+  (void)sender;
+  const octo::CameraStatus* c = [self selectedCamera];
+  if (c == nullptr) return;
+  const bool wanted = _writesEnabled.state == NSControlStateValueOn;
+  const std::string id = c->id;
+  const std::string name = c->name;
+  const std::string configPath = _status.daemon.config_path.empty()
+                                     ? octo::default_camera_config_path()
+                                     : _status.daemon.config_path;
+  const std::string socketPath = _controlSocket;
+
+  dispatch_async(_queue, ^{
+    octo::CamConf conf;
+    std::string err;
+    bool ok = conf.load(configPath, &err);
+    if (ok) ok = conf.set_writes(id, name, wanted, &err);
+
+    if (ok) {
+      std::string reply, ignored;
+      octo::query(socketPath, "reload", &reply, &ignored, 3.0);
+    }
+    dispatch_async(dispatch_get_main_queue(), ^{
+      if (!ok) {
+        [self complain:@"Could not save that setting."
+                  info:[NSString stringWithFormat:@"%@\n\n%@", ns(err),
+                                                  ns(configPath)]];
+        // Put the checkbox back where the daemon says it is.
+        [self updateCameraDetail];
+        return;
+      }
+      self->_activity.stringValue =
+          wanted ? @"Writes enabled for this camera."
+                 : @"Writes disabled — octomancer will read it and not touch it.";
+      self->_activity.textColor = [NSColor secondaryLabelColor];
+      [self refresh];
+    });
+  });
+}
+
 - (void)notifyToggled:(id)sender {
   NSUserDefaults* defaults = [NSUserDefaults standardUserDefaults];
   if (sender == _notifyFailed) {
@@ -828,6 +1101,12 @@ NSTextField* mono_label(NSString* text) {
   } else if (sender == _notifyFirst) {
     [defaults setBool:_notifyFirst.state == NSControlStateValueOn
                forKey:kPrefFirstSync];
+  } else if (sender == _notifyBenchDisagree) {
+    [defaults setBool:_notifyBenchDisagree.state == NSControlStateValueOn
+               forKey:kPrefBenchDisagree];
+  } else if (sender == _notifyBenchDrift) {
+    [defaults setBool:_notifyBenchDrift.state == NSControlStateValueOn
+               forKey:kPrefBenchDrift];
   } else if (sender == _notifyLost) {
     [defaults setBool:_notifyLost.state == NSControlStateValueOn
                forKey:kPrefCameraLost];
@@ -836,107 +1115,106 @@ NSTextField* mono_label(NSString* text) {
 
 // ------------------------------------------------------------ start at boot
 
-- (NSString*)launchAgentsDirectory {
-  return [NSHomeDirectory() stringByAppendingPathComponent:@"Library/LaunchAgents"];
-}
-
-- (BOOL)agentsInstalled {
-  NSFileManager* fm = [NSFileManager defaultManager];
-  for (NSString* labelName : kAgentLabels) {
-    NSString* path = [[self launchAgentsDirectory]
-        stringByAppendingPathComponent:[labelName stringByAppendingPathExtension:@"plist"]];
-    if (![fm fileExistsAtPath:path]) return NO;
+// All of the launchd handling lives in src/agents.cc, which `octomancer` uses
+// too. Doing it twice -- once in C++ and once here in Objective-C -- is how the
+// two would end up disagreeing about which labels exist.
+- (void)refreshDaemonState {
+  BOOL allInstalled = YES;
+  NSMutableArray<NSString*>* lines = [NSMutableArray array];
+  for (const octo::Agent a : {octo::Agent::kBench, octo::Agent::kSync}) {
+    const octo::AgentState state = octo::agent_state(a);
+    if (!state.installed) allInstalled = NO;
+    NSString* said;
+    if (state.running) {
+      said = [NSString stringWithFormat:@"running (%d)", state.pid];
+    } else if (state.loaded) {
+      said = @"loaded, not running";
+    } else if (state.installed) {
+      said = @"stopped";
+    } else {
+      said = @"not installed";
+    }
+    [lines addObject:[NSString stringWithFormat:@"%s: %@",
+                                                octo::agent_program(a), said]];
   }
-  return YES;
+  _daemonState.stringValue = [lines componentsJoinedByString:@"    "];
+  _startAtBoot.state = allInstalled ? NSControlStateValueOn
+                                    : NSControlStateValueOff;
 }
 
-- (void)refreshStartAtBootCheckbox {
-  _startAtBoot.state = [self agentsInstalled] ? NSControlStateValueOn
-                                             : NSControlStateValueOff;
+// launchctl can take a moment, and a frozen window looks like a crash.
+- (void)runAgentAction:(NSString*)verb {
+  _daemonState.stringValue =
+      [NSString stringWithFormat:@"%@ing…", [verb capitalizedString]];
+  const std::string what = cpp(verb);
+
+  dispatch_async(_queue, ^{
+    std::string failure;
+    for (const octo::Agent a : {octo::Agent::kBench, octo::Agent::kSync}) {
+      std::string err;
+      bool ok = false;
+      if (what == "start") {
+        ok = octo::agent_start(a, &err);
+      } else if (what == "stop") {
+        ok = octo::agent_stop(a, &err);
+      } else {
+        ok = octo::agent_restart(a, &err);
+      }
+      if (!ok && failure.empty()) failure = err;
+    }
+    dispatch_async(dispatch_get_main_queue(), ^{
+      if (!failure.empty()) {
+        [self complain:[NSString stringWithFormat:@"Could not %@ the daemons.",
+                                                  verb]
+                  info:ns(failure)];
+      }
+      [self refreshDaemonState];
+      [self refresh];
+    });
+  });
 }
 
-- (BOOL)runLaunchctl:(NSArray<NSString*>*)args {
-  NSTask* task = [[NSTask alloc] init];
-  task.executableURL = [NSURL fileURLWithPath:@"/bin/launchctl"];
-  task.arguments = args;
-  task.standardOutput = [NSFileHandle fileHandleWithNullDevice];
-  task.standardError = [NSFileHandle fileHandleWithNullDevice];
-  NSError* error = nil;
-  if (![task launchAndReturnError:&error]) {
-    NSLog(@"octomancer: launchctl failed to start: %@", error);
-    return NO;
-  }
-  [task waitUntilExit];
-  return task.terminationStatus == 0;
+- (void)startDaemons:(id)sender {
+  (void)sender;
+  [self runAgentAction:@"start"];
+}
+
+- (void)stopDaemons:(id)sender {
+  (void)sender;
+  [self runAgentAction:@"stop"];
+}
+
+- (void)restartDaemons:(id)sender {
+  (void)sender;
+  [self runAgentAction:@"restart"];
 }
 
 - (void)startAtBootToggled:(id)sender {
   (void)sender;
   const BOOL wanted = _startAtBoot.state == NSControlStateValueOn;
-  NSString* uid = [NSString stringWithFormat:@"gui/%u", getuid()];
 
-  if (!wanted) {
-    for (NSString* labelName : kAgentLabels) {
-      [self runLaunchctl:@[ @"bootout",
-                            [uid stringByAppendingFormat:@"/%@", labelName] ]];
-      NSString* path = [[self launchAgentsDirectory]
-          stringByAppendingPathComponent:
-              [labelName stringByAppendingPathExtension:@"plist"]];
-      [[NSFileManager defaultManager] removeItemAtPath:path error:nil];
+  dispatch_async(_queue, ^{
+    std::string failure;
+    for (const octo::Agent a : {octo::Agent::kBench, octo::Agent::kSync}) {
+      std::string err;
+      const bool ok = wanted ? octo::agent_install(a, &err)
+                             : octo::agent_uninstall(a, &err);
+      if (!ok && failure.empty()) failure = err;
     }
-    _bootNote.stringValue = @"Both daemons will stay stopped until you start "
-                            @"them again.";
-    [self refreshStartAtBootCheckbox];
-    return;
-  }
-
-  // The plists ship inside the bundle, generated by the build from the same
-  // templates `make install-agent` uses. Writing them here from scratch would
-  // make this the second place their contents are decided, and the two would
-  // drift.
-  NSFileManager* fm = [NSFileManager defaultManager];
-  NSString* dir = [self launchAgentsDirectory];
-  [fm createDirectoryAtPath:dir
-withIntermediateDirectories:YES
-                 attributes:nil
-                      error:nil];
-
-  NSMutableArray<NSString*>* missing = [NSMutableArray array];
-  for (NSString* labelName : kAgentLabels) {
-    NSString* leaf = [labelName stringByAppendingPathExtension:@"plist"];
-    NSString* source = [[NSBundle mainBundle] pathForResource:labelName
-                                                       ofType:@"plist"];
-    if (source == nil) {
-      [missing addObject:leaf];
-      continue;
-    }
-    NSString* dest = [dir stringByAppendingPathComponent:leaf];
-    [fm removeItemAtPath:dest error:nil];
-    NSError* error = nil;
-    if (![fm copyItemAtPath:source toPath:dest error:&error]) {
-      NSLog(@"octomancer: could not install %@: %@", leaf, error);
-      [missing addObject:leaf];
-      continue;
-    }
-    [self runLaunchctl:@[ @"bootout",
-                          [uid stringByAppendingFormat:@"/%@", labelName] ]];
-    if (![self runLaunchctl:@[ @"bootstrap", uid, dest ]]) {
-      NSLog(@"octomancer: launchctl bootstrap %@ failed", leaf);
-      [missing addObject:leaf];
-    }
-  }
-
-  if (missing.count > 0) {
-    [self complain:@"Could not set both daemons to start at boot."
-              info:[NSString stringWithFormat:
-                                 @"%@ could not be loaded. Running `make "
-                                 @"install-agent` from the source tree does "
-                                 @"the same job and will say why.",
-                                 [missing componentsJoinedByString:@", "]]];
-  } else {
-    _bootNote.stringValue = @"Both daemons will start when you log in.";
-  }
-  [self refreshStartAtBootCheckbox];
+    dispatch_async(dispatch_get_main_queue(), ^{
+      if (!failure.empty()) {
+        [self complain:@"Could not change what starts at boot."
+                  info:ns(failure)];
+      } else {
+        self->_bootNote.stringValue =
+            wanted ? @"Both daemons will start when you log in."
+                   : @"Neither daemon will start on its own. Syncing stops "
+                     @"until you start them again.";
+      }
+      [self refreshDaemonState];
+      [self refresh];
+    });
+  });
 }
 
 - (void)complain:(NSString*)message info:(NSString*)info {

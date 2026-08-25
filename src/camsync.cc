@@ -27,6 +27,7 @@ int round_to_int(double v) { return static_cast<int>(std::lround(v)); }
 const char* action_name(Action a) {
   switch (a) {
     case Action::kWrite: return "write";
+    case Action::kSkipWritesDisabled: return "skip:writes-disabled";
     case Action::kSkipRecording: return "skip:recording";
     case Action::kSkipTimecodeSource: return "skip:timecode-source";
     case Action::kSkipExternal: return "skip:external-suspected";
@@ -44,6 +45,7 @@ bool gate_is_advisory(Action a) {
     case Action::kSkipExternal:
       return true;
     case Action::kWrite:
+    case Action::kSkipWritesDisabled:
     case Action::kSkipRecording:
     case Action::kSkipTimecodeSource:
     case Action::kSkipDryRun:
@@ -74,6 +76,19 @@ Decision decide(const SyncOptions& opt, const SyncState& state, double error,
                 int fps, const Conditions& cond, double now_mono) {
   Decision d;
   d.tolerance = trigger_tolerance(opt, fps);
+
+  // First, because it is the only gate that is somebody's explicit decision
+  // rather than an inference about the camera, and because it is the answer to
+  // "why is this not syncing?" more often than anything else here. A camera
+  // nobody has enabled is left alone completely -- clock and timecode source
+  // both.
+  if (!cond.writes_enabled) {
+    d.action = Action::kSkipWritesDisabled;
+    d.message =
+        "  gate: writes are disabled for this camera -- enable it with"
+        " `octomancer writes on`, or in Octomancer.app";
+    return d;
+  }
 
   if (cond.recording) {
     d.action = Action::kSkipRecording;

@@ -33,6 +33,7 @@
 
 #include "bmd.h"
 #include "camera.h"
+#include "camconf.h"
 #include "camdb.h"
 #include "camsync.h"
 #include "client.h"
@@ -90,6 +91,9 @@ struct Options {
   // which is octomancerd's and is read, not served.
   std::string control_path = octo::default_control_socket_path();
   bool serve_control = true;
+
+  // Read, never written, by this program. See camconf.h.
+  std::string camconf_path = octo::default_camera_config_path();
 };
 
 // ------------------------------------------------------------------ output
@@ -452,7 +456,8 @@ struct Errand {
 
 void run_cycle(octo::CameraLink* link, octo::SyncState* state,
                const Options& opt, octo::JsonLog* log, octo::CamDb* db,
-               octo::PollPlan* plan, Errand* errand) {
+               const octo::CamConf& conf, octo::PollPlan* plan,
+               Errand* errand) {
   Record rec;
   // A cycle that never reaches the camera learns nothing about when to look
   // again, so the floor stands until one does.
@@ -540,11 +545,33 @@ void run_cycle(octo::CameraLink* link, octo::SyncState* state,
   errand->status.recording =
       view.has_transport && view.transport == octo::bmd::kTransportRecord;
 
+  // Permission, read once and applied to everything this cycle could do.
+  // "Writes are disabled" has to cover the timecode source as well as the
+  // clock, or the setting would be a promise the program does not keep. The
+  // clock path gets this through Conditions, so decide() stays the one place
+  // that gate is applied; the timecode source does not go through decide() and
+  // is refused here.
+  const bool may_write = conf.writes_enabled(state->camera_id);
+  errand->status.writes_enabled = may_write;
+  rec.boolean("writes_enabled", may_write);
+
   // Writing 4.7 is the one errand that does not care what the clock says, so
   // it is answered here -- before the timecode is required, because in the
   // mode this exists to escape the camera's timecode is exactly what has
   // stopped being informative.
   if (errand->set_source) {
+    if (!may_write) {
+      say("  gate: writes are disabled for this camera");
+      rec.action("skip:writes-disabled");
+      errand->status.action = "skip:writes-disabled";
+      errand->note(false,
+                   "writes are disabled for this camera -- enable it with"
+                   " `octomancer writes on`");
+      link->disconnect();
+      plan->seconds = opt.sync.poll;
+      log->record("cycle", rec.fields());
+      return;
+    }
     const std::vector<uint8_t> packet = octo::bmd::build_packet(
         octo::bmd::kGroupOutput, octo::bmd::kParamTimecodeSource,
         octo::bmd::kTypeInt8, octo::bmd::kOpAssign,
@@ -640,6 +667,7 @@ void run_cycle(octo::CameraLink* link, octo::SyncState* state,
       view.has_transport && view.transport == octo::bmd::kTransportRecord;
   cond.has_timecode_source = view.has_timecode_source;
   cond.timecode_source = view.timecode_source;
+  cond.writes_enabled = may_write;
   rec.boolean("recording", cond.recording);
   if (cond.has_timecode_source) {
     rec.integer("timecode_source", cond.timecode_source);
@@ -710,12 +738,19 @@ void run_cycle(octo::CameraLink* link, octo::SyncState* state,
     // stopped it and counted as answered rather than as failed. The one
     // exception is the timecode source, where the honest answer is that this
     // camera cannot be helped until that is changed.
-    errand->note(decision.action != octo::Action::kSkipTimecodeSource,
-                 decision.action == octo::Action::kSkipTimecodeSource
-                     ? fmt("timecode source is %lld, so the clock cannot be"
-                           " set -- switch it to 0 first",
-                           static_cast<long long>(cond.timecode_source))
-                     : std::string(octo::action_name(decision.action)));
+    std::string why = octo::action_name(decision.action);
+    bool answered = true;
+    if (decision.action == octo::Action::kSkipTimecodeSource) {
+      why = fmt("timecode source is %lld, so the clock cannot be set --"
+                " switch it to time-of-day first",
+                static_cast<long long>(cond.timecode_source));
+      answered = false;
+    } else if (decision.action == octo::Action::kSkipWritesDisabled) {
+      why = "writes are disabled for this camera -- enable it with"
+            " `octomancer writes on`";
+      answered = false;
+    }
+    errand->note(answered, why);
     link->disconnect();
     plan_next(error);
     log->record("cycle", rec.fields());
@@ -1206,6 +1241,8 @@ void usage(FILE* out) {
       "  --no-daemon           always listen directly, never ask octomancerd\n"
       "  --control-socket PATH where `octomancer` reaches this daemon\n"
       "  --no-control          do not serve a control socket at all\n"
+      "  --camera-config PATH  per-camera permissions, read-only to this\n"
+      "                        program (default ~/.octomancer/cameras.conf)\n"
       "  --log PATH            JSONL log ('' to disable, default"
       " octomancer-sync.jsonl)\n"
       "  --console PATH        send stdout and stderr here, and rotate them\n"
@@ -1295,7 +1332,7 @@ void usage(FILE* out) {
 bool parse_args(int argc, char** argv, Options* opt) {
   enum {
     kCamera = 1000, kSource, kPoll, kListen, kSocket, kNoDaemon, kLog, kOnce,
-    kControlSocket, kNoControl,
+    kControlSocket, kNoControl, kCameraConfig,
     kDryRun, kToleranceFrames, kTolerance, kWriteTolerance, kMinWriteInterval,
     kMaxFailures, kBenchSpread, kRtcBias, kNoAdaptBias, kMaxBiasStep,
     kMaxAdapts, kLead, kVerifyWait, kCameraWait, kScanTimeout, kConnectTimeout,
@@ -1332,6 +1369,7 @@ bool parse_args(int argc, char** argv, Options* opt) {
       {"no-daemon", no_argument, nullptr, kNoDaemon},
       {"control-socket", required_argument, nullptr, kControlSocket},
       {"no-control", no_argument, nullptr, kNoControl},
+      {"camera-config", required_argument, nullptr, kCameraConfig},
       {"log", required_argument, nullptr, kLog},
       {"once", no_argument, nullptr, kOnce},
       {"dry-run", no_argument, nullptr, kDryRun},
@@ -1395,6 +1433,7 @@ bool parse_args(int argc, char** argv, Options* opt) {
       case kNoDaemon: opt->use_daemon = false; break;
       case kControlSocket: opt->control_path = optarg; break;
       case kNoControl: opt->serve_control = false; break;
+      case kCameraConfig: opt->camconf_path = optarg; break;
       case kLog: opt->log_path = optarg; break;
       case kOnce: opt->once = true; break;
       case kDryRun: opt->sync.dry_run = true; break;
@@ -1532,9 +1571,14 @@ int main(int argc, char** argv) {
   // once rename over each other and one of them loses the history. The modes
   // that only look at a camera have nothing worth recording anyway, so they
   // leave the file alone unless a path was asked for explicitly.
+  //
+  // --dry-run belongs in that set too. A run that cannot write to a camera
+  // has nothing worth recording about one, and dry runs are exactly what
+  // somebody does next to a live daemon to see what it would do.
   const bool read_only_mode = opt.mode == Mode::kScanOnly ||
                               opt.mode == Mode::kWatch ||
-                              opt.mode == Mode::kPoke;
+                              opt.mode == Mode::kPoke ||
+                              opt.sync.dry_run;
   if (read_only_mode && !opt.camdb_explicit) opt.camdb_path.clear();
 
   octo::CamDb db;
@@ -1609,15 +1653,44 @@ int main(int argc, char** argv) {
   // goes deaf for the duration of every cycle is not a control socket. All
   // shared state goes through Control, which holds the only lock in this
   // program.
-  octo::Control control;
+  // Permission, read from a file this program never writes. A parse error is
+  // fatal rather than ignored: carrying on would mean acting on defaults --
+  // and the defaults permit nothing -- while a person is looking at a file
+  // that says otherwise.
+  octo::CamConf conf;
   {
+    std::string cerr_msg;
+    if (!conf.load(opt.camconf_path, &cerr_msg)) {
+      std::fprintf(stderr, "octomancer-sync: %s\n", cerr_msg.c_str());
+      return 1;
+    }
+  }
+
+  const double started_wall = octo::wall_now();
+  octo::Control control;
+  auto publish_daemon = [&] {
     octo::DaemonStatus ds;
     ds.version = OCTO_VERSION;
-    ds.started_wall = octo::wall_now();
+    ds.started_wall = started_wall;
     ds.poll_s = opt.sync.poll;
     ds.dry_run = opt.sync.dry_run;
     ds.socket_path = opt.control_path;
+    ds.config_path = conf.path();
+    ds.any_writes_enabled = conf.any_writes_enabled();
     control.set_daemon(ds);
+  };
+  publish_daemon();
+
+  // Said out loud, because the alternative is a daemon that looks like it is
+  // working and is deliberately doing nothing. This is the expected state on a
+  // fresh install: no camera is enabled until somebody enables one.
+  if (!conf.any_writes_enabled()) {
+    say("NOTHING WILL BE SYNCED: no camera has writes enabled.");
+    say("  Enable one with `octomancer writes on`, or in Octomancer.app.");
+    say("  Configuration: %s%s", conf.path().c_str(),
+        conf.file_exists() ? "" : " (does not exist yet)");
+  } else {
+    say("camera configuration: %s", conf.path().c_str());
   }
 
   std::unique_ptr<octo::Server> control_server;
@@ -1672,7 +1745,7 @@ int main(int argc, char** argv) {
 
   auto run_errand = [&](Errand* errand, const Presence& seen) {
     octo::PollPlan p;
-    run_cycle(link.get(), &state, opt, &log, &db, &p, errand);
+    run_cycle(link.get(), &state, opt, &log, &db, conf, &p, errand);
     publish(errand, seen);
 
     const std::string& id = errand->status.id;
@@ -1721,6 +1794,27 @@ int main(int argc, char** argv) {
 
   while (!g_stop) {
     console.maybe_rotate();
+
+    // Somebody edited the file and said so. Done here, between cycles, rather
+    // than on the socket thread: the values are consulted halfway through
+    // deciding things, and swapping them out underneath that would make a
+    // cycle act on two different configurations.
+    if (control.take_reload()) {
+      std::string cerr_msg;
+      if (!conf.reload(&cerr_msg)) {
+        // The old values stay in force. Refusing to act on a file we could
+        // not read beats falling back to defaults that permit nothing and
+        // silently stopping.
+        say("configuration NOT reloaded: %s", cerr_msg.c_str());
+        say("  carrying on with what was loaded before.");
+      } else {
+        say("configuration reloaded from %s -- %s", conf.path().c_str(),
+            conf.any_writes_enabled() ? "writes enabled for at least one camera"
+                                      : "NO camera has writes enabled");
+        publish_daemon();
+      }
+    }
+
     const double now = octo::mono_now();
     const Presence cam = read_presence(opt);
 

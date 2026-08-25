@@ -103,6 +103,10 @@ struct CameraStatus {
   bool present = false;    // seen on the air recently
   bool connected = false;  // a link is open right now
 
+  // Whether the configuration permits changing anything on this camera. Not a
+  // property of the camera: see camconf.h.
+  bool writes_enabled = false;
+
   bool has_error = false;
   double error_s = 0.0;    // camera minus bench, the sign the logs use
 
@@ -145,6 +149,11 @@ struct DaemonStatus {
   double poll_s = 0.0;
   bool dry_run = false;
   std::string socket_path;
+  // Where the per-camera configuration was read from, and whether anything in
+  // it permits a write at all. A daemon with nothing enabled is running
+  // correctly and doing nothing, which is worth being able to see.
+  std::string config_path;
+  bool any_writes_enabled = false;
 };
 
 struct Status {
@@ -224,6 +233,12 @@ class Control {
   void emit(EventKind kind, const std::string& camera_id,
             const std::string& camera_name, const std::string& message);
 
+  // Whether somebody has asked for the configuration to be re-read since this
+  // was last called. A flag rather than a callback: the file is the daemon's
+  // to read, on the daemon's thread, at a moment when it is not halfway
+  // through deciding something with the old values.
+  bool take_reload();
+
   // Queue from inside the daemon rather than from a socket, which is how the
   // command line's one-shot modes reach the same code path.
   int64_t queue(const Request& req);
@@ -254,6 +269,7 @@ class Control {
   std::deque<Event> events_;
   int64_t next_request_id_ = 1;
   int64_t next_event_seq_ = 1;
+  bool reload_requested_ = false;
 };
 
 // Where the camera daemon listens. Deliberately a different socket from

@@ -298,6 +298,8 @@ std::string render_status(const Status& s) {
   put(&out, "poll", s.daemon.poll_s, 1);
   put_bool(&out, "dry_run", s.daemon.dry_run);
   put(&out, "socket", s.daemon.socket_path);
+  put(&out, "config", s.daemon.config_path);
+  put_bool(&out, "any_writes", s.daemon.any_writes_enabled);
   put(&out, "queued", static_cast<long long>(s.queued));
   out += "\n";
 
@@ -317,6 +319,7 @@ std::string render_status(const Status& s) {
     put(&out, "name", c.name);
     put_bool(&out, "present", c.present);
     put_bool(&out, "connected", c.connected);
+    put_bool(&out, "may_write", c.writes_enabled);
     if (c.has_error) put(&out, "error", c.error_s, 4);
     if (!c.timecode.empty()) put(&out, "tc", c.timecode);
     if (c.has_fps) put(&out, "fps", static_cast<long long>(c.fps));
@@ -429,6 +432,8 @@ bool parse_status(const std::string& text, Status* out, std::string* err) {
       t.real("poll", &out->daemon.poll_s);
       t.flag("dry_run", &out->daemon.dry_run);
       t.str("socket", &out->daemon.socket_path);
+      t.str("config", &out->daemon.config_path);
+      t.flag("any_writes", &out->daemon.any_writes_enabled);
       int64_t q = 0;
       if (t.num("queued", &q)) out->queued = static_cast<int>(q);
     } else if (line.first == "bench") {
@@ -445,6 +450,7 @@ bool parse_status(const std::string& text, Status* out, std::string* err) {
       t.str("name", &c.name);
       t.flag("present", &c.present);
       t.flag("connected", &c.connected);
+      t.flag("may_write", &c.writes_enabled);
       c.has_error = t.real("error", &c.error_s);
       t.str("tc", &c.timecode);
       int64_t fps = 0;
@@ -614,6 +620,13 @@ void Control::emit(EventKind kind, const std::string& camera_id,
   while (events_.size() > kMaxEvents) events_.pop_front();
 }
 
+bool Control::take_reload() {
+  std::lock_guard<std::mutex> lock(mu_);
+  const bool wanted = reload_requested_;
+  reload_requested_ = false;
+  return wanted;
+}
+
 int Control::queued_count() const {
   std::lock_guard<std::mutex> lock(mu_);
   int n = 0;
@@ -658,6 +671,14 @@ std::string Control::handle_locked(const Command& cmd) {
   }
   if (cmd.verb == "ping") {
     return banner() + "pong\nend\n";
+  }
+  if (cmd.verb == "reload") {
+    // Answered immediately rather than when the file has actually been read.
+    // The daemon may be twenty seconds into a write, and making a client hold
+    // a socket open across that to hear "yes, re-read a file" is a worse
+    // trade than telling it the request landed.
+    reload_requested_ = true;
+    return banner() + "reloading\nend\n";
   }
   if (cmd.verb == "sync" || cmd.verb == "source") {
     Request req;

@@ -107,9 +107,16 @@ test "x$prefix" = xNONE && prefix=$ac_default_prefix
 test "x$exec_prefix" = xNONE && exec_prefix='${prefix}'
 eval EXPANDED_BINDIR="$bindir"
 eval EXPANDED_BINDIR="$EXPANDED_BINDIR"
+# The same for the data directory, which is where the plists are installed and
+# so where `octomancer start` looks for them. A -D with an unexpanded
+# ${prefix} in it compiles to a path that cannot be opened.
+eval EXPANDED_DATADIR="$datadir"
+eval EXPANDED_DATADIR="$EXPANDED_DATADIR"
+eval EXPANDED_DATADIR="$EXPANDED_DATADIR"
 prefix=$octo_saved_prefix
 exec_prefix=$octo_saved_exec_prefix
 AC_SUBST([EXPANDED_BINDIR])
+AC_SUBST([EXPANDED_DATADIR])
 
 AC_ARG_WITH([logdir],
   [AS_HELP_STRING([--with-logdir=DIR], [where the agent writes its log

@@ -160,6 +160,37 @@ void test_timecode_source_gate() {
         Action::kSkipRecording);
 }
 
+// Permission outranks everything, including a wildly wrong clock. A camera
+// nobody has enabled is read and reported on and never touched.
+void test_writes_disabled_gate() {
+  SyncOptions opt = defaults();
+  SyncState state;
+
+  Conditions cond;
+  cond.writes_enabled = false;
+  CHECK(octo::decide(opt, state, 30.0, 24, cond, 1000.0).action ==
+        Action::kSkipWritesDisabled);
+
+  // It is the first gate, so it is what a recording camera reports too --
+  // there is no point telling somebody about a take when the answer would
+  // have been no either way.
+  cond.recording = true;
+  CHECK(octo::decide(opt, state, 30.0, 24, cond, 1000.0).action ==
+        Action::kSkipWritesDisabled);
+
+  // And it is not something a hand-run sync may overrule. Someone disabled
+  // this camera on purpose.
+  CHECK(!octo::gate_is_advisory(Action::kSkipWritesDisabled));
+
+  // The default is permission, because Conditions describes the camera and
+  // permission is supplied by the daemon from the configuration file. The safe
+  // default lives in CamConf, where an unnamed camera is off.
+  Conditions plain;
+  CHECK(plain.writes_enabled);
+  CHECK(octo::decide(opt, state, 30.0, 24, plain, 1000.0).action ==
+        Action::kWrite);
+}
+
 void test_timecode_follows_rtc() {
   Conditions cond;
   CHECK(octo::timecode_follows_rtc(cond));  // unknown
@@ -655,6 +686,7 @@ int main() {
   test_external_source_backs_off();
   test_half_frame_threshold();
   test_rate_limit_holds_between_writes();
+  test_writes_disabled_gate();
   test_timecode_source_gate();
   test_timecode_follows_rtc();
   test_dry_run_decides_but_does_not_write();

@@ -126,19 +126,69 @@ confirmation, so a box parked near the threshold cannot spam you.
 `doc/service-notes.md` covers the architecture, the wire protocol, the
 threading, and why drift is refused rather than estimated from short samples.
 
+## Nothing is written until you say so
+
+**Octomancer will not change any camera it has not been told it may.** A fresh
+install syncs nothing, and says so at startup rather than looking busy and doing
+nothing:
+
+```
+$ octomancer writes on --camera A:1EAE18A7
+A:1EAE18A7 writes enabled
+saved to ~/.octomancer/cameras.conf
+the running daemon has been told to re-read it
+```
+
+That permission covers everything the program can change on a body: its clock
+*and* its timecode source. Off means octomancer reads the camera, reports on it,
+and never touches it.
+
+It lives in `~/.octomancer/cameras.conf`, which is a commented line format
+meant to be opened in an editor. **The daemon only ever reads it**; only the
+tools write it, so a setting cannot quietly become something else because a
+measurement moved. Rewriting it preserves comments, ordering, and any setting a
+newer version added, so editing by hand is not a thing you get punished for:
+
+```
+# octomancer camera configuration.
+default writes=off
+camera 09EE26AF-D630-DB5A-0CAC-ECB7B610DFBC writes=on name=A:1EAE18A7
+```
+
+After editing it by hand, `octomancer reload` makes the running daemon re-read
+it. That happens between cycles rather than mid-decision, so a cycle never acts
+on two different configurations.
+
+This is deliberately separate from `~/.octomancer/per_camera.json`, which is the
+daemon's own notebook — learned biases, measured apply delays, write history —
+and which the daemon rewrites constantly. Permissions and measurements should
+not share a file.
+
 ## Driving it
 
 `octomancer` is the front door. It has no radio of its own: every command is a
 question or an instruction put to a running daemon over its socket.
 
 ```
-octomancer                          # status: the daemon, the bench, the cameras
+octomancer                          # status: the daemons, the bench, the cameras
 octomancer list-cameras             # one line each
 octomancer sync                     # correct the clock now, even if it looks fine
 octomancer sync --camera A:1EAE18A7 # ...that one. Repeat --camera for several.
 octomancer source                   # what is the timecode following?
 octomancer source time-of-day       # make it follow the camera's clock
+octomancer writes on|off            # may octomancer change this camera at all?
+octomancer reload                   # re-read the configuration after editing it
 octomancer status --json | jq .     # for everything that isn't this program
+```
+
+The daemons themselves are started and stopped through launchd rather than a
+socket, for the obvious reason:
+
+```
+octomancer start                    # ...and install the LaunchAgents if needed
+octomancer stop
+octomancer restart
+octomancer restart --daemon sync    # just the one that writes to cameras
 ```
 
 `sync` overrules the gates that mean *there is no need* — already close enough,
@@ -158,12 +208,33 @@ does not interrupt the sync; `--no-wait` queues it and returns immediately.
 live figures, a **Sync Now** button, a timecode-source picker, and a menu-bar
 item showing the bench at a glance.
 
-It can notify you when a sync fails, when a camera syncs for the first time,
-and when a camera drops off the air — each one separately switchable, because
-which of those is worth interrupting someone for is a matter of taste and not
-something the daemon should decide on their behalf. The daemon emits all three
-regardless and the app filters, so turning one off costs nothing and turning it
-back on loses nothing but the backlog.
+It can notify you when:
+
+* a sync fails,
+* a camera syncs for the first time,
+* a camera drops off the air,
+* the Tentacle boxes disagree with each other — the bench failing to be one
+  bench, which no amount of syncing against it can fix,
+* the bench drifts away from this Mac, in ppm, since the absolute offset between
+  timecode-of-day and a wall clock is a constant with no meaning and only its
+  rate of change says anything.
+
+Each is separately switchable, because which of those is worth interrupting
+someone for is a matter of taste and not something the daemon should decide on
+their behalf. The camera ones are events the daemon emits regardless and the app
+filters, so turning one off costs nothing and turning it back on loses nothing
+but the backlog.
+
+The menu-bar icon can be hidden — it is a shortcut to the window, not the
+program, and someone driving all this from the command line has no use for it.
+Hidden, the app keeps running and keeps notifying (posting a notification needs
+a bundled app, so this process is the only thing here that can); opening
+Octomancer.app again brings the window back. Quitting it stops notifications and
+nothing else: the daemons hold the clocks and do not care whether anybody is
+watching.
+
+There are **Start**, **Stop** and **Restart** buttons for the daemons, and the
+window shows what launchd currently thinks of each.
 
 **Start at boot** installs both daemons as LaunchAgents in your login session
 and starts them. Agents rather than system daemons, and deliberately:

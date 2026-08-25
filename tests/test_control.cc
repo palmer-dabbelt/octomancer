@@ -122,6 +122,7 @@ Status sample_status() {
   c.has_last_write = true;
   c.last_write_wall = 1787684332.2;
   c.writes = 2;
+  c.writes_enabled = true;
   c.has_lead = true;
   c.lead_s = 0.14217;
   c.has_drift = true;
@@ -159,6 +160,9 @@ void test_status_round_trip() {
   CHECK_EQ(static_cast<int>(c.source), 0);
   CHECK_EQ(c.action, std::string("skip:rate-limited"));
   CHECK_EQ(c.writes, 2);
+  // The permission flag and the write *count* are different fields that once
+  // shared a key on the wire, so the count silently read back as 1.
+  CHECK(c.writes_enabled);
   CHECK(c.has_lead);
   CHECK_NEAR(c.lead_s, 0.14217, 1e-4);
 }

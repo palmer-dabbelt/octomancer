@@ -37,6 +37,7 @@
 /octomancer-ui
 /Octomancer.app/
 /tests/test_bmd
+/tests/test_camconf
 /tests/test_camdb
 /tests/test_camsync
 /tests/test_control

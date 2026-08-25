@@ -13,14 +13,19 @@ ACLOCAL_AMFLAGS = -I m4
 AM_CPPFLAGS = -I$(top_srcdir)/src -I$(top_builddir) \
 	-DOCTO_VERSION=\"$(PACKAGE_VERSION)\" \
 	-DOCTO_BINDIR=\"$(EXPANDED_BINDIR)\" \
-	-DOCTO_LOGDIR=\"$(OCTO_LOGDIR)\"
+	-DOCTO_LOGDIR=\"$(OCTO_LOGDIR)\" \
+	-DOCTO_PKGDATADIR=\"$(EXPANDED_DATADIR)/$(PACKAGE)\"
 
 EXTRA_DIST = autogen.sh README.md tests/data/adverts.golden
 
 noinst_LIBRARIES = libocto.a
 libocto_a_SOURCES = \
+	src/agents.cc \
+	src/agents.h \
 	src/bmd.cc \
 	src/bmd.h \
+	src/camconf.cc \
+	src/camconf.h \
 	src/camdb.cc \
 	src/camdb.h \
 	src/camsync.cc \
@@ -155,6 +160,12 @@ AGENT_PLISTS = launchd/com.dabbelt.octomancerd.plist \
 	launchd/com.dabbelt.octomancer-sync.plist
 AGENT_LABELS = com.dabbelt.octomancerd com.dabbelt.octomancer-sync
 
+# Installed as data as well as loaded into launchd, because `octomancer start`
+# has to be able to install an agent that was never installed, and it needs a
+# copy of the plist to do that. The templates stay the one place their contents
+# are decided; everything else copies.
+nodist_pkgdata_DATA = $(AGENT_PLISTS)
+
 install-agent: install $(AGENT_PLISTS)
 	$(MKDIR_P) "$$HOME/Library/LaunchAgents"
 	$(MKDIR_P) "$(OCTO_LOGDIR)"
@@ -194,6 +205,7 @@ AM_OBJCXXFLAGS = -fobjc-arc -std=c++17
 check_PROGRAMS = \
 	tests/test_bmd \
 	tests/test_camdb \
+	tests/test_camconf \
 	tests/test_camsync \
 	tests/test_control \
 	tests/test_jsonlog \
@@ -221,6 +233,9 @@ tests_test_bmd_LDADD = libocto.a
 
 tests_test_camsync_SOURCES = tests/test_camsync.cc tests/harness.h
 tests_test_camsync_LDADD = libocto.a
+
+tests_test_camconf_SOURCES = tests/test_camconf.cc tests/harness.h
+tests_test_camconf_LDADD = libocto.a
 
 tests_test_camdb_SOURCES = tests/test_camdb.cc tests/harness.h
 tests_test_camdb_LDADD = libocto.a

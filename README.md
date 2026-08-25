@@ -3,8 +3,66 @@
 Synchronise a Blackmagic camera's timecode with a Tentacle Sync, using a Mac as
 the proxy in the middle.
 
-Right now this is a spike, not an app: one script that probes what a Blackmagic
-camera will and won't let us do over Bluetooth LE.
+Two halves. `octomancerd` is a C++ background service that watches the Tentacle
+Sync bench and tells you when a box has drifted; the Python in `scripts/` is the
+research tool, and is where the camera side still lives.
+
+## The service
+
+```
+./autogen.sh          # only from a git checkout
+./configure --prefix=$HOME/.local
+make && make check
+```
+
+Nothing but the C++ standard library, CoreBluetooth and AppKit -- there are no
+third-party dependencies to install, and `make check` needs no hardware.
+
+```
+make install          # octomancerd + octomancerctl
+make install-agent    # run it at login as a LaunchAgent
+make install-app      # the menu-bar app, into ~/Applications
+```
+
+Check it works before installing anything:
+
+```
+./octomancerd --probe 15
+```
+
+which listens for fifteen seconds and prints what it heard:
+
+```
+octomancer  5 boxes, 5 live  radio poweredOn  up 15s  60 adverts
+bench -6.205s vs this Mac,  spread +2.0ms across 5 live boxes
+
+BOX               AGE  RSSI  TIMECODE             OFFSET     MEDIAN      DRIFT  RESOLUTION
+BMPCC              0s   -43  22:19:02:16.038     -6.208s    -6.205s        ~4m  frame+us
+Krysta             4s   -60  22:18:59.337        -6.205s    -6.207s        ~4m  microsecond
+```
+
+Once the agent is running, ask it what it can see:
+
+```
+octomancerctl              # one report
+octomancerctl watch        # redraw until interrupted
+octomancerctl json | jq .  # for everything that isn't this program
+```
+
+The service is **passive**: it never connects to a device and never writes to
+one, so it cannot disturb the Tentacle app, a camera, or a recording. It also
+never sets anyone's clock -- that stays in the Python daemon, because a service
+that runs unattended should not also be able to act unattended.
+
+It notifies you when a box drifts more than a minute from this Mac, which is
+the signal to re-jam it in the Tentacle app. That judgement is made on a median
+rather than a single reading, with hysteresis and three-observation
+confirmation, so a box parked near the threshold cannot spam you.
+
+`doc/service-notes.md` covers the architecture, the wire protocol, the
+threading, and why drift is refused rather than estimated from short samples.
+
+## The research scripts
 
 ## Setup
 

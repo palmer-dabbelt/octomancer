@@ -1,0 +1,46 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  octomancerd as a per-user LaunchAgent.
+
+  An Agent, not a system-wide Daemon, and deliberately so: CoreBluetooth access
+  is gated by the per-user privacy database, and a process outside a login
+  session has no user to grant it. Running in the user's session is what makes
+  the radio usable at all.
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.dabbelt.octomancerd</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>@EXPANDED_BINDIR@/octomancerd</string>
+    <string>--foreground</string>
+    <string>--log</string>
+    <string>@OCTO_LOGDIR@/octomancerd.jsonl</string>
+  </array>
+
+  <!-- launchd supervises the process; the daemon must not fork away from it. -->
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <dict>
+    <key>SuccessfulExit</key>
+    <false/>
+  </dict>
+  <key>ThrottleInterval</key>
+  <integer>10</integer>
+
+  <!-- Listening to advertisements is cheap; ask to be scheduled accordingly. -->
+  <key>ProcessType</key>
+  <string>Background</string>
+  <key>LowPriorityIO</key>
+  <true/>
+
+  <key>StandardOutPath</key>
+  <string>@OCTO_LOGDIR@/octomancerd.out</string>
+  <key>StandardErrorPath</key>
+  <string>@OCTO_LOGDIR@/octomancerd.err</string>
+</dict>
+</plist>

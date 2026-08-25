@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Embedded into the octomancerd binary with -sectcreate __TEXT __info_plist.
+
+  A bare command-line tool has no bundle, and macOS then has nothing to name in
+  the Bluetooth permission prompt and no stable identity to remember the answer
+  against. Giving the executable its own Info.plist section is what makes the
+  approval stick across rebuilds and across launchd restarts.
+-->
+<plist version="1.0">
+<dict>
+  <key>CFBundleName</key>       <string>octomancerd</string>
+  <key>CFBundleIdentifier</key> <string>dev.dabbelt.octomancerd</string>
+  <key>CFBundleShortVersionString</key> <string>@PACKAGE_VERSION@</string>
+  <key>CFBundleVersion</key>    <string>@PACKAGE_VERSION@</string>
+  <key>NSBluetoothAlwaysUsageDescription</key>
+  <string>Octomancer listens for Tentacle Sync timecode broadcasts to tell you when a box has drifted out of sync.</string>
+</dict>
+</plist>

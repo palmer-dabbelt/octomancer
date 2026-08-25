@@ -262,6 +262,9 @@ def describe_sdi(buf):
 
 # ---------------------------------------------------------------- BLE plumbing
 
+FDAC_UUID = "0000fdac-0000-1000-8000-00805f9b34fb"
+
+
 async def find_camera(name_hint=None, timeout=8.0, show_all=False):
     print("scanning %.0fs for Blackmagic cameras..." % timeout)
     found = await BleakScanner.discover(timeout=timeout, return_adv=True)
@@ -270,11 +273,20 @@ async def find_camera(name_hint=None, timeout=8.0, show_all=False):
     for dev, adv in found.values():
         uuids = [u.lower() for u in (adv.service_uuids or [])]
         label = adv.local_name or dev.name or ""
-        # A service-UUID match is proof; a name match is only a guess. Tentacle
-        # Sync boxes get named after the camera they ride on, so a device called
-        # "BMPCC" is quite often a Tentacle and not a camera at all.
+        # A Tentacle broadcasts its timecode in FDAC service data, which is
+        # proof of what it is. Boxes get named after the camera they ride on,
+        # so the bench here includes one called "BMPCC" -- and with the real
+        # camera switched off, the name guess below happily picked it, then
+        # spent every cycle connecting and failing to find the control
+        # characteristic. Positive identification beats a name every time.
+        is_tentacle = (FDAC_UUID in uuids
+                       or any(str(k).lower() == FDAC_UUID
+                              for k in (adv.service_data or {})))
+        # A service-UUID match is proof; a name match is only a guess.
         if SVC_CAMERA in uuids:
             cameras.append((dev, adv, label, "service uuid"))
+        elif is_tentacle:
+            continue
         elif any(k in label.lower()
                  for k in ("blackmagic", "bmpcc", "bmcc", "bmd", "ursa", "pocket",
                            "pyxis", "cinema camera", "studio camera")):

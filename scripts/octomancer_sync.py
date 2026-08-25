@@ -287,14 +287,34 @@ async def connect_camera(state, args, log):
 
 
 async def cycle(state, args, log):
-    """One pass: look at the Tentacles, then maybe correct the camera."""
-    rec = {"event": "cycle"}
+    """One pass, and always leave a record of it behind.
 
+    The Tentacle observations are gathered before the camera is touched, so a
+    camera that has gone to sleep -- or an advertiser that turned out not to be
+    a camera at all -- used to throw the whole cycle away, Tentacle readings
+    included. That is precisely backwards: watching the boxes drift is the part
+    that still works when the camera is off, and an unattended overnight run is
+    exactly when the camera is off. So the record is written in a finally.
+    """
+    rec = {"event": "cycle"}
+    try:
+        await _cycle_body(state, args, log, rec)
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        log.say("cycle failed: %s: %s" % (type(exc).__name__, exc))
+        rec.setdefault("action", "error")
+        rec["error"] = "%s: %s" % (type(exc).__name__, exc)
+    finally:
+        log.record(rec)
+
+
+async def _cycle_body(state, args, log, rec):
+    """Look at the Tentacles, then maybe correct the camera."""
     boxes = await listen_tentacles(args.listen, log)
     if not boxes:
         log.say("no Tentacle boxes heard -- nothing to sync to")
         rec.update(action="skip:no-tentacle", tentacles=0)
-        log.record(rec)
         return
     offset, per_box = tentacle_offset(boxes)
     spread = max(per_box) - min(per_box)
@@ -314,7 +334,6 @@ async def cycle(state, args, log):
     if client is None:
         log.say("Tentacles at %+.3fs, but no camera found" % offset)
         rec.update(action="skip:no-camera")
-        log.record(rec)
         return
     rec["camera_addr"] = state.get("camera_addr")
 
@@ -329,7 +348,6 @@ async def cycle(state, args, log):
         if cam is None:
             log.say("camera connected but sent no timecode")
             rec.update(action="skip:no-timecode")
-            log.record(rec)
             return
 
         mac_now = secs_of_day(datetime.now())
@@ -373,7 +391,6 @@ async def cycle(state, args, log):
         if recording:
             log.say("  gate: camera is RECORDING -- leaving the clock alone")
             rec["action"] = "skip:recording"
-            log.record(rec)
             return
 
         if state.get("failures", 0) >= args.max_failures:
@@ -381,19 +398,16 @@ async def cycle(state, args, log):
                     " external timecode source owns this camera"
                     % state["failures"])
             rec["action"] = "skip:external-suspected"
-            log.record(rec)
             return
 
         if abs(error) <= args.tolerance:
             log.say("  within %.2fs tolerance -- no change" % args.tolerance)
             rec["action"] = "skip:in-tolerance"
-            log.record(rec)
             return
 
         if args.dry_run:
             log.say("  --dry-run: would correct %+.3fs" % -error)
             rec["action"] = "skip:dry-run"
-            log.record(rec)
             return
 
         bias = state.get("rtc_bias", args.rtc_bias)
@@ -416,7 +430,6 @@ async def cycle(state, args, log):
             log.say("  could not verify: no timecode after the write")
             rec["action"] = "write:unverified"
             state["failures"] = state.get("failures", 0) + 1
-            log.record(rec)
             return
 
         err2 = wrap_delta(cam2 - (secs_of_day(datetime.now()) + offset))
@@ -471,7 +484,6 @@ async def cycle(state, args, log):
                     " adjustments (%d in a row)"
                     % (error, err2, adapts, state["failures"]))
             log.say("  something else may be driving this camera's timecode")
-        log.record(rec)
     finally:
         try:
             await client.disconnect()

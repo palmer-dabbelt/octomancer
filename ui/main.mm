@@ -617,11 +617,20 @@ NSTextField* mono_label(NSString* text) {
 
 // ------------------------------------------------------------------- window
 
+// An NSBox does not constrain a content view that manages its own layout, so
+// handing it one leaves the content unpositioned and the box sized to its
+// title alone -- every box then lands on top of the last. Size the content
+// once and let the box lay it out the old way, which is the only way NSBox
+// knows how to measure itself.
 - (NSView*)boxTitled:(NSString*)title content:(NSView*)content {
   NSBox* box = [[NSBox alloc] init];
   box.title = title;
   box.titlePosition = NSAtTop;
+  content.translatesAutoresizingMaskIntoConstraints = YES;
+  [content setFrameSize:content.fittingSize];
+  content.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
   box.contentView = content;
+  [box sizeToFit];
   box.translatesAutoresizingMaskIntoConstraints = NO;
   return box;
 }
@@ -682,8 +691,18 @@ NSTextField* mono_label(NSString* text) {
   actions.spacing = 12;
   actions.alignment = NSLayoutAttributeCenterY;
 
+  // The box is as wide as the window; the grid is not. Parking it against a
+  // spacer keeps it at its natural width, so its own column placement still
+  // decides where the labels sit.
+  NSStackView* detailRow =
+      [NSStackView stackViewWithViews:@[ _detail, [[NSView alloc] init] ]];
+  detailRow.orientation = NSUserInterfaceLayoutOrientationHorizontal;
+  detailRow.spacing = 0;
+  [detailRow setHuggingPriority:NSLayoutPriorityDefaultLow
+                 forOrientation:NSLayoutConstraintOrientationHorizontal];
+
   NSStackView* cameraStack = [NSStackView stackViewWithViews:@[
-    _cameraPicker, _detail, _writesEnabled, actions,
+    _cameraPicker, detailRow, _writesEnabled, actions,
   ]];
   cameraStack.orientation = NSUserInterfaceLayoutOrientationVertical;
   cameraStack.alignment = NSLayoutAttributeLeading;
@@ -787,6 +806,14 @@ NSTextField* mono_label(NSString* text) {
   root.edgeInsets = NSEdgeInsetsMake(16, 16, 16, 16);
   root.translatesAutoresizingMaskIntoConstraints = NO;
 
+  // Boxes track the window's width rather than their own contents, so three
+  // sections of different lengths do not read as three different columns.
+  for (NSView* section in root.arrangedSubviews) {
+    if (![section isKindOfClass:[NSBox class]]) continue;
+    [[section.widthAnchor constraintEqualToAnchor:root.widthAnchor
+                                         constant:-32] setActive:YES];
+  }
+
   _window = [[NSWindow alloc]
       initWithContentRect:NSMakeRect(0, 0, 460, 620)
                 styleMask:(NSWindowStyleMaskTitled | NSWindowStyleMaskClosable |
@@ -796,7 +823,14 @@ NSTextField* mono_label(NSString* text) {
   _window.title = @"Octomancer";
   _window.releasedWhenClosed = NO;
   _window.contentView = root;
-  [_window setContentMinSize:NSMakeSize(420, 520)];
+  // The height is whatever the sections actually add up to, rather than the
+  // 620 guessed before any of them existed -- which was 26 short, so the last
+  // one opened clipped. The width stays as chosen: the status lines above the
+  // boxes are longer than anything inside them, and fitting the window to the
+  // boxes alone would open it with those truncated.
+  NSSize fits = root.fittingSize;
+  [_window setContentSize:NSMakeSize(MAX(460, fits.width), fits.height)];
+  [_window setContentMinSize:NSMakeSize(MAX(420, fits.width), fits.height)];
   [_window center];
 
   [self refreshDaemonState];

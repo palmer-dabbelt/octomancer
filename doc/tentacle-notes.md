@@ -4,9 +4,10 @@ Reverse-engineered on 2026-08-24 against a bench of five boxes. There is no
 documentation for any of this — every claim below comes from captured traffic,
 and each one says what the evidence is and how strong it is.
 
-Captures were taken with `scripts/tentacle_capture.py`, which writes raw
-adverts to JSONL so the same data can be re-examined without going back to the
-radio. The headline figures come from a 150-second capture of 591 adverts
+Captures were taken with a Python script that wrote raw adverts to JSONL so
+the same data could be re-examined without going back to the radio; that script
+has since been replaced by `octomancerd --log`, which writes the same kind of
+record continuously. The headline figures come from a 150-second capture of 591 adverts
 across all five boxes.
 
 ## 1. Transport
@@ -321,10 +322,9 @@ this will probably make the same ones.
 ## 13. Reproducing
 
 ```
-.venv/bin/python scripts/tentacle_scan.py 45           # scan and decode
-.venv/bin/python scripts/tentacle_scan.py 30 --raw     # every advert, raw bytes
-.venv/bin/python scripts/tentacle_capture.py 150 -o cap.jsonl   # for analysis
-.venv/bin/python scripts/tentacle_ref.py 30            # pick a sync reference
+./octomancerd --probe 45                     # scan, decode, and pick a reference
+./octomancerd --log cap.jsonl --log-interval 5 --foreground   # for analysis
+octomancerctl json | jq .                    # what the running service can see
 ```
 
 Give the scan 45 s or more if you want the weak boxes; at −80 dBm a box may

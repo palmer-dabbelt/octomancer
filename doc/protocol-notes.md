@@ -65,8 +65,8 @@ byte 8+  payload              little-endian; padded with 0x00 to a 4-byte edge
 The length field is the easy thing to get wrong — it counts from the category
 byte, so a four-byte payload gives length 8, not 12. Little-endianness is
 confirmed by the p105 example "set exposure to 10 ms" (10000 µs = `0x2710`)
-encoding as `10 27 00 00`. `scripts/test_packets.py` checks the encoder against
-all six worked examples on that page.
+encoding as `10 27 00 00`. `tests/test_bmd.cc` checks the encoder against all
+six worked examples on that page, with no hardware involved.
 
 Two things the camera does that the doc doesn't mention:
 
@@ -176,11 +176,10 @@ Side note: the camera's timecode read `23:34` local while the probe's UTC target
 was `03:03`, so this body runs time-of-day timecode in **local time**, not UTC --
 worth remembering, since the documented RTC parameter is specified in UTC.
 
-Reproduce with:
-
-```
-.venv/bin/python scripts/timecode_probe.py --name <addr> --tc-char-test
-```
+This was a one-shot experiment and has no flag in the C++ tools: the answer is
+settled, and the characteristic's properties can be read back from any GATT
+browser. `octomancer-sync --watch 20` shows the same characteristic streaming
+notifications, which is the half of it that does work.
 
 ## Findings against a Pocket Cinema Camera 6K Pro (2026-08-24)
 
@@ -218,17 +217,16 @@ Group 7 never appears in the camera's initial state dump, while groups 0, 1, 3,
 isn't — the group is write-only here, not absent. Absence from a state dump
 says nothing about whether a parameter can be written.
 
-Reproduce with:
-
-```
-.venv/bin/python scripts/timecode_probe.py --name <addr> --method both
-.venv/bin/python scripts/timecode_probe.py --name <addr> --control-test
-```
+These were one-shot experiments and have no flag in the C++ tools -- a flag
+whose only purpose is to fail is a flag that rots. `octomancer-sync --watch 20`
+prints everything the camera volunteers on the incoming control characteristic,
+which is where the evidence for "accepted and ignored" came from.
 
 ## The RTC is writable over BLE (tested 2026-08-24, corrects the above)
 
 Group 7 parameter 0 **does** work on this body, and on a camera set to Time of
-Day the timecode follows it within a second. `scripts/set_rtc.py` does it.
+Day the timecode follows it within a second. `octomancer-sync --once --source
+mac` does it; `--rtc-test` proves it by writing a deliberately wrong clock.
 
 ### How the earlier "it doesn't work" result was wrong
 
@@ -281,8 +279,10 @@ pass 2: writing RTC = 2026-08-25 03:50:43 UTC  (+75s bias)
 ```
 
 Whether 75 s is universal or particular to this body and power cycle is
-untested, so `set_rtc.py` measures it and corrects in a second pass rather than
-hardcoding it. `--bias 75` skips the calibration once you trust the number.
+untested, so `octomancer-sync` measures it and folds it back into a learned
+bias rather than hardcoding it -- which turned out to matter: the offset was
+-75 s before a power cycle and 0 after one, so no fixed value would have held.
+`--rtc-bias 75` seeds the guess, and `--no-adapt-bias` stops it being learned.
 
 ### What this means for octomancer
 

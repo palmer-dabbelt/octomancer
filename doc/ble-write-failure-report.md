@@ -82,7 +82,7 @@ top of that, and is not a whole-minute or whole-hour quantity.
 
 Our packet encoder is validated against **all six worked examples printed on
 p105** of the documentation, byte for byte, with no hardware involved
-(`scripts/test_packets.py`, 15 checks, all passing).
+(`tests/test_bmd.cc`, run by `make check`, all passing).
 
 ## Finding 2 — no way to set the camera's timecode directly
 
@@ -246,17 +246,23 @@ this report identify its own test firmware automatically.
 ## Reproducing
 
 ```
-.venv/bin/python scripts/test_packets.py                        # encoder vs p105, no hardware
+make check                                            # encoder vs p105, no hardware
 
-.venv/bin/python scripts/set_rtc.py --name <addr>               # finding 1, with calibration
-.venv/bin/python scripts/set_rtc.py --name <addr> --no-calibrate  # finding 1, raw offset
+./octomancer-sync --once --source mac --camera <addr>  # finding 1, with calibration
+./octomancer-sync --once --source mac --no-adapt-bias --camera <addr>   # raw offset
 
-.venv/bin/python scripts/timecode_probe.py --name <addr> --watch 20      # read timecode
-.venv/bin/python scripts/timecode_probe.py --name <addr> --rtc-test      # RTC write lands
-.venv/bin/python scripts/timecode_probe.py --name <addr> --method timecode  # 9.4 ignored
-.venv/bin/python scripts/timecode_probe.py --name <addr> --tc-char-test  # characteristic refuses
-.venv/bin/python scripts/timecode_probe.py --name <addr> --control-test  # white balance control
+./octomancer-sync --watch 20 --camera <addr>          # read timecode, write nothing
+./octomancer-sync --rtc-test --camera <addr>          # finding 1: the RTC write lands
 ```
+
+The probes behind the *negative* results in Finding 2 -- assigning to the
+undocumented 9.4 parameter, and writing to the Timecode characteristic -- were
+one-shot experiments and were not carried over to the C++ tools. Their answers
+are settled and are recorded above: 9.4 is accepted by GATT and ignored, and
+the Timecode characteristic advertises `notify` alone and refuses every write
+with `Write Not Permitted` regardless of payload. Re-testing them needs a
+scratch program, not a maintained flag, and a flag whose only purpose is to
+fail is a flag that rots.
 
 One practical note for anyone reproducing this: **Tentacle Sync boxes advertise
 under the name of the camera they are attached to.** The strongest BLE signal in

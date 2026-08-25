@@ -1,8 +1,9 @@
 # octomancerd -- design notes
 
 The C++ service that watches the Tentacle Sync bench, and the menu-bar app that
-displays it. The Python in `scripts/` remains the research tool and the place
-where the camera side lives; this is the part that is meant to run all the time.
+displays it. This is the part that is meant to run all the time. The camera
+side -- the half that connects and writes -- is `octomancer-sync`, a separate
+binary for the reasons in "What it does, and deliberately does not do" below.
 
 ## What it does, and deliberately does not do
 

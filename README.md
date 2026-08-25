@@ -3,11 +3,21 @@
 Synchronise a Blackmagic camera's timecode with a Tentacle Sync, using a Mac as
 the proxy in the middle.
 
-Two halves. `octomancerd` is a C++ background service that watches the Tentacle
-Sync bench and tells you when a box has drifted; the Python in `scripts/` is the
-research tool, and is where the camera side still lives.
+Three programs, all C++, sharing one library:
 
-## The service
+| | |
+|---|---|
+| `octomancerd` | watches the Tentacle Sync bench and says when a box has drifted. Passive: it never connects to anything. |
+| `octomancer-sync` | connects to the camera and sets its clock from the bench. The only part that acts. |
+| `octomancer-report` | reads the log the sync daemon leaves behind and says what the clocks are actually doing. |
+
+The split between the first two is deliberate and is the main design decision
+in the project. `octomancerd` is meant to run all the time under launchd, so it
+is built so that it *cannot* disturb a recording: there is no `connect` and no
+`write` anywhere in it. Setting a clock is an action, and an action belongs in
+a program somebody chose to run.
+
+## Building
 
 ```
 ./autogen.sh          # only from a git checkout
@@ -15,14 +25,25 @@ research tool, and is where the camera side still lives.
 make && make check
 ```
 
-Nothing but the C++ standard library, CoreBluetooth and AppKit -- there are no
-third-party dependencies to install, and `make check` needs no hardware.
+Nothing but the C++ standard library, CoreBluetooth and AppKit — there are no
+third-party dependencies to install, and `make check` needs no hardware. The
+decoder, the packet encoder, the sync policy and the log reader are all
+portable C++ kept clear of CoreBluetooth precisely so they can be tested that
+way.
 
 ```
-make install          # octomancerd + octomancerctl
-make install-agent    # run it at login as a LaunchAgent
+make install          # octomancerd, octomancerctl, octomancer-sync, octomancer-report
+make install-agent    # run the watcher at login as a LaunchAgent
 make install-app      # the menu-bar app, into ~/Applications
 ```
+
+macOS will ask for Bluetooth permission the first time each binary runs. Until
+it is granted, a scan finds nothing rather than failing, so grant it before
+wondering why nothing happens. `octomancerd` and `octomancer-sync` ask
+separately, on purpose: permission to listen and permission to write to a
+camera are different things and should be revocable separately.
+
+## The service
 
 Check it works before installing anything:
 
@@ -49,11 +70,6 @@ octomancerctl watch        # redraw until interrupted
 octomancerctl json | jq .  # for everything that isn't this program
 ```
 
-The service is **passive**: it never connects to a device and never writes to
-one, so it cannot disturb the Tentacle app, a camera, or a recording. It also
-never sets anyone's clock -- that stays in the Python daemon, because a service
-that runs unattended should not also be able to act unattended.
-
 It notifies you when a box drifts more than a minute from this Mac, which is
 the signal to re-jam it in the Tentacle app. That judgement is made on a median
 rather than a single reading, with hysteresis and three-observation
@@ -62,81 +78,35 @@ confirmation, so a box parked near the threshold cannot spam you.
 `doc/service-notes.md` covers the architecture, the wire protocol, the
 threading, and why drift is refused rather than estimated from short samples.
 
-## The research scripts
-
-The Tentacle side of this has moved to C++: `octomancerd --probe` replaces
-`tentacle_ref.py`, and `octomancerd --log` replaces `tentacle_capture.py`, so
-both are gone -- `git log` has them if they are ever wanted back.
-`tentacle_scan.py` stays, because `octomancer_sync.py` imports its decoder.
-
-**The camera side is still Python and has no C++ equivalent.** `octomancerd` is
-strictly a listener: there is no connect and no write anywhere in it, by
-design. Setting a clock is Python's job, and deleting these would delete the
-only thing that can actually sync the camera.
-
-## Setup
-
-```
-python3 -m venv .venv
-.venv/bin/pip install -r requirements.txt
-```
-
-macOS will ask for Bluetooth permission the first time. Until it's granted the
-scan hangs rather than failing, so grant it before wondering why nothing
-happens.
-
-## Use
-
-```
-# what's in range? (a service-uuid match is real, a name guess often isn't)
-.venv/bin/python scripts/timecode_probe.py --scan-only
-.venv/bin/python scripts/timecode_probe.py --scan-only --all
-
-# watch a camera's timecode and telemetry without writing anything
-.venv/bin/python scripts/timecode_probe.py --name <address> --watch 20
-
-# set the camera's clock from this Mac (this is the one that works)
-.venv/bin/python scripts/set_rtc.py --name <address>
-.venv/bin/python scripts/set_rtc.py --name <address> --bias 75 --no-calibrate
-
-# prove the RTC write lands, by writing a deliberately wrong clock
-.venv/bin/python scripts/timecode_probe.py --name <address> --rtc-test
-
-# try to set the clock
-.venv/bin/python scripts/timecode_probe.py --name <address> --method both
-
-# prove whether the camera obeys control writes at all
-.venv/bin/python scripts/timecode_probe.py --name <address> --control-test
-
-# try writing timecode straight to the Timecode characteristic
-.venv/bin/python scripts/timecode_probe.py --name <address> --tc-char-test
-
-# just show the packet bytes, no Bluetooth
-.venv/bin/python scripts/timecode_probe.py --dry-run
-
-# read timecode from every Tentacle Sync box in range (passive, no pairing)
-.venv/bin/python scripts/tentacle_scan.py 45
-.venv/bin/python scripts/tentacle_scan.py 30 --raw
-```
-
 ## Keeping the camera on Tentacle time
 
-`scripts/octomancer_sync.py` ties the two halves together. It runs until
-Ctrl-C, reads Tentacle time passively, and corrects the camera's clock when
-that is both needed and allowed:
-
 ```
-.venv/bin/python scripts/octomancer_sync.py                     # auto-detect
-.venv/bin/python scripts/octomancer_sync.py --dry-run --poll 20
+octomancer-sync                       # sync to the Tentacle bench, forever
+octomancer-sync --dry-run --poll 20   # decide and log, but never write
+octomancer-sync --once                # a single cycle
+octomancer-sync --once --source mac   # set the clock from this Mac instead
 ```
 
-It will not touch the clock while the camera is **recording**, while the error
-is already inside the trigger threshold (**half a frame** by default, scaled to
-the frame rate the camera reports), while it has **written within the last
-hour** (`--min-write-interval`), or once it looks like an **external timecode
-source** owns the camera -- nothing in the protocol reports
-that, so it is inferred from writes that do not take. The camera is polled once
-a minute by default, because connecting is slow and intrudes on the operator.
+Each cycle it works out how far this Mac is from the Tentacle bench, connects
+to the camera, and corrects its clock if that is both needed and allowed. If
+`octomancerd` is running it takes the bench figure from there — the service
+already keeps an hour of history per box and takes proper medians across it,
+which is a far better number than anything a few seconds of listening can
+produce. Failing that it listens for itself.
+
+The camera is the expensive half: connecting takes seconds, and every
+connection is a chance to disturb an operator mid-shot. So the Tentacle side is
+sampled passively and the camera is touched once a minute at most, with a gate
+on every write:
+
+* **Recording.** Never touch the clock while transport mode (10.1) says Record.
+  Jumping timecode mid-take corrupts the take.
+* **Externally jam-synced.** Nothing in the protocol reports this, so it is
+  inferred: if writes stop taking, something else is driving the camera. After
+  `--max-failures` in a row it backs off rather than fighting it.
+* **Already close enough.** Below the trigger threshold — **half a frame** by
+  default, scaled to the frame rate the camera reports — leave it alone.
+* **Written recently.** At most one write per `--min-write-interval` (an hour).
 
 Those last two work together. Half a frame is tight enough that nearly every
 cycle wants to write, which would be fine for accuracy and ruinous for
@@ -145,36 +115,61 @@ computed across those stretches. So the threshold decides whether the clock is
 wrong and the interval decides whether it is worth acting on yet, leaving an
 hour of free-running drift between corrections.
 
-Note that "did this write land?" is judged against `--write-tolerance`
-(1 s) rather than the trigger threshold. Judging a write against half a frame
-would mark every good write a failure, and `--max-failures` of those in a row
-is what makes the daemon decide an external source owns the camera and stop.
+The threshold is expressed in *frames* rather than seconds because "close
+enough" means different things at 24 and 60 fps, and because a frame is the
+camera's own unit: it reports whole frames, so below half a frame there is
+nothing left to resolve. Half a frame is reachable at all only because the
+write is *timed* — the RTC field holds whole seconds, so `octomancer-sync`
+waits until the value it wants to write lands on a second boundary and sends
+then, leaving BLE latency of tens of milliseconds rather than half a second.
+
+Note that "did this write land?" is judged against `--write-tolerance` (1 s)
+rather than the trigger threshold. Judging a write against half a frame would
+mark every good write a failure, and `--max-failures` of those in a row is what
+makes the daemon decide an external source owns the camera and stop.
+
+Two things it learns rather than assumes: the camera's own RTC offset (−75 s
+before a power cycle, 0 after one, so a fixed value never converges), and
+whether the Tentacle bench agrees with itself.
 
 Every cycle is logged to `octomancer-sync.jsonl`, including the ones where
-nothing happened, so there is drift data to tune the tolerance and poll
-interval against later.
+nothing happened, so there is drift data to tune against later.
 
-Two things it learns rather than assumes: the camera's RTC offset (-75 s before
-a power cycle, 0 after one, so a fixed value never converges), and whether the
-Tentacle bench agrees with itself.
-
-`scripts/sync_report.py` turns that log into the numbers you'd tune against:
+## Looking at the log
 
 ```
-.venv/bin/python scripts/sync_report.py octomancer-sync.jsonl
+octomancer-report                          # octomancer-sync.jsonl by default
+octomancer-report --segments some.jsonl
 ```
 
-It reports drift only from free-running stretches between writes, and only
-from stretches long enough to mean anything -- the camera reports whole frames,
-so a half-minute sample yields four figures of pure quantisation noise. Expect
-it to say "leave it running" until there's an hour or so of log.
+It reports drift only from free-running stretches between writes, and only from
+stretches long enough to mean anything — the camera reports whole frames, so a
+half-minute sample yields four figures of pure quantisation noise. It also
+prints its own measurement floor, and refuses to report a drift figure that
+falls below it. Expect it to say "leave it running" until there is an hour or
+so of log.
 
-`scripts/test_packets.py` checks the packet encoder against the six worked
-examples printed on p105 of the Blackmagic documentation, and needs no hardware:
+## Probing, without writing anything
 
 ```
-.venv/bin/python scripts/test_packets.py
+octomancer-sync --scan-only              # what is in range?
+octomancer-sync --scan-only --all        # ...including everything else
+octomancer-sync --watch 20               # connect and watch the timecode
+octomancer-sync --packet                 # show the RTC packet bytes, no Bluetooth
+octomancer-sync --rtc-test               # write a deliberately wrong clock
 ```
+
+`--rtc-test` is the one diagnostic that writes. It exists because the first
+attempt at testing the RTC wrote the *correct* time to a camera whose clock was
+already right, saw nothing move, and concluded the parameter was unimplemented.
+A test whose pass and fail states look identical is not a test, so this one
+aims somewhere the camera demonstrably is not.
+
+One trap worth repeating: **Tentacle Sync boxes are named after the camera they
+are attached to**, so a device advertising as `BMPCC` is quite likely a
+Tentacle. `octomancer-sync` matches on the camera's service UUID, and treats
+FDAC service data as proof that a device is a Tentacle no matter what it calls
+itself.
 
 ## What we know so far
 
@@ -186,8 +181,9 @@ Tested against a **Pocket Cinema Camera 6K Pro**:
   on the camera with no cable, to about ±1 s.
 * Two corrections are needed to land the right time: write **UTC** and let the
   camera apply its own timezone, and add **~75 s**, because the clock lands that
-  far behind the value written — repeatably, with no spread. `set_rtc.py`
-  measures that offset and corrects it rather than assuming it.
+  far behind the value written — repeatably, with no spread. `octomancer-sync`
+  measures that offset and learns it rather than assuming it, which turned out
+  to matter: it was −75 s before a power cycle and 0 after one.
 * Setting the timecode *directly* still doesn't work: the undocumented 9.4
   parameter is accepted by GATT and ignored.
 

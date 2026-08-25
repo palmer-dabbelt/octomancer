@@ -1,6 +1,6 @@
 # Golden decodes for real Tentacle Sync adverts.
 # Captured from a bench of five boxes over ~150s. The expectations
-# were produced by scripts/tentacle_scan.py, the implementation that
+# were produced by the original Python decoder, the implementation that
 # was validated against the hardware, so this file pins the C++
 # decoder to behaviour that is known to be correct in the field.
 # Format: <hex> ok <sod> <display> <fps> <frames> us=<micros|->

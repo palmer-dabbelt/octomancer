@@ -66,6 +66,10 @@ struct Options {
   double watch_seconds = 20.0;
   // Where the per-camera database lives. Empty disables it.
   std::string camdb_path = octo::default_camera_db_path();
+  // Whether a path was named on the command line. The look-but-do-not-touch
+  // modes skip the default database so a hand-run probe cannot collide with a
+  // running daemon, but an explicit --camera-db means the caller wants it.
+  bool camdb_explicit = false;
   octo::CamDbOptions camdb;
   // Whether --rtc-bias was given. An explicit bias on the command line beats a
   // learned one, or a user debugging a body could never override what the
@@ -1084,7 +1088,10 @@ bool parse_args(int argc, char** argv, Options* opt) {
         opt->sync.rtc_bias = std::atoi(optarg);
         opt->has_rtc_bias = true;
         break;
-      case kCameraDb: opt->camdb_path = optarg; break;
+      case kCameraDb:
+        opt->camdb_path = optarg;
+        opt->camdb_explicit = true;
+        break;
       case kNoCameraDb: opt->camdb_path.clear(); break;
       case kDbMaxSamples:
         opt->camdb.max_samples = static_cast<size_t>(std::atol(optarg));
@@ -1187,6 +1194,16 @@ int main(int argc, char** argv) {
   // daemon still syncs, it just re-learns what it already knew. Say so and
   // carry on, rather than leaving a camera unsynced over a permissions
   // problem in a cache directory.
+  // The database has exactly one writer by design, and the daemon is usually
+  // it. A probe run started by hand next to a running daemon is a second
+  // writer -- harmless for an appended line, but two processes compacting at
+  // once rename over each other and one of them loses the history. The modes
+  // that only look at a camera have nothing worth recording anyway, so they
+  // leave the file alone unless a path was asked for explicitly.
+  const bool read_only_mode =
+      opt.mode == Mode::kScanOnly || opt.mode == Mode::kWatch;
+  if (read_only_mode && !opt.camdb_explicit) opt.camdb_path.clear();
+
   octo::CamDb db;
   if (!db.open(opt.camdb_path, opt.camdb, &err)) {
     std::fprintf(stderr, "octomancer-sync: %s -- continuing without it\n",

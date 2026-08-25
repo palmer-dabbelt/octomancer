@@ -57,10 +57,11 @@ Tested against a **Pocket Cinema Camera 6K Pro**:
   by GATT and then ignored.
 * This isn't our bug: a white balance write over the identical path takes effect
   and is echoed back. Group 7 is simply absent on this body.
-* **Untested:** writing to the Timecode characteristic *directly*, rather than
-  through the SDI tunnel. It's a different pipe and the docs don't describe
-  writes to it, but the docs also get its read format wrong. `--tc-char-test`
-  is ready to settle this; it needs the camera powered on.
+* The Timecode characteristic is **read-only**: it advertises `notify` alone,
+  and writes to it are rejected with GATT `Write Not Permitted` whatever the
+  payload. That closes the other BLE pipe -- and it's a firmer no than the SDI
+  tunnel's silent ignore, since no encoding could change the outcome.
+* This body runs time-of-day timecode in **local time**, not UTC.
 
 `doc/protocol-notes.md` has the packet format, the UUIDs, the several places the
 official documentation disagrees with the hardware, and where to go next.

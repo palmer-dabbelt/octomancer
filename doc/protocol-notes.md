@@ -130,41 +130,57 @@ So the timecode is at **offset 8, little-endian BCD**, and it is reported as the
 undocumented parameter 9.4. Notifications arrive roughly every other frame
 (~7.5 Hz on a 24 fps body), and the frames field counts 0-23.
 
-## Open question: can the Timecode characteristic be written?
+## The Timecode characteristic is read-only (tested 2026-08-24)
 
 The Timecode characteristic `6D8F2110-...` is **not a separate service** -- it
-lives inside the same Blackmagic Camera Service as the SDI tunnel. But it *is* a
-separate pipe, and everything above only ever wrote to Outgoing Camera Control.
-Writing to the Timecode characteristic directly has **not yet been tested on
-hardware** (the camera was powered down when the question came up).
+lives inside the same Blackmagic Camera Service as the SDI tunnel. It *is* a
+separate pipe though, so it was worth testing as a write target in its own
+right: every other write in this document went to Outgoing Camera Control.
 
-The doc describes this characteristic only as a source of notifications, and
-says nothing about writing to it. That is weak evidence: the same paragraph also
-claims the payload is a bare 32-bit BCD number, and the camera in fact sends a
-12-byte wrapped SDI message. So the doc does not reliably describe this
-characteristic, and a write is worth trying on its own terms.
+It was worth testing rather than ruling out on paper, because the doc describes
+this characteristic as notify-only in the same paragraph where it claims the
+payload is a bare 32-bit BCD number -- and the camera actually sends a 12-byte
+wrapped SDI message. A doc that gets the read format wrong is not authoritative
+about the write behaviour.
 
-`--tc-char-test` tries three payload shapes, since nothing tells us which would
-be right:
+**Result: the camera refuses writes outright.** The 6K Pro advertises this
+characteristic as `notify` and nothing else, and all three payload shapes were
+rejected at the GATT layer:
 
-| Shape | Rationale |
-| --- | --- |
-| bare 32-bit BCD, little-endian | matches how the camera *reports* the value |
-| bare 32-bit BCD, big-endian | matches how the doc *writes* it (`0x09125310`) |
-| 12-byte wrapped SDI message | byte-for-byte what the camera itself emits |
+| Payload | Bytes | Result |
+| --- | --- | --- |
+| bare BCD little-endian | `00 58 03 03` | `Write Not Permitted` |
+| bare BCD big-endian | `03 03 58 00` | `Write Not Permitted` |
+| wrapped SDI message | `ff 08 00 ff 09 04 03 00 00 58 03 03` | `Write Not Permitted` |
 
-It also prints the characteristic's advertised GATT properties first. If `write`
-is absent the test still writes, because an undeclared property is not proof of
-refusal -- and a rejection carries more information than an assumption.
+`BleakGATTProtocolError: (3, 'GATT Protocol Error: Write Not Permitted')` --
+ATT error code 0x03. Timecode free-ran through all three attempts.
+
+This is a **stronger** negative than the SDI-tunnel result. There the camera
+ACKed and silently ignored us, which always leaves room for "our packet was
+malformed". Here the GATT server refuses the write before any application logic
+sees it, so payload shape is irrelevant -- there is no encoding that would work.
+
+Full characteristic properties as advertised by the 6K Pro:
+
+```
+5dd3465f-...  write              Outgoing Camera Control
+b864e140-...  indicate           Incoming Camera Control
+6d8f2110-...  notify             Timecode          <-- no write property
+7fe8691d-...  write,read,notify  Camera Status
+ffac0c52-...  write              Device Name
+8f1fd018-...  read               Protocol Version
+```
+
+Side note: the camera's timecode read `23:34` local while the probe's UTC target
+was `03:03`, so this body runs time-of-day timecode in **local time**, not UTC --
+worth remembering, since the documented RTC parameter is specified in UTC.
+
+Reproduce with:
 
 ```
 .venv/bin/python scripts/timecode_probe.py --name <addr> --tc-char-test
 ```
-
-Interpreting the result: a GATT rejection means the camera refuses writes here
-outright. A GATT ack with the timecode still free-running time-of-day means the
-same silent-ignore behaviour we already saw on the SDI tunnel. Only a timecode
-that jumps to the target counts as success.
 
 ## Findings against a Pocket Cinema Camera 6K Pro (2026-08-24)
 

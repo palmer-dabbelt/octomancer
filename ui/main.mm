@@ -35,6 +35,25 @@ NSString* offset_text(double seconds) {
   return [NSString stringWithFormat:@"%+.1f s", seconds];
 }
 
+// Whether this process has an identity macOS will accept.
+//
+// UNUserNotificationCenter does not fail politely without one: asking for the
+// current notification centre from a bare executable raises
+// NSInternalInconsistencyException and takes the process with it, so the check
+// has to happen before the first call rather than around its result.
+//
+// A bare octomancer-ui is a perfectly good way to look at the menu bar while
+// developing, and losing notifications is the whole cost of it.
+bool have_bundle_identity() {
+  NSBundle* main = [NSBundle mainBundle];
+  if (main == nil) return false;
+  if (main.bundleIdentifier == nil) return false;
+  // A .app directory as well as an identifier: a plain executable in a
+  // directory that happens to contain an Info.plist can pick up an identifier
+  // without being a bundle, and UserNotifications wants the bundle.
+  return [[main.bundleURL pathExtension] isEqualToString:@"app"];
+}
+
 }  // namespace
 
 @interface OctoController : NSObject <NSApplicationDelegate, NSMenuDelegate>
@@ -94,6 +113,14 @@ NSString* offset_text(double seconds) {
 }
 
 - (void)requestNotificationPermission {
+  if (!have_bundle_identity()) {
+    fprintf(stderr,
+            "octomancer-ui: running as a bare executable, so macOS will not\n"
+            "  deliver notifications -- they need a bundle identity. The menu\n"
+            "  bar item works either way.\n"
+            "  For notifications: open ./Octomancer.app  (or make install-app)\n");
+    return;
+  }
   UNUserNotificationCenter* center = [UNUserNotificationCenter currentNotificationCenter];
   [center requestAuthorizationWithOptions:(UNAuthorizationOptionAlert |
                                            UNAuthorizationOptionSound)

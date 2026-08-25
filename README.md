@@ -45,6 +45,10 @@ happens.
 
 # just show the packet bytes, no Bluetooth
 .venv/bin/python scripts/timecode_probe.py --dry-run
+
+# read timecode from every Tentacle Sync box in range (passive, no pairing)
+.venv/bin/python scripts/tentacle_scan.py 45
+.venv/bin/python scripts/tentacle_scan.py 30 --raw
 ```
 
 `scripts/test_packets.py` checks the packet encoder against the six worked
@@ -68,6 +72,18 @@ Tested against a **Pocket Cinema Camera 6K Pro**:
   measures that offset and corrects it rather than assuming it.
 * Setting the timecode *directly* still doesn't work: the undocumented 9.4
   parameter is accepted by GATT and ignored.
+
+Tested against a bench of **five Tentacle Sync boxes**:
+
+* **Reading their timecode works, passively.** They broadcast it in the BLE
+  advertising payload as service data under UUID `FDAC` — no connection, no
+  pairing, and every box in the room can be read at once.
+* The timecode is **plain binary, not BCD** — the opposite of Blackmagic.
+* Two payload formats: frame-resolution `HH MM SS FF`, and a microsecond-of-day
+  counter on the Track E, which is the better sync reference.
+
+`doc/tentacle-notes.md` has the byte layouts, the evidence for each, and what's
+still unidentified.
 * The Timecode characteristic is **read-only**: it advertises `notify` alone,
   and writes to it are rejected with GATT `Write Not Permitted` whatever the
   payload. That closes the other BLE pipe -- and it's a firmer no than the SDI

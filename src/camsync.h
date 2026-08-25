@@ -220,6 +220,19 @@ bool timecode_follows_rtc(const Conditions& cond);
 
 const char* action_name(Action a);
 
+// Whether a person asking for a sync by hand may overrule this gate.
+//
+// Three of them mean "there is no need": the clock is already close, one was
+// written recently, or writes stopped taking so the daemon backed off. Someone
+// standing in front of the camera asking for a sync knows better than all
+// three, and the backoff in particular is exactly the thing a person would
+// want to retry by hand.
+//
+// The rest mean "must not" or "cannot", and no amount of asking changes them.
+// Recording would corrupt a take; a timecode source that ignores the RTC makes
+// the write pointless; --dry-run was an explicit instruction not to write.
+bool gate_is_advisory(Action a);
+
 struct Decision {
   Action action = Action::kWrite;
   double tolerance = 0.0;

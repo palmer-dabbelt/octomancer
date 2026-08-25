@@ -25,6 +25,8 @@ libocto_a_SOURCES = \
 	src/camsync.h \
 	src/client.cc \
 	src/client.h \
+	src/control.cc \
+	src/control.h \
 	src/jsonlog.cc \
 	src/jsonlog.h \
 	src/logscan.cc \
@@ -48,7 +50,8 @@ libocto_a_SOURCES = \
 ##
 
 if DARWIN
-bin_PROGRAMS = octomancerd octomancerctl octomancer-sync octomancer-report
+bin_PROGRAMS = octomancerd octomancerctl octomancer-sync octomancer-report \
+	octomancer
 
 octomancerd_SOURCES = src/octomancerd.cc src/scanner_mac.mm src/scanner.h
 octomancerd_LDADD = libocto.a
@@ -63,6 +66,12 @@ octomancerd_DEPENDENCIES = libocto.a src/octomancerd-Info.plist
 
 octomancerctl_SOURCES = src/octomancerctl.cc
 octomancerctl_LDADD = libocto.a
+
+# The front door. It talks to whichever daemon it needs over a socket and has
+# no radio of its own, which is why it is not in the DARWIN-only group by
+# necessity -- only by there being nothing to talk to elsewhere.
+octomancer_SOURCES = src/octomancer.cc
+octomancer_LDADD = libocto.a
 
 # The one program here that is not passive. It connects to a camera and writes
 # to it, so it is a separate binary with its own bundle identifier: the
@@ -166,6 +175,7 @@ check_PROGRAMS = \
 	tests/test_bmd \
 	tests/test_camdb \
 	tests/test_camsync \
+	tests/test_control \
 	tests/test_jsonlog \
 	tests/test_logscan \
 	tests/test_proto \
@@ -194,6 +204,9 @@ tests_test_camsync_LDADD = libocto.a
 
 tests_test_camdb_SOURCES = tests/test_camdb.cc tests/harness.h
 tests_test_camdb_LDADD = libocto.a
+
+tests_test_control_SOURCES = tests/test_control.cc tests/harness.h
+tests_test_control_LDADD = libocto.a
 
 tests_test_jsonlog_SOURCES = tests/test_jsonlog.cc tests/harness.h
 tests_test_jsonlog_LDADD = libocto.a

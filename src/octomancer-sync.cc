@@ -19,11 +19,14 @@
 #include <unistd.h>
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <memory>
+#include <set>
 #include <string>
 #include <thread>
 #include <vector>
@@ -33,6 +36,7 @@
 #include "camdb.h"
 #include "camsync.h"
 #include "client.h"
+#include "control.h"
 #include "jsonlog.h"
 #include "registry.h"
 #include "scanner.h"
@@ -81,6 +85,11 @@ struct Options {
   bool once = false;
   bool show_all = false;
   bool use_daemon = true;
+
+  // The control socket this daemon answers on. Separate from socket_path,
+  // which is octomancerd's and is read, not served.
+  std::string control_path = octo::default_control_socket_path();
+  bool serve_control = true;
 };
 
 // ------------------------------------------------------------------ output
@@ -309,8 +318,15 @@ void seed_from_db(octo::CamDb* db, const Options& opt, octo::SyncState* state,
 // every cycle would otherwise dominate the poll interval and keep the radio
 // busy for no reason.
 bool connect_camera(octo::CameraLink* link, octo::SyncState* state,
-                    const Options& opt, octo::CamDb* db) {
-  if (!state->camera_id.empty()) {
+                    const Options& opt, octo::CamDb* db,
+                    const std::string& want, std::string* picked_name) {
+  // `want` names the camera this cycle is for: the configured one for a
+  // scheduled cycle, or whatever a client asked for. An id that is already
+  // what we are bound to is the fast path; anything else has to be looked for,
+  // because the only way to tell a name from a body is to see it advertise.
+  const bool bound_is_wanted =
+      want.empty() || (!state->camera_id.empty() && want == state->camera_id);
+  if (!state->camera_id.empty() && bound_is_wanted) {
     std::string err;
     if (link->connect(state->camera_id, opt.sync.connect_timeout, &err)) {
       return true;
@@ -320,16 +336,15 @@ bool connect_camera(octo::CameraLink* link, octo::SyncState* state,
   }
 
   say("scanning %.0fs for Blackmagic cameras...", opt.sync.scan_timeout);
-  const octo::ScanResult found =
-      link->scan(opt.sync.scan_timeout, opt.camera, false);
+  const octo::ScanResult found = link->scan(opt.sync.scan_timeout, want, false);
 
   const octo::CameraDevice* pick = nullptr;
   for (const octo::CameraDevice& dev : found.cameras) {
-    if (opt.camera.empty()) {
+    if (want.empty()) {
       pick = &dev;
       break;
     }
-    std::string name = dev.name, hint = opt.camera;
+    std::string name = dev.name, hint = want;
     std::transform(name.begin(), name.end(), name.begin(), ::tolower);
     std::transform(hint.begin(), hint.end(), hint.begin(), ::tolower);
     std::string id = dev.id;
@@ -364,6 +379,7 @@ bool connect_camera(octo::CameraLink* link, octo::SyncState* state,
   std::fflush(stdout);
 
   const std::string id = pick->id;
+  if (picked_name != nullptr) *picked_name = pick->name;
   std::string err;
   if (!link->connect(id, opt.sync.connect_timeout, &err)) {
     say("connect failed: %s", err.c_str());
@@ -404,9 +420,39 @@ bool aligned_write(octo::CameraLink* link, const Options& opt, double offset,
 
 // ------------------------------------------------------------------ a cycle
 
+// Why this cycle is running, and what it found out.
+//
+// A scheduled cycle carries an empty errand. One asked for over the control
+// socket carries what was asked and collects the answer, because the client
+// that asked is on another thread and will come back for it.
+struct Errand {
+  bool force_sync = false;   // overrule the advisory gates
+  bool set_source = false;   // write 4.7 instead of the clock
+  int64_t source_value = 0;
+
+  // Filled in as the cycle goes and published however the cycle ends. Every
+  // early return then leaves a partial picture rather than none, which is what
+  // makes "the camera is here but the bench is not" visible to a client.
+  octo::CameraStatus status;
+  bool have_status = false;
+  octo::BenchStatus bench;
+
+  // Which camera this is for. Empty means whichever one the daemon was
+  // configured to follow.
+  std::string camera;
+
+  bool ok = false;
+  std::string outcome;
+
+  void note(bool good, std::string text) {
+    ok = good;
+    outcome = std::move(text);
+  }
+};
+
 void run_cycle(octo::CameraLink* link, octo::SyncState* state,
                const Options& opt, octo::JsonLog* log, octo::CamDb* db,
-               octo::PollPlan* plan) {
+               octo::PollPlan* plan, Errand* errand) {
   Record rec;
   // A cycle that never reaches the camera learns nothing about when to look
   // again, so the floor stands until one does.
@@ -415,6 +461,13 @@ void run_cycle(octo::CameraLink* link, octo::SyncState* state,
 
   const Bench bench = read_bench(opt);
   const double offset = (opt.source == Source::kMac) ? 0.0 : bench.offset;
+
+  errand->bench.has = true;
+  errand->bench.source = opt.source == Source::kMac ? "mac" : "tentacle";
+  errand->bench.boxes = bench.boxes;
+  errand->bench.offset_s = bench.offset;
+  errand->bench.spread_s = bench.spread;
+  errand->bench.daemon_reachable = bench.source == "octomancerd";
 
   if (opt.source == Source::kTentacle) {
     if (!bench.ok) {
@@ -440,22 +493,36 @@ void run_cycle(octo::CameraLink* link, octo::SyncState* state,
     rec.str("bench_source", "this Mac");
   }
 
-  if (!connect_camera(link, state, opt, db)) {
+  const std::string target_camera =
+      errand->camera.empty() ? opt.camera : errand->camera;
+  std::string picked_name;
+  if (!connect_camera(link, state, opt, db, target_camera, &picked_name)) {
     if (opt.source == Source::kTentacle) {
       say("Tentacles at %+.3fs, but no camera found", offset);
     } else {
       say("no camera found");
     }
     rec.action("skip:no-camera");
+    errand->note(false, "no camera found");
     log->record("cycle", rec.fields());
     return;
   }
   rec.str("camera_id", state->camera_id);
 
+  errand->have_status = true;
+  errand->status.id = state->camera_id;
+  errand->status.name = picked_name;
+  errand->status.present = true;
+  errand->status.connected = true;
+  errand->status.action = "connected";
+
   std::string err;
   if (!link->subscribe(opt.sync.camera_wait, &err)) {
     say("connected, but %s", err.c_str());
     rec.action("skip:no-characteristics");
+    errand->status.action = "no-characteristics";
+    errand->status.connected = false;
+    errand->note(false, err);
     link->disconnect();
     log->record("cycle", rec.fields());
     return;
@@ -466,9 +533,62 @@ void run_cycle(octo::CameraLink* link, octo::SyncState* state,
   rec.integer("camera_fps", fps);
   if (view.has_transport) rec.integer("camera_transport", view.transport);
 
+  errand->status.has_fps = view.has_fps;
+  errand->status.fps = fps;
+  errand->status.has_source = view.has_timecode_source;
+  errand->status.source = view.timecode_source;
+  errand->status.recording =
+      view.has_transport && view.transport == octo::bmd::kTransportRecord;
+
+  // Writing 4.7 is the one errand that does not care what the clock says, so
+  // it is answered here -- before the timecode is required, because in the
+  // mode this exists to escape the camera's timecode is exactly what has
+  // stopped being informative.
+  if (errand->set_source) {
+    const std::vector<uint8_t> packet = octo::bmd::build_packet(
+        octo::bmd::kGroupOutput, octo::bmd::kParamTimecodeSource,
+        octo::bmd::kTypeInt8, octo::bmd::kOpAssign,
+        {static_cast<uint8_t>(errand->source_value)});
+    std::string werr;
+    if (!link->write_control(packet, 10.0, &werr)) {
+      say("  timecode source write rejected: %s", werr.c_str());
+      rec.action("source:rejected");
+      errand->note(false, werr);
+    } else {
+      // The camera echoes a change back on the Incoming Control
+      // characteristic, so the write is not believed until the echo says so.
+      // A GATT ack only proves the bytes were taken.
+      std::this_thread::sleep_for(std::chrono::duration<double>(1.5));
+      const octo::CameraView after = link->view();
+      const bool echoed = after.has_timecode_source &&
+                          after.timecode_source == errand->source_value;
+      rec.integer("timecode_source_set", errand->source_value);
+      rec.boolean("timecode_source_echoed", echoed);
+      if (after.has_timecode_source) {
+        errand->status.has_source = true;
+        errand->status.source = after.timecode_source;
+      }
+      rec.action(echoed ? "source:ok" : "source:unverified");
+      say("  timecode source -> %lld%s",
+          static_cast<long long>(errand->source_value),
+          echoed ? " (echoed back)" : " (no echo; unverified)");
+      errand->note(echoed,
+                   echoed ? fmt("timecode source is now %lld",
+                                static_cast<long long>(errand->source_value))
+                          : "the camera did not echo the change back");
+    }
+    link->disconnect();
+    plan->seconds = opt.sync.poll;
+    log->record("cycle", rec.fields());
+    return;
+  }
+
   if (!view.has_timecode) {
     say("camera connected but sent no timecode");
     rec.action("skip:no-timecode");
+    errand->status.action = "no-timecode";
+    errand->status.connected = false;
+    errand->note(false, "the camera sent no timecode");
     link->disconnect();
     log->record("cycle", rec.fields());
     return;
@@ -485,6 +605,10 @@ void run_cycle(octo::CameraLink* link, octo::SyncState* state,
   const double want =
       octo::local_seconds_of_day(octo::wall_now() - tc_age) + offset;
   const double error = octo::wrap_delta(cam - want);
+
+  errand->status.timecode = octo::bmd::format_timecode(view.timecode);
+  errand->status.has_error = true;
+  errand->status.error_s = error;
 
   rec.str("camera_tc", octo::bmd::format_timecode(view.timecode));
   rec.num("camera_sod", cam);
@@ -557,16 +681,41 @@ void run_cycle(octo::CameraLink* link, octo::SyncState* state,
     if (!plan->message.empty()) say("%s", plan->message.c_str());
   };
 
-  const octo::Decision decision =
+  octo::Decision decision =
       octo::decide(opt.sync, *state, error, fps, cond, now_mono);
   rec.num("tolerance_s", decision.tolerance, 6);
   if (decision.since_write > 0.0) {
     rec.num("since_write_s", decision.since_write, 1);
   }
 
+  // Someone asked for this by hand. That overrules the gates that mean "there
+  // is no need" and none of the ones that mean "must not" -- see
+  // gate_is_advisory. The original verdict is logged either way, so a forced
+  // write does not quietly erase the fact that the daemon would not have made
+  // it on its own.
+  if (errand->force_sync && decision.action != octo::Action::kWrite) {
+    rec.str("gate_overridden", octo::action_name(decision.action));
+    if (octo::gate_is_advisory(decision.action)) {
+      say("  forced: overruling %s", octo::action_name(decision.action));
+      decision.action = octo::Action::kWrite;
+    }
+  }
+
+  errand->status.action = octo::action_name(decision.action);
+
   if (decision.action != octo::Action::kWrite) {
     say("%s", decision.message.c_str());
     rec.action(octo::action_name(decision.action));
+    // A gate is a refusal, not a breakdown, so a forced request is told what
+    // stopped it and counted as answered rather than as failed. The one
+    // exception is the timecode source, where the honest answer is that this
+    // camera cannot be helped until that is changed.
+    errand->note(decision.action != octo::Action::kSkipTimecodeSource,
+                 decision.action == octo::Action::kSkipTimecodeSource
+                     ? fmt("timecode source is %lld, so the clock cannot be"
+                           " set -- switch it to 0 first",
+                           static_cast<long long>(cond.timecode_source))
+                     : std::string(octo::action_name(decision.action)));
     link->disconnect();
     plan_next(error);
     log->record("cycle", rec.fields());
@@ -627,6 +776,17 @@ void run_cycle(octo::CameraLink* link, octo::SyncState* state,
       octo::judge_write(opt.sync, state, error, err2, octo::mono_now());
   rec.boolean("verified", outcome.verified);
   say("%s", outcome.message.c_str());
+
+  errand->status.has_error = true;
+  errand->status.error_s = err2;
+  errand->status.has_last_write = true;
+  errand->status.last_write_wall = octo::wall_now();
+  errand->status.writes += 1;
+  errand->status.timecode = octo::bmd::format_timecode(view.timecode);
+  errand->note(outcome.verified,
+               outcome.verified
+                   ? fmt("corrected to within %+.0fms", err2 * 1000.0)
+                   : fmt("the write did not take: still %+.3fs out", err2));
 
   switch (outcome.verdict) {
     case octo::Verdict::kOk:
@@ -738,7 +898,7 @@ int mode_scan_only(octo::CameraLink* link, const Options& opt) {
 // blaming the daemon for not correcting it.
 int mode_watch(octo::CameraLink* link, octo::SyncState* state,
                const Options& opt, octo::CamDb* db) {
-  if (!connect_camera(link, state, opt, db)) return 1;
+  if (!connect_camera(link, state, opt, db, opt.camera, nullptr)) return 1;
   std::string err;
   if (!link->subscribe(opt.sync.camera_wait, &err)) {
     std::fprintf(stderr, "octomancer-sync: %s\n", err.c_str());
@@ -844,7 +1004,7 @@ int mode_poke(octo::CameraLink* link, octo::SyncState* state,
     packets.push_back(bytes);
   }
 
-  if (!connect_camera(link, state, opt, db)) return 1;
+  if (!connect_camera(link, state, opt, db, opt.camera, nullptr)) return 1;
   std::string err;
   if (!link->subscribe(opt.sync.camera_wait, &err)) {
     std::fprintf(stderr, "octomancer-sync: %s\n", err.c_str());
@@ -949,7 +1109,7 @@ int mode_poke(octo::CameraLink* link, octo::SyncState* state,
 
 int mode_rtc_test(octo::CameraLink* link, octo::SyncState* state,
                   const Options& opt, octo::CamDb* db) {
-  if (!connect_camera(link, state, opt, db)) return 1;
+  if (!connect_camera(link, state, opt, db, opt.camera, nullptr)) return 1;
   std::string err;
   if (!link->subscribe(opt.sync.camera_wait, &err)) {
     std::fprintf(stderr, "octomancer-sync: %s\n", err.c_str());
@@ -1044,6 +1204,8 @@ void usage(FILE* out) {
       "                        is not running (default 8)\n"
       "  --socket PATH         octomancerd's socket (default %s)\n"
       "  --no-daemon           always listen directly, never ask octomancerd\n"
+      "  --control-socket PATH where `octomancer` reaches this daemon\n"
+      "  --no-control          do not serve a control socket at all\n"
       "  --log PATH            JSONL log ('' to disable, default"
       " octomancer-sync.jsonl)\n"
       "  --console PATH        send stdout and stderr here, and rotate them\n"
@@ -1133,6 +1295,7 @@ void usage(FILE* out) {
 bool parse_args(int argc, char** argv, Options* opt) {
   enum {
     kCamera = 1000, kSource, kPoll, kListen, kSocket, kNoDaemon, kLog, kOnce,
+    kControlSocket, kNoControl,
     kDryRun, kToleranceFrames, kTolerance, kWriteTolerance, kMinWriteInterval,
     kMaxFailures, kBenchSpread, kRtcBias, kNoAdaptBias, kMaxBiasStep,
     kMaxAdapts, kLead, kVerifyWait, kCameraWait, kScanTimeout, kConnectTimeout,
@@ -1167,6 +1330,8 @@ bool parse_args(int argc, char** argv, Options* opt) {
       {"listen", required_argument, nullptr, kListen},
       {"socket", required_argument, nullptr, kSocket},
       {"no-daemon", no_argument, nullptr, kNoDaemon},
+      {"control-socket", required_argument, nullptr, kControlSocket},
+      {"no-control", no_argument, nullptr, kNoControl},
       {"log", required_argument, nullptr, kLog},
       {"once", no_argument, nullptr, kOnce},
       {"dry-run", no_argument, nullptr, kDryRun},
@@ -1228,6 +1393,8 @@ bool parse_args(int argc, char** argv, Options* opt) {
       case kListen: opt->sync.listen = std::atof(optarg); break;
       case kSocket: opt->socket_path = optarg; break;
       case kNoDaemon: opt->use_daemon = false; break;
+      case kControlSocket: opt->control_path = optarg; break;
+      case kNoControl: opt->serve_control = false; break;
       case kLog: opt->log_path = optarg; break;
       case kOnce: opt->once = true; break;
       case kDryRun: opt->sync.dry_run = true; break;
@@ -1435,6 +1602,102 @@ int main(int argc, char** argv) {
   start.str("source", opt.source == Source::kMac ? "mac" : "tentacle");
   log.record("start", start.fields());
 
+  // The control socket, and the thread that answers it.
+  //
+  // A thread rather than a slice of the main loop, because the main loop
+  // spends whole seconds inside a blocking write and a control socket that
+  // goes deaf for the duration of every cycle is not a control socket. All
+  // shared state goes through Control, which holds the only lock in this
+  // program.
+  octo::Control control;
+  {
+    octo::DaemonStatus ds;
+    ds.version = OCTO_VERSION;
+    ds.started_wall = octo::wall_now();
+    ds.poll_s = opt.sync.poll;
+    ds.dry_run = opt.sync.dry_run;
+    ds.socket_path = opt.control_path;
+    control.set_daemon(ds);
+  }
+
+  std::unique_ptr<octo::Server> control_server;
+  std::thread control_thread;
+  std::atomic<bool> control_running{false};
+  if (opt.serve_control && !opt.control_path.empty()) {
+    control_server.reset(new octo::Server(
+        [&control](const std::string& line) { return control.handle(line); },
+        opt.control_path));
+    std::string cerr_msg;
+    if (!control_server->start(&cerr_msg)) {
+      // Not fatal. Syncing a camera is the job; being asked about it is a
+      // convenience, and losing the socket to a stale file or a second daemon
+      // is no reason to leave a clock wrong all night.
+      say("control socket unavailable (%s) -- carrying on without it",
+          cerr_msg.c_str());
+      control_server.reset();
+    } else {
+      control_running = true;
+      say("control socket: %s", opt.control_path.c_str());
+      control_thread = std::thread([&control_server, &control_running] {
+        while (control_running.load()) control_server->serve(200);
+      });
+    }
+  }
+
+  // Publish whatever a cycle learned, and turn the interesting parts of it
+  // into events. Everything a client can see about a camera comes through
+  // here.
+  auto publish = [&](Errand* errand, const Presence& seen) {
+    if (errand->bench.has) control.set_bench(errand->bench);
+    if (!errand->have_status) return;
+    octo::CameraStatus st = errand->status;
+    if (st.name.empty()) st.name = seen.name;
+    if (state.lead.has) {
+      st.has_lead = true;
+      st.lead_s = state.lead.lead_s;
+    }
+    if (state.drift.has) {
+      st.has_drift = true;
+      st.drift_ppm = state.drift.ppm;
+    }
+    st.connected = false;  // the cycle has let go of the camera by now
+    control.publish_camera(st);
+  };
+
+  // Which cameras have been corrected at least once since this daemon
+  // started. "For the first time" is a claim about this session, not about the
+  // body's whole history -- the database would know the latter, but someone
+  // watching a screen means the former.
+  std::set<std::string> synced_once;
+
+  auto run_errand = [&](Errand* errand, const Presence& seen) {
+    octo::PollPlan p;
+    run_cycle(link.get(), &state, opt, &log, &db, &p, errand);
+    publish(errand, seen);
+
+    const std::string& id = errand->status.id;
+    if (errand->have_status && !id.empty()) {
+      if (errand->status.has_last_write) {
+        if (errand->ok && synced_once.insert(id).second) {
+          control.emit(octo::EventKind::kFirstSync, id, errand->status.name,
+                       errand->outcome);
+        }
+        if (!errand->ok) {
+          control.emit(octo::EventKind::kSyncFailed, id, errand->status.name,
+                       errand->outcome);
+        }
+      } else if (!errand->ok && !errand->outcome.empty() &&
+                 errand->status.action != "skip:rate-limited" &&
+                 errand->status.action != "skip:in-tolerance") {
+        // A gate that means "cannot" is worth telling someone about; one that
+        // means "no need" is the daemon working correctly.
+        control.emit(octo::EventKind::kSyncFailed, id, errand->status.name,
+                     errand->outcome);
+      }
+    }
+    return p;
+  };
+
   // The camera comes and goes, and the two ways of finding that out cost
   // wildly different amounts. Asking octomancerd is a socket read; scanning
   // for it is twenty seconds of radio. So the loop below asks the cheap
@@ -1486,8 +1749,50 @@ int main(int argc, char** argv) {
       down.str("state", "down");
       down.str("camera_id", cam.id);
       log.record("camera", down.fields());
+      control.set_present(cam.id, false);
+      control.emit(octo::EventKind::kCameraLost, cam.id, cam.name,
+                   "the camera is no longer on the air");
     }
     last = cam;
+
+    // Anything asked for over the socket comes first: someone is waiting on
+    // it, and the schedule is not.
+    {
+      octo::Request req;
+      while (!g_stop && control.take_request(&req)) {
+        // A request naming several cameras is several errands. One radio means
+        // they run one after another, which is also the order they were asked
+        // for.
+        std::vector<std::string> targets = req.cameras;
+        if (targets.empty()) targets.push_back(std::string());
+
+        bool all_ok = true;
+        std::string summary;
+        for (const std::string& target : targets) {
+          Errand errand;
+          errand.camera = target;
+          errand.force_sync = req.kind == octo::RequestKind::kSync;
+          errand.set_source = req.kind == octo::RequestKind::kSetSource;
+          errand.source_value = req.source;
+          say("%s requested%s%s", octo::request_kind_name(req.kind),
+              target.empty() ? "" : " for ", target.c_str());
+
+          const octo::PollPlan p = run_errand(&errand, cam);
+          if (!errand.ok) all_ok = false;
+          if (!summary.empty()) summary += "; ";
+          const std::string who = errand.status.name.empty()
+                                      ? (target.empty() ? std::string("camera")
+                                                        : target)
+                                      : errand.status.name;
+          summary += who + ": " + errand.outcome;
+          next_cycle = octo::mono_now() + p.seconds;
+        }
+        control.finish(req.id, all_ok, summary);
+      }
+      // A request taken but abandoned -- by a signal arriving mid-drain --
+      // would otherwise sit in `running` forever, with a client polling it.
+      if (g_stop) control.requeue_running();
+    }
 
     if (now >= next_cycle) {
       const bool blind_due = now >= next_blind_check;
@@ -1499,8 +1804,8 @@ int main(int argc, char** argv) {
           say("octomancerd has not heard the camera; looking directly anyway");
         }
         next_blind_check = now + opt.sync.max_poll;
-        octo::PollPlan plan;
-        run_cycle(link.get(), &state, opt, &log, &db, &plan);
+        Errand errand;
+        const octo::PollPlan plan = run_errand(&errand, cam);
         if (opt.once) break;
         next_cycle = octo::mono_now() + plan.seconds;
       } else {
@@ -1522,6 +1827,11 @@ int main(int argc, char** argv) {
   }
 
   say("stopping");
+  if (control_thread.joinable()) {
+    control_running = false;
+    control_thread.join();
+  }
+  control_server.reset();
   log.record("stop", "");
   log.close();
   return 0;

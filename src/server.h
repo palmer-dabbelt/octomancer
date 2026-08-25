@@ -7,6 +7,7 @@
 #ifndef OCTO_SERVER_H
 #define OCTO_SERVER_H
 
+#include <functional>
 #include <string>
 #include <vector>
 
@@ -18,8 +19,17 @@ namespace octo {
 // because this is a per-user agent and its socket is not shared.
 std::string default_socket_path();
 
+// One request line in, one whole reply out. What a daemon does with the line
+// is the daemon's business; this file only moves bytes.
+using Handler = std::function<std::string(const std::string&)>;
+
+// The handler octomancerd has always had: status, json, ping, over a registry.
+Handler registry_handler(const Registry& registry);
+
 class Server {
  public:
+  explicit Server(Handler handler, std::string path);
+  // The tentacle daemon's shorthand for the above.
   Server(const Registry& registry, std::string path);
   ~Server();
 
@@ -47,7 +57,7 @@ class Server {
   std::string handle(const std::string& command) const;
   void drop(size_t index);
 
-  const Registry& registry_;
+  Handler handler_;
   std::string path_;
   int listen_fd_ = -1;
   bool bound_ = false;

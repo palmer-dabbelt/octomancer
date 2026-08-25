@@ -37,6 +37,21 @@ const char* action_name(Action a) {
   return "?";
 }
 
+bool gate_is_advisory(Action a) {
+  switch (a) {
+    case Action::kSkipInTolerance:
+    case Action::kSkipRateLimited:
+    case Action::kSkipExternal:
+      return true;
+    case Action::kWrite:
+    case Action::kSkipRecording:
+    case Action::kSkipTimecodeSource:
+    case Action::kSkipDryRun:
+      return false;
+  }
+  return false;
+}
+
 std::string format_span(double seconds) {
   if (seconds < 90.0) return fmt("%.0fs", seconds);
   if (seconds < 5400.0) return fmt("%.0fm", seconds / 60.0);

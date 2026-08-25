@@ -58,8 +58,27 @@ std::string default_socket_path() {
   return base + "/Library/Application Support/octomancer/octomancerd.sock";
 }
 
+Handler registry_handler(const Registry& registry) {
+  return [&registry](const std::string& command) -> std::string {
+    if (command == "status" || command.empty()) {
+      return render_text(registry.snapshot());
+    }
+    if (command == "json") {
+      return render_json(registry.snapshot()) + "\n";
+    }
+    if (command == "ping") {
+      return "octomancer " + std::to_string(kProtocolVersion) + "\npong\n";
+    }
+    return "octomancer " + std::to_string(kProtocolVersion) +
+           "\nerror unknown command: " + escape(command) + "\n";
+  };
+}
+
+Server::Server(Handler handler, std::string path)
+    : handler_(std::move(handler)), path_(std::move(path)) {}
+
 Server::Server(const Registry& registry, std::string path)
-    : registry_(registry), path_(std::move(path)) {}
+    : handler_(registry_handler(registry)), path_(std::move(path)) {}
 
 Server::~Server() { shutdown(); }
 
@@ -87,7 +106,7 @@ bool Server::start(std::string* err) {
       if (::connect(probe, reinterpret_cast<struct sockaddr*>(&addr),
                     sizeof addr) == 0) {
         ::close(probe);
-        if (err) *err = "another octomancerd is already listening on " + path_;
+        if (err) *err = "another daemon is already listening on " + path_;
         return false;
       }
       ::close(probe);
@@ -142,18 +161,11 @@ void Server::shutdown() {
 }
 
 std::string Server::handle(const std::string& request) const {
-  const std::string command = trim(request);
-  if (command == "status" || command.empty()) {
-    return render_text(registry_.snapshot());
+  if (!handler_) {
+    return "octomancer " + std::to_string(kProtocolVersion) +
+           "\nerror no handler\n";
   }
-  if (command == "json") {
-    return render_json(registry_.snapshot()) + "\n";
-  }
-  if (command == "ping") {
-    return "octomancer " + std::to_string(kProtocolVersion) + "\npong\n";
-  }
-  return "octomancer " + std::to_string(kProtocolVersion) +
-         "\nerror unknown command: " + escape(command) + "\n";
+  return handler_(trim(request));
 }
 
 void Server::drop(size_t index) {

@@ -264,6 +264,7 @@ const char* param_name(uint8_t g, uint8_t p) {
   if (g == kGroupConfig && p == kParamRtc) return "Config/real time clock";
   if (g == kGroupConfig && p == kParamTimezone) return "Config/timezone";
   if (g == kGroupStatus && p == kParamTimecode) return "Status/timecode";
+  if (g == kGroupOutput && p == kParamTimecodeSource) return "Output/timecode source";
   if (g == kGroupMedia && p == kParamTransport) return "Media/transport mode";
   return nullptr;
 }

@@ -70,6 +70,22 @@ inline constexpr int64_t kTransportRecord = 2;
 inline constexpr uint8_t kGroupVideo = 1;
 inline constexpr uint8_t kParamFrameRate = 9;
 
+// 4.7 is not in the published parameter table either, but a Pocket 6K Pro
+// volunteers it on connect as int8 and accepts a write to it -- the only write
+// this project has ever found that moves the timecode generator. See
+// doc/timecode-write-sweep.md.
+//
+// The two values are named for what they were observed to do rather than for
+// what Blackmagic calls them, because we do not know what Blackmagic calls
+// them. With 0 the timecode free-runs as time of day and follows the RTC,
+// which is the mode this whole program depends on. With 1 it parks at
+// 00:00:00:00 and stops, and writing the RTC has no effect on it at all.
+// Anything above 1 is clamped by the camera to 1.
+inline constexpr uint8_t kGroupOutput = 4;
+inline constexpr uint8_t kParamTimecodeSource = 7;
+inline constexpr int64_t kTimecodeSourceTimeOfDay = 0;
+inline constexpr int64_t kTimecodeSourceClip = 1;
+
 // ------------------------------------------------------------ encoding
 
 // Wrap a change-configuration command in the 4-byte header. The length field

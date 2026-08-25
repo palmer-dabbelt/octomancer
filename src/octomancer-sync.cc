@@ -511,9 +511,15 @@ void run_cycle(octo::CameraLink* link, octo::SyncState* state,
     rec.boolean("anchor_drift_shown", drift.anchor_shown);
   }
 
-  const bool recording =
+  octo::Conditions cond;
+  cond.recording =
       view.has_transport && view.transport == octo::bmd::kTransportRecord;
-  rec.boolean("recording", recording);
+  cond.has_timecode_source = view.has_timecode_source;
+  cond.timecode_source = view.timecode_source;
+  rec.boolean("recording", cond.recording);
+  if (cond.has_timecode_source) {
+    rec.integer("timecode_source", cond.timecode_source);
+  }
 
   std::string drift_note;
   if (drift.anchor_shown) {
@@ -552,7 +558,7 @@ void run_cycle(octo::CameraLink* link, octo::SyncState* state,
   };
 
   const octo::Decision decision =
-      octo::decide(opt.sync, *state, error, fps, recording, now_mono);
+      octo::decide(opt.sync, *state, error, fps, cond, now_mono);
   rec.num("tolerance_s", decision.tolerance, 6);
   if (decision.since_write > 0.0) {
     rec.num("since_write_s", decision.since_write, 1);

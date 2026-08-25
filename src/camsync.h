@@ -187,11 +187,36 @@ void forget_drift(SyncState* state);
 enum class Action {
   kWrite,
   kSkipRecording,
+  kSkipTimecodeSource,
   kSkipExternal,
   kSkipInTolerance,
   kSkipRateLimited,
   kSkipDryRun,
 };
+
+// What the camera is doing right now, in the terms the gates care about.
+//
+// A struct rather than a widening list of positional bools: two adjacent bools
+// at a call site is a swap the compiler cannot catch, and there are now two.
+struct Conditions {
+  Conditions() = default;
+  explicit Conditions(bool rec) : recording(rec) {}
+
+  bool recording = false;
+
+  // 4.7, which decides whether the camera's timecode follows its RTC at all.
+  //
+  // Unknown is deliberately not treated as wrong. A camera that has never
+  // mentioned the parameter is not the same as one that has said it is in the
+  // mode we cannot help, and refusing to sync on silence would strand every
+  // body whose firmware does not carry it -- including, possibly, every body
+  // but the one this was found on.
+  bool has_timecode_source = false;
+  int64_t timecode_source = bmd::kTimecodeSourceTimeOfDay;
+};
+
+// Whether writing the RTC could move this camera's timecode at all.
+bool timecode_follows_rtc(const Conditions& cond);
 
 const char* action_name(Action a);
 
@@ -206,7 +231,7 @@ struct Decision {
 double trigger_tolerance(const SyncOptions& opt, int fps);
 
 Decision decide(const SyncOptions& opt, const SyncState& state, double error,
-                int fps, bool recording, double now_mono);
+                int fps, const Conditions& cond, double now_mono);
 
 // What one observation says about how fast the clock is walking.
 struct Drift {

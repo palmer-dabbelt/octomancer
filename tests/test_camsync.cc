@@ -13,6 +13,7 @@
 #include "harness.h"
 
 using octo::Action;
+using octo::Conditions;
 using octo::Decision;
 using octo::SyncOptions;
 using octo::SyncState;
@@ -49,7 +50,7 @@ void test_recording_beats_everything() {
   SyncState state;
   // Wildly wrong, never written, not rate limited: still refused, because a
   // timecode jump mid-take corrupts the take.
-  const Decision d = octo::decide(opt, state, 30.0, 24, /*recording=*/true, 1000.0);
+  const Decision d = octo::decide(opt, state, 30.0, 24, Conditions(true), 1000.0);
   CHECK(d.action == Action::kSkipRecording);
 }
 
@@ -57,12 +58,12 @@ void test_external_source_backs_off() {
   SyncOptions opt = defaults();
   SyncState state;
   state.failures = opt.max_failures;
-  const Decision d = octo::decide(opt, state, 30.0, 24, false, 1000.0);
+  const Decision d = octo::decide(opt, state, 30.0, 24, Conditions(false), 1000.0);
   CHECK(d.action == Action::kSkipExternal);
 
   // One short of the limit still tries: giving up early is its own failure.
   state.failures = opt.max_failures - 1;
-  CHECK(octo::decide(opt, state, 30.0, 24, false, 1000.0).action == Action::kWrite);
+  CHECK(octo::decide(opt, state, 30.0, 24, Conditions(false), 1000.0).action == Action::kWrite);
 }
 
 void test_half_frame_threshold() {
@@ -72,18 +73,18 @@ void test_half_frame_threshold() {
   // 38 ms and 23 ms are the errors seen in a real log. Under the old
   // one-second tolerance both were "no change"; at half a frame both are
   // out of tolerance and worth acting on.
-  CHECK(octo::decide(opt, state, 0.038, 24, false, 1000.0).action == Action::kWrite);
-  CHECK(octo::decide(opt, state, 0.023, 24, false, 1000.0).action == Action::kWrite);
+  CHECK(octo::decide(opt, state, 0.038, 24, Conditions(false), 1000.0).action == Action::kWrite);
+  CHECK(octo::decide(opt, state, 0.023, 24, Conditions(false), 1000.0).action == Action::kWrite);
 
   // Just inside half a frame at 24 fps (20.8 ms) is left alone, in both
   // directions -- the sign of the error must not change the verdict.
-  CHECK(octo::decide(opt, state, 0.020, 24, false, 1000.0).action ==
+  CHECK(octo::decide(opt, state, 0.020, 24, Conditions(false), 1000.0).action ==
         Action::kSkipInTolerance);
-  CHECK(octo::decide(opt, state, -0.020, 24, false, 1000.0).action ==
+  CHECK(octo::decide(opt, state, -0.020, 24, Conditions(false), 1000.0).action ==
         Action::kSkipInTolerance);
 
   // At 60 fps the same 20 ms error is now more than half a frame.
-  CHECK(octo::decide(opt, state, 0.020, 60, false, 1000.0).action == Action::kWrite);
+  CHECK(octo::decide(opt, state, 0.020, 60, Conditions(false), 1000.0).action == Action::kWrite);
 }
 
 void test_rate_limit_holds_between_writes() {
@@ -94,29 +95,88 @@ void test_rate_limit_holds_between_writes() {
 
   // Out of tolerance, but written two minutes ago: hold. This is what keeps
   // free-running stretches long enough to measure drift across.
-  const Decision held = octo::decide(opt, state, 0.5, 24, false, 1120.0);
+  const Decision held = octo::decide(opt, state, 0.5, 24, Conditions(false), 1120.0);
   CHECK(held.action == Action::kSkipRateLimited);
   CHECK_NEAR(held.since_write, 120.0, 1e-9);
 
   // An hour and a second later, it writes.
-  CHECK(octo::decide(opt, state, 0.5, 24, false, 1000.0 + 3601.0).action ==
+  CHECK(octo::decide(opt, state, 0.5, 24, Conditions(false), 1000.0 + 3601.0).action ==
         Action::kWrite);
 
   // The rate limit is not allowed to override the recording gate.
-  CHECK(octo::decide(opt, state, 0.5, 24, true, 1120.0).action ==
+  CHECK(octo::decide(opt, state, 0.5, 24, Conditions(true), 1120.0).action ==
         Action::kSkipRecording);
 
   // In-tolerance is decided before the rate limit, so a clock that is already
   // right reports why it was left alone rather than blaming the interval.
-  CHECK(octo::decide(opt, state, 0.001, 24, false, 1120.0).action ==
+  CHECK(octo::decide(opt, state, 0.001, 24, Conditions(false), 1120.0).action ==
         Action::kSkipInTolerance);
+}
+
+// 4.7. A camera parked in the mode where its timecode does not follow the RTC
+// reports 00:00:00:00 and stops, which reaches the gates as a clock roughly
+// half a day wrong. Without this gate that is answered with an hourly RTC
+// write that cannot help, three of which in a row make the daemon conclude an
+// external source owns the camera and give up for the night.
+void test_timecode_source_gate() {
+  SyncOptions opt = defaults();
+  SyncState state;
+
+  Conditions cond;
+  cond.has_timecode_source = true;
+  cond.timecode_source = octo::bmd::kTimecodeSourceClip;
+
+  // The error here is the real shape of the problem: midnight against a
+  // mid-morning bench. Nothing about its size should get it past the gate.
+  const Decision d = octo::decide(opt, state, -43000.0, 24, cond, 1000.0);
+  CHECK(d.action == Action::kSkipTimecodeSource);
+
+  // Time-of-day is the mode the whole program depends on, and must not be
+  // gated.
+  cond.timecode_source = octo::bmd::kTimecodeSourceTimeOfDay;
+  CHECK(octo::decide(opt, state, -43000.0, 24, cond, 1000.0).action ==
+        Action::kWrite);
+
+  // Silence is not a refusal. A camera that has never mentioned 4.7 -- an
+  // older body, or one whose firmware does not carry the parameter -- must
+  // still be synced, or this gate strands every camera but the one it was
+  // found on.
+  Conditions quiet;
+  CHECK(!quiet.has_timecode_source);
+  CHECK(octo::decide(opt, state, -43000.0, 24, quiet, 1000.0).action ==
+        Action::kWrite);
+
+  // Anything the camera clamps to 1 is equally unhelpful, so the gate asks
+  // whether the source *is* time-of-day rather than whether it is Clip.
+  cond.has_timecode_source = true;
+  cond.timecode_source = 7;
+  CHECK(octo::decide(opt, state, -43000.0, 24, cond, 1000.0).action ==
+        Action::kSkipTimecodeSource);
+
+  // Recording still outranks it. Both gates refuse, but a take in progress is
+  // the more important thing to say.
+  cond.recording = true;
+  CHECK(octo::decide(opt, state, -43000.0, 24, cond, 1000.0).action ==
+        Action::kSkipRecording);
+}
+
+void test_timecode_follows_rtc() {
+  Conditions cond;
+  CHECK(octo::timecode_follows_rtc(cond));  // unknown
+
+  cond.has_timecode_source = true;
+  cond.timecode_source = octo::bmd::kTimecodeSourceTimeOfDay;
+  CHECK(octo::timecode_follows_rtc(cond));
+
+  cond.timecode_source = octo::bmd::kTimecodeSourceClip;
+  CHECK(!octo::timecode_follows_rtc(cond));
 }
 
 void test_dry_run_decides_but_does_not_write() {
   SyncOptions opt = defaults();
   opt.dry_run = true;
   SyncState state;
-  const Decision d = octo::decide(opt, state, 5.0, 24, false, 1000.0);
+  const Decision d = octo::decide(opt, state, 5.0, 24, Conditions(false), 1000.0);
   CHECK(d.action == Action::kSkipDryRun);
 }
 
@@ -155,7 +215,7 @@ void test_three_bad_writes_stop_the_daemon() {
     CHECK(!out.verified);
   }
   CHECK_EQ(state.failures, opt.max_failures);
-  CHECK(octo::decide(opt, state, 40.0, 24, false, 9000.0).action ==
+  CHECK(octo::decide(opt, state, 40.0, 24, Conditions(false), 9000.0).action ==
         Action::kSkipExternal);
 }
 
@@ -322,7 +382,7 @@ void test_forgetting_reopens_the_external_gate() {
   CHECK_EQ(state.failures, 0);
   CHECK_EQ(state.adapts, 0);
   CHECK_EQ(state.rtc_bias, -75);
-  const Decision d = octo::decide(opt, state, 2.0, 24, false, 0.0);
+  const Decision d = octo::decide(opt, state, 2.0, 24, Conditions(false), 0.0);
   CHECK(d.action == Action::kWrite);
 }
 
@@ -338,11 +398,11 @@ void test_adapting_write_is_not_held_by_the_rate_limit() {
   state.last_write_mono = 0.0;
 
   state.adapts = 0;
-  Decision held = octo::decide(opt, state, 2.0, 24, false, 60.0);
+  Decision held = octo::decide(opt, state, 2.0, 24, Conditions(false), 60.0);
   CHECK(held.action == Action::kSkipRateLimited);
 
   state.adapts = 1;  // mid-convergence
-  Decision retry = octo::decide(opt, state, 2.0, 24, false, 60.0);
+  Decision retry = octo::decide(opt, state, 2.0, 24, Conditions(false), 60.0);
   CHECK(retry.action == Action::kWrite);
 }
 
@@ -595,6 +655,8 @@ int main() {
   test_external_source_backs_off();
   test_half_frame_threshold();
   test_rate_limit_holds_between_writes();
+  test_timecode_source_gate();
+  test_timecode_follows_rtc();
   test_dry_run_decides_but_does_not_write();
   test_good_write_is_not_a_failure();
   test_three_bad_writes_stop_the_daemon();

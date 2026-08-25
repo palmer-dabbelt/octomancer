@@ -425,6 +425,11 @@ void MacCameraLink::on_incoming(const uint8_t* data, size_t len) {
     std::lock_guard<std::mutex> lock(mu);
     for (const bmd::Value& v : values) {
       live.state[{v.group, v.param}] = v;
+      if (v.group == bmd::kGroupOutput && v.param == bmd::kParamTimecodeSource &&
+          !v.ints.empty()) {
+        live.has_timecode_source = true;
+        live.timecode_source = v.ints[0];
+      }
       if (v.group == bmd::kGroupMedia && v.param == bmd::kParamTransport &&
           !v.ints.empty()) {
         live.has_transport = true;

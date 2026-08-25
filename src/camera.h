@@ -54,6 +54,14 @@ struct CameraView {
   bool has_fps = false;
   int fps = 0;
 
+  // 4.7, which decides whether the timecode follows the RTC at all. Pulled out
+  // of `state` rather than left in it because it gates writing: a camera that
+  // has not said which mode it is in is a different thing from one that has
+  // said it is in the mode we cannot help, and a map lookup returning nothing
+  // blurs the two.
+  bool has_timecode_source = false;
+  int64_t timecode_source = 0;
+
   // Every (group, parameter) the camera has volunteered, for the probe modes.
   std::map<std::pair<int, int>, bmd::Value> state;
 };

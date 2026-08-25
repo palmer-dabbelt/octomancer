@@ -28,6 +28,7 @@ const char* action_name(Action a) {
   switch (a) {
     case Action::kWrite: return "write";
     case Action::kSkipRecording: return "skip:recording";
+    case Action::kSkipTimecodeSource: return "skip:timecode-source";
     case Action::kSkipExternal: return "skip:external-suspected";
     case Action::kSkipInTolerance: return "skip:in-tolerance";
     case Action::kSkipRateLimited: return "skip:rate-limited";
@@ -49,14 +50,36 @@ double trigger_tolerance(const SyncOptions& opt, int fps) {
   return opt.tolerance_frames / static_cast<double>(rate);
 }
 
+bool timecode_follows_rtc(const Conditions& cond) {
+  if (!cond.has_timecode_source) return true;  // silence is not a refusal
+  return cond.timecode_source == bmd::kTimecodeSourceTimeOfDay;
+}
+
 Decision decide(const SyncOptions& opt, const SyncState& state, double error,
-                int fps, bool recording, double now_mono) {
+                int fps, const Conditions& cond, double now_mono) {
   Decision d;
   d.tolerance = trigger_tolerance(opt, fps);
 
-  if (recording) {
+  if (cond.recording) {
     d.action = Action::kSkipRecording;
     d.message = "  gate: camera is RECORDING -- leaving the clock alone";
+    return d;
+  }
+
+  // Before anything is judged about the error, ask whether the error is even
+  // ours to fix. With 4.7 set away from time-of-day the camera parks its
+  // timecode at 00:00:00:00 and stops, so the daemon reads a clock roughly
+  // twelve hours wrong and -- without this gate -- answers with an RTC write
+  // that cannot possibly help, because in that mode the timecode is not
+  // following the RTC. It would then do it again every hour, forever, and
+  // count each one as a failure until it concluded an external source owned
+  // the camera. The honest answer is to stop and say why.
+  if (!timecode_follows_rtc(cond)) {
+    d.action = Action::kSkipTimecodeSource;
+    d.message = fmt("  gate: timecode source is %lld, not time-of-day --"
+                    " the timecode does not follow the RTC, so setting it"
+                    " would change nothing",
+                    static_cast<long long>(cond.timecode_source));
     return d;
   }
 

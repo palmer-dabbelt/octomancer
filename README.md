@@ -126,6 +126,25 @@ confirmation, so a box parked near the threshold cannot spam you.
 `doc/service-notes.md` covers the architecture, the wire protocol, the
 threading, and why drift is refused rather than estimated from short samples.
 
+### One of each, at a time
+
+Each daemon takes a lock before it starts, so a second one refuses rather than
+running alongside the first:
+
+```
+$ octomancer-sync
+octomancer-sync: another one is already running (pid 14271)
+```
+
+Two of them connect to the same camera and share one file of learned biases,
+and neither looks broken while they do it -- they just quietly disagree about
+what the camera reads. The lock is held by the open file rather than written
+into it, so a daemon that is killed outright does not lock its successor out.
+
+The modes that never write anything take no lock and can be run next to a
+running daemon: `--dry-run`, `--scan-only`, `--watch` and `--poke` for
+`octomancer-sync`, and `--probe` for `octomancerd`.
+
 ## Nothing is written until you say so
 
 **Octomancer will not change any camera it has not been told it may.** A fresh

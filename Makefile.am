@@ -38,6 +38,8 @@ libocto_a_SOURCES = \
 	src/jsonlog.h \
 	src/logscan.cc \
 	src/logscan.h \
+	src/proclock.cc \
+	src/proclock.h \
 	src/proto.cc \
 	src/proto.h \
 	src/registry.cc \
@@ -210,6 +212,7 @@ check_PROGRAMS = \
 	tests/test_control \
 	tests/test_jsonlog \
 	tests/test_logscan \
+	tests/test_proclock \
 	tests/test_proto \
 	tests/test_registry \
 	tests/test_tentacle \
@@ -242,6 +245,9 @@ tests_test_camdb_LDADD = libocto.a
 
 tests_test_control_SOURCES = tests/test_control.cc tests/harness.h
 tests_test_control_LDADD = libocto.a
+
+tests_test_proclock_SOURCES = tests/test_proclock.cc tests/harness.h
+tests_test_proclock_LDADD = libocto.a
 
 tests_test_jsonlog_SOURCES = tests/test_jsonlog.cc tests/harness.h
 tests_test_jsonlog_LDADD = libocto.a

@@ -24,6 +24,7 @@
 #include "client.h"
 #include "jsonlog.h"
 #include "proto.h"
+#include "proclock.h"
 #include "registry.h"
 #include "render.h"
 #include "scanner.h"
@@ -47,6 +48,7 @@ void on_signal(int) {
 
 struct Options {
   std::string socket_path = octo::default_socket_path();
+  std::string lock_path = octo::default_lock_path("octomancerd");
   std::string log_path;
   std::string console_path;
   std::string notify_command;
@@ -65,6 +67,8 @@ void usage(FILE* out) {
       "Watch Tentacle Sync boxes over BLE and serve their state on a socket.\n"
       "\n"
       "  --socket PATH         control socket (default %s)\n"
+      "  --lock PATH           the file that keeps a second one of these from\n"
+      "                        starting. --probe does not take it.\n"
       "  --log PATH            append JSONL observations here\n"
       "  --log-interval SEC    how often to log a summary (default 60)\n"
       "  --console PATH        send stdout and stderr here, and rotate them.\n"
@@ -99,12 +103,13 @@ void usage(FILE* out) {
 bool parse_args(int argc, char** argv, Options* opt) {
   enum {
     kSocket = 1000, kLog, kLogInterval, kConsole, kLogMax, kLogKeep,
-    kProbe, kForeground, kQuiet,
+    kProbe, kForeground, kQuiet, kLockFile,
     kThreshold, kClear, kConfirm, kRenotify, kNotify,
     kWindow, kStale, kDriftSpan, kCameraGone, kVersion, kHelp,
   };
   static const struct option longs[] = {
       {"socket", required_argument, nullptr, kSocket},
+      {"lock", required_argument, nullptr, kLockFile},
       {"log", required_argument, nullptr, kLog},
       {"log-interval", required_argument, nullptr, kLogInterval},
       {"console", required_argument, nullptr, kConsole},
@@ -132,6 +137,7 @@ bool parse_args(int argc, char** argv, Options* opt) {
     if (c == -1) break;
     switch (c) {
       case kSocket: opt->socket_path = optarg; break;
+      case kLockFile: opt->lock_path = optarg; break;
       case kLog: opt->log_path = optarg; break;
       case kLogInterval: opt->log_interval = std::atof(optarg); break;
       case kConsole: opt->console_path = optarg; break;
@@ -279,6 +285,25 @@ int main(int argc, char** argv) {
   }
   ::signal(SIGINT, on_signal);
   ::signal(SIGTERM, on_signal);
+
+  // One listener. A second would scan the same radio and keep a second copy of
+  // the bench's history, and the two would drift apart. A --probe run is a
+  // hand-run look at what is in the room and keeps nothing, so it is allowed
+  // alongside the daemon.
+  octo::ProcLock lock;
+  if (opt.probe_seconds <= 0.0 && !opt.lock_path.empty()) {
+    long holder = 0;
+    std::string lock_err;
+    if (!lock.acquire(opt.lock_path, &holder, &lock_err)) {
+      std::fprintf(stderr, "octomancerd: %s\n", lock_err.c_str());
+      if (holder > 0) {
+        std::fprintf(stderr,
+                     "  Stop that one first, or use --probe to listen"
+                     " alongside it.\n  Lock: %s\n", opt.lock_path.c_str());
+      }
+      return 1;
+    }
+  }
 
   octo::Registry registry(opt.policy);
   std::string err;

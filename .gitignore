@@ -43,6 +43,7 @@
 /tests/test_control
 /tests/test_jsonlog
 /tests/test_logscan
+/tests/test_proclock
 /tests/test_proto
 /tests/test_registry
 /tests/test_tentacle

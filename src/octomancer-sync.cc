@@ -35,6 +35,7 @@
 #include "camera.h"
 #include "camconf.h"
 #include "camdb.h"
+#include "proclock.h"
 #include "camsync.h"
 #include "client.h"
 #include "control.h"
@@ -91,6 +92,7 @@ struct Options {
   // which is octomancerd's and is read, not served.
   std::string control_path = octo::default_control_socket_path();
   bool serve_control = true;
+  std::string lock_path = octo::default_lock_path("octomancer-sync");
 
   // Read, never written, by this program. See camconf.h.
   std::string camconf_path = octo::default_camera_config_path();
@@ -1241,6 +1243,9 @@ void usage(FILE* out) {
       "  --no-daemon           always listen directly, never ask octomancerd\n"
       "  --control-socket PATH where `octomancer` reaches this daemon\n"
       "  --no-control          do not serve a control socket at all\n"
+      "  --lock PATH           the file that keeps a second one of these from\n"
+      "                        starting. The modes that never write -- and\n"
+      "                        --dry-run among them -- do not take it.\n"
       "  --camera-config PATH  per-camera permissions, read-only to this\n"
       "                        program (default ~/.octomancer/cameras.conf)\n"
       "  --log PATH            JSONL log ('' to disable, default"
@@ -1332,7 +1337,7 @@ void usage(FILE* out) {
 bool parse_args(int argc, char** argv, Options* opt) {
   enum {
     kCamera = 1000, kSource, kPoll, kListen, kSocket, kNoDaemon, kLog, kOnce,
-    kControlSocket, kNoControl, kCameraConfig,
+    kControlSocket, kNoControl, kCameraConfig, kLockFile,
     kDryRun, kToleranceFrames, kTolerance, kWriteTolerance, kMinWriteInterval,
     kMaxFailures, kBenchSpread, kRtcBias, kNoAdaptBias, kMaxBiasStep,
     kMaxAdapts, kLead, kVerifyWait, kCameraWait, kScanTimeout, kConnectTimeout,
@@ -1369,6 +1374,7 @@ bool parse_args(int argc, char** argv, Options* opt) {
       {"no-daemon", no_argument, nullptr, kNoDaemon},
       {"control-socket", required_argument, nullptr, kControlSocket},
       {"no-control", no_argument, nullptr, kNoControl},
+      {"lock", required_argument, nullptr, kLockFile},
       {"camera-config", required_argument, nullptr, kCameraConfig},
       {"log", required_argument, nullptr, kLog},
       {"once", no_argument, nullptr, kOnce},
@@ -1433,6 +1439,7 @@ bool parse_args(int argc, char** argv, Options* opt) {
       case kNoDaemon: opt->use_daemon = false; break;
       case kControlSocket: opt->control_path = optarg; break;
       case kNoControl: opt->serve_control = false; break;
+      case kLockFile: opt->lock_path = optarg; break;
       case kCameraConfig: opt->camconf_path = optarg; break;
       case kLog: opt->log_path = optarg; break;
       case kOnce: opt->once = true; break;
@@ -1580,6 +1587,29 @@ int main(int argc, char** argv) {
                               opt.mode == Mode::kPoke ||
                               opt.sync.dry_run;
   if (read_only_mode && !opt.camdb_explicit) opt.camdb_path.clear();
+
+  // One writer. The same set of modes that have nothing worth recording are
+  // the ones meant to be run next to a live daemon, so they are also the ones
+  // that do not take the lock -- what is being made exclusive is changing a
+  // camera and keeping the notebook, not looking at either.
+  octo::ProcLock lock;
+  if (!read_only_mode && !opt.lock_path.empty()) {
+    long holder = 0;
+    std::string lock_err;
+    if (!lock.acquire(opt.lock_path, &holder, &lock_err)) {
+      std::fprintf(stderr, "octomancer-sync: %s\n", lock_err.c_str());
+      if (holder > 0) {
+        std::fprintf(stderr,
+                     "  Two of these connect to the same camera and share one"
+                     " database, and neither\n"
+                     "  looks broken while they disagree. Stop that one first,"
+                     " or use --dry-run\n"
+                     "  to watch what it would do without touching anything.\n"
+                     "  Lock: %s\n", opt.lock_path.c_str());
+      }
+      return 1;
+    }
+  }
 
   octo::CamDb db;
   if (!db.open(opt.camdb_path, opt.camdb, &err)) {

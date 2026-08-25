@@ -130,6 +130,42 @@ So the timecode is at **offset 8, little-endian BCD**, and it is reported as the
 undocumented parameter 9.4. Notifications arrive roughly every other frame
 (~7.5 Hz on a 24 fps body), and the frames field counts 0-23.
 
+## Open question: can the Timecode characteristic be written?
+
+The Timecode characteristic `6D8F2110-...` is **not a separate service** -- it
+lives inside the same Blackmagic Camera Service as the SDI tunnel. But it *is* a
+separate pipe, and everything above only ever wrote to Outgoing Camera Control.
+Writing to the Timecode characteristic directly has **not yet been tested on
+hardware** (the camera was powered down when the question came up).
+
+The doc describes this characteristic only as a source of notifications, and
+says nothing about writing to it. That is weak evidence: the same paragraph also
+claims the payload is a bare 32-bit BCD number, and the camera in fact sends a
+12-byte wrapped SDI message. So the doc does not reliably describe this
+characteristic, and a write is worth trying on its own terms.
+
+`--tc-char-test` tries three payload shapes, since nothing tells us which would
+be right:
+
+| Shape | Rationale |
+| --- | --- |
+| bare 32-bit BCD, little-endian | matches how the camera *reports* the value |
+| bare 32-bit BCD, big-endian | matches how the doc *writes* it (`0x09125310`) |
+| 12-byte wrapped SDI message | byte-for-byte what the camera itself emits |
+
+It also prints the characteristic's advertised GATT properties first. If `write`
+is absent the test still writes, because an undeclared property is not proof of
+refusal -- and a rejection carries more information than an assumption.
+
+```
+.venv/bin/python scripts/timecode_probe.py --name <addr> --tc-char-test
+```
+
+Interpreting the result: a GATT rejection means the camera refuses writes here
+outright. A GATT ack with the timecode still free-running time-of-day means the
+same silent-ignore behaviour we already saw on the SDI tunnel. Only a timecode
+that jumps to the target counts as success.
+
 ## Findings against a Pocket Cinema Camera 6K Pro (2026-08-24)
 
 **Reading timecode over BLE works well.** The camera runs time-of-day timecode,

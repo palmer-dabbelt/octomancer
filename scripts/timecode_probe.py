@@ -330,6 +330,15 @@ async def read_text(client, uuid, label):
         return None
 
 
+def find_char(client, uuid):
+    """Return the characteristic object for uuid, or None."""
+    for svc in client.services:
+        for ch in svc.characteristics:
+            if ch.uuid.lower() == uuid.lower():
+                return ch
+    return None
+
+
 def dump_services(client):
     print("\nGATT services advertised by this device:")
     for svc in client.services:
@@ -338,6 +347,82 @@ def dump_services(client):
         for ch in svc.characteristics:
             print("      %s  %-28s %s"
                   % (ch.uuid, ",".join(ch.properties), ch.description))
+
+
+async def timecode_char_test(client, seen, when, args):
+    """Can we write timecode straight to the Timecode characteristic?
+
+    The doc (p109) only ever describes this characteristic as a source of
+    notifications, but it also describes the notification payload as a bare
+    32-bit BCD number when the camera actually sends a 12-byte wrapped SDI
+    message. So the doc is not a reliable guide to what this characteristic
+    does, and a write is worth trying on its own terms -- it is a different
+    pipe from the SDI tunnel.
+
+    We try three payload shapes, because there is no documentation telling us
+    which (if any) is right:
+
+      1. bare 32-bit BCD, little-endian   -- matches how the camera REPORTS it
+      2. bare 32-bit BCD, big-endian      -- matches how the doc WRITES it
+                                             (09:12:53:10 = 0x09125310)
+      3. the full 12-byte wrapped SDI message, byte-for-byte in the shape the
+         camera itself emits (reserved = 0xff, group 9 param 4)
+    """
+    ch = find_char(client, CH_TIMECODE)
+    if ch is None:
+        print("\nno Timecode characteristic on this device -- cannot test")
+        return 1
+
+    props = ",".join(ch.properties)
+    print("\nTimecode characteristic properties: %s" % props)
+    writable = any(p in ch.properties for p in
+                   ("write", "write-without-response", "authenticated-signed-writes"))
+    if not writable:
+        print("  the camera does NOT advertise any write property here.")
+        print("  Writing anyway -- an undeclared property is not proof of")
+        print("  refusal, and we would rather see the error than assume it.")
+
+    h, m, s, f = when.hour, when.minute, when.second, args.frames
+    word = encode_time(h, m, s, f)
+    target = "%02d:%02d:%02d:%02d" % (h, m, s, f)
+
+    variants = [
+        ("bare BCD little-endian", struct.pack("<I", word)),
+        ("bare BCD big-endian",    struct.pack(">I", word)),
+        ("wrapped SDI message (as the camera emits it)",
+         bytes([BROADCAST, 8, CMD_CHANGE_CONFIG, 0xff,
+                GROUP_STATUS, PARAM_TIMECODE, TYPE_INT32, OP_ASSIGN])
+         + struct.pack("<I", word)),
+    ]
+
+    print("\ntrying to set timecode to %s via the Timecode characteristic" % target)
+    results = []
+    for label, payload in variants:
+        before = seen[-1] if seen else "<none yet>"
+        print("\n  -- %s --" % label)
+        print("     bytes: %s" % hexdump(payload))
+        acked, err = True, None
+        try:
+            await client.write_gatt_char(CH_TIMECODE, payload, response=True)
+        except Exception as exc:
+            acked, err = False, exc
+            print("     write REJECTED: %s: %s" % (type(exc).__name__, exc))
+        if acked:
+            print("     write acked (GATT only -- says nothing about effect)")
+        await asyncio.sleep(args.settle)
+        after = seen[-1] if seen else "<none yet>"
+        print("     timecode before: %s" % before)
+        print("     timecode after:  %s" % after)
+        results.append((label, acked, err, after))
+
+    print("\n---- Timecode characteristic write summary ----")
+    print("target was %s" % target)
+    for label, acked, err, after in results:
+        state = "acked" if acked else "rejected (%s)" % type(err).__name__
+        print("  %-46s %-28s last TC %s" % (label, state, after))
+    print("\nA camera that took any of these would show a timecode jumping to")
+    print("roughly %s. Free-running time-of-day means it did not." % target)
+    return 0
 
 
 async def control_test(client, latest, args):
@@ -522,6 +607,11 @@ async def run(args):
                 print("last: %s" % seen[-1])
             return 0
 
+        if args.tc_char_test:
+            print("\nletting timecode settle %.1fs before writing ..." % args.settle)
+            await asyncio.sleep(args.settle)
+            return await timecode_char_test(client, seen, when, args)
+
         if args.control_test:
             return await control_test(client, latest, args)
 
@@ -608,6 +698,9 @@ def main():
                         "timecode = set group 9.4 (undocumented, what the camera "
                         "reports); both = try each in turn")
     p.add_argument("--dry-run", action="store_true", help="print the packet and exit, no Bluetooth")
+    p.add_argument("--tc-char-test", action="store_true",
+                   help="try writing timecode DIRECTLY to the Timecode "
+                        "characteristic instead of the SDI tunnel")
     p.add_argument("--control-test", action="store_true",
                    help="briefly change and restore white balance, to prove whether "
                         "the camera obeys control writes at all")

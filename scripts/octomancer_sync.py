@@ -15,9 +15,16 @@ Gates, all of which are logged with the reason:
 
   * **Recording.** Never touch the clock while transport mode (10.1) says
     Record. Jumping timecode mid-take corrupts the take.
-  * **Already close enough.** Below --tolerance (default 1 s) leave it alone.
-    The RTC is settable only in whole seconds, so chasing anything tighter
-    than that just means writing constantly to no benefit.
+  * **Already close enough.** Below the trigger threshold -- half a frame by
+    default, scaled to whatever frame rate the camera reports -- leave it
+    alone. The RTC field is whole seconds, but the write is timed so the value
+    lands on a second boundary, so sub-frame accuracy is actually reachable.
+    Half a frame is about the finest target worth naming against a camera that
+    reports whole frames.
+  * **Written recently.** At most one write per --min-write-interval (default
+    an hour). A half-frame threshold means nearly every cycle wants to write,
+    and re-jamming the clock every minute would destroy the very thing the log
+    exists to measure: the free-running stretches drift is computed from.
   * **Externally jam-synced.** There is no protocol field that reports this, so
     it is detected behaviourally: if a write does not take, something else is
     driving the camera's timecode. After --max-failures consecutive misses the
@@ -224,6 +231,27 @@ def camera_sod(view, fps):
     return h * 3600 + m * 60 + s + (f / float(fps) if fps else 0.0)
 
 
+def fmt_dur(seconds):
+    if seconds < 90:
+        return "%.0fs" % seconds
+    if seconds < 5400:
+        return "%.0fm" % (seconds / 60.0)
+    return "%.1fh" % (seconds / 3600.0)
+
+
+def trigger_tolerance(args, fps):
+    """How far off the camera has to be before a write is worth making.
+
+    In frames rather than seconds by default, because "close enough" means
+    different things at 24 and 60 fps, and because a frame is the camera's own
+    unit of measurement: it reports whole frames, so below half a frame there
+    is nothing left to resolve, only quantisation.
+    """
+    if args.tolerance is not None:
+        return args.tolerance
+    return args.tolerance_frames / float(fps or args.fps or 24)
+
+
 async def aligned_write(client, target_sod_at, offset, bias, args, log):
     """Write the RTC so the value lands on a second boundary.
 
@@ -378,11 +406,31 @@ async def _cycle_body(state, args, log, rec):
         state["last_obs"] = (now_mono, error)
         state["wrote_since_obs"] = False
 
+        # Drift since the last *write*, which is the number worth showing.
+        # Consecutive observations are a poll interval apart, so their
+        # difference is almost pure frame quantisation -- 42 ms across 60 s
+        # invents 700 ppm of nothing. This anchor only moves when the clock is
+        # actually set, so the lever arm grows all the way to the next write,
+        # which is what makes an hourly write rate worth having.
+        anchor = state.get("anchor")
+        if anchor is None:
+            state["anchor"] = anchor = (now_mono, error)
+        span = now_mono - anchor[0]
+        if span > 5:
+            rec["anchor_span_s"] = round(span, 1)
+            rec["anchor_drift_ppm"] = round((error - anchor[1]) / span * 1e6, 2)
+            rec["anchor_drift_shown"] = span >= args.min_drift_interval
+
         recording = bool(view.transport) and view.transport[0] == TRANSPORT_RECORD
         rec["recording"] = recording
 
-        drift_note = ("  drift %+.1f ppm" % rec["drift_ppm"]
-                      if rec.get("drift_shown") else "")
+        if rec.get("anchor_drift_shown"):
+            drift_note = ("  drift %+.1f ppm over %s"
+                          % (rec["anchor_drift_ppm"], fmt_dur(span)))
+        elif rec.get("drift_shown"):
+            drift_note = "  drift %+.1f ppm" % rec["drift_ppm"]
+        else:
+            drift_note = ""
         log.say("tentacles %+.3fs (%d boxes, spread %.3fs) | camera %s "
                 "err %+.3fs%s"
                 % (offset, len(boxes), spread, rec["camera_tc"], error,
@@ -400,9 +448,26 @@ async def _cycle_body(state, args, log, rec):
             rec["action"] = "skip:external-suspected"
             return
 
-        if abs(error) <= args.tolerance:
-            log.say("  within %.2fs tolerance -- no change" % args.tolerance)
+        tol = trigger_tolerance(args, fps)
+        rec["tolerance_s"] = round(tol, 6)
+        if abs(error) <= tol:
+            log.say("  within %.0fms tolerance -- no change" % (tol * 1000))
             rec["action"] = "skip:in-tolerance"
+            return
+
+        # The threshold above decides whether the clock is wrong; this decides
+        # whether it is worth doing anything about it yet. They are separate
+        # questions once the threshold is tight enough that the answer to the
+        # first one is nearly always yes.
+        last_write = state.get("last_write_mono")
+        if last_write is not None and \
+                now_mono - last_write < args.min_write_interval:
+            since = now_mono - last_write
+            log.say("  off %+.3fs, but wrote %s ago -- holding for %s"
+                    % (error, fmt_dur(since),
+                       fmt_dur(args.min_write_interval - since)))
+            rec["action"] = "skip:rate-limited"
+            rec["since_write_s"] = round(since, 1)
             return
 
         if args.dry_run:
@@ -413,6 +478,7 @@ async def _cycle_body(state, args, log, rec):
         bias = state.get("rtc_bias", args.rtc_bias)
         when, latency, pkt = await aligned_write(
             client, want, offset, bias, args, log)
+        state["last_write_mono"] = time.monotonic()
         rec["write_utc"] = when.strftime("%H:%M:%S")
         rec["write_latency_s"] = round(latency, 4)
         rec["rtc_bias"] = bias
@@ -442,12 +508,18 @@ async def _cycle_body(state, args, log, rec):
         # residual is treated as the bias being wrong and fed back, and only a
         # write that still misses after the bias has been given a fair chance
         # to converge counts as a failure.
-        ok = abs(err2) <= args.tolerance
+        # Deliberately looser than the trigger threshold. This asks "did the
+        # write land where we asked", not "is the clock perfect now" -- judging
+        # a write against half a frame would mark every good write a failure,
+        # and --max-failures of those in a row is exactly what makes the daemon
+        # conclude an external source owns the camera and stop writing at all.
+        ok = abs(err2) <= args.write_tolerance
         improved = abs(err2) < abs(error) - 0.25
         adapts = state.get("adapts", 0)
         rec["verified"] = bool(ok or improved)
         state["wrote_since_obs"] = True
         state["last_obs"] = (time.monotonic(), err2)
+        state["anchor"] = state["last_obs"]
 
         if ok or improved:
             state["failures"] = 0
@@ -459,8 +531,12 @@ async def _cycle_body(state, args, log, rec):
             # converges. This body's offset is not a constant of nature: it
             # was -75s before a power cycle and 0 after one, so the bias has
             # to be learned rather than configured.
-            if abs(err2) > args.tolerance and args.adapt_bias:
-                state["rtc_bias"] = bias + int(round(-err2))
+            # The bias is a whole number of seconds, so a sub-second residual
+            # cannot move it -- and now that the tolerance is half a frame,
+            # testing against it would just log a no-op adjustment every write.
+            residual = int(round(-err2))
+            if residual and args.adapt_bias:
+                state["rtc_bias"] = bias + residual
                 rec["rtc_bias_next"] = state["rtc_bias"]
                 log.say("  learned: RTC bias %+ds -> %+ds"
                         % (bias, state["rtc_bias"]))
@@ -504,11 +580,19 @@ async def main_async(args):
     except (NotImplementedError, RuntimeError):
         pass
 
-    log.say("octomancer sync starting -- poll every %.0fs, tolerance %.2fs, "
-            "%s" % (args.poll, args.tolerance,
-                    "DRY RUN" if args.dry_run else "will write"))
+    tol_desc = ("%.3fs" % args.tolerance if args.tolerance is not None
+                else "%g frame" % args.tolerance_frames
+                + ("" if args.tolerance_frames == 1 else "s"))
+    log.say("octomancer sync starting -- poll every %.0fs, tolerance %s, "
+            "write at most once per %s, %s"
+            % (args.poll, tol_desc, fmt_dur(args.min_write_interval),
+               "DRY RUN" if args.dry_run else "will write"))
     log.record({"event": "start", "poll_s": args.poll,
-                "tolerance_s": args.tolerance, "rtc_bias_s": args.rtc_bias,
+                "tolerance_s": args.tolerance,
+                "tolerance_frames": args.tolerance_frames,
+                "write_tolerance_s": args.write_tolerance,
+                "min_write_interval_s": args.min_write_interval,
+                "rtc_bias_s": args.rtc_bias,
                 "dry_run": bool(args.dry_run)})
 
     while not stopping.is_set():
@@ -546,8 +630,23 @@ def main():
                    help="how often to touch the camera (default 60)")
     p.add_argument("--listen", type=float, default=8.0, metavar="SECONDS",
                    help="how long to listen for Tentacles each cycle (default 8)")
-    p.add_argument("--tolerance", type=float, default=1.0, metavar="SECONDS",
-                   help="leave the clock alone if it is this close (default 1)")
+    p.add_argument("--tolerance", type=float, default=None, metavar="SECONDS",
+                   help="leave the clock alone if it is this close; overrides"
+                        " --tolerance-frames")
+    p.add_argument("--tolerance-frames", type=float, default=0.5,
+                   metavar="FRAMES",
+                   help="the same threshold in frames, at whatever rate the"
+                        " camera reports (default 0.5)")
+    p.add_argument("--write-tolerance", type=float, default=1.0,
+                   metavar="SECONDS",
+                   help="how close a write has to land to count as having"
+                        " taken (default 1); looser than --tolerance on"
+                        " purpose, see --max-failures")
+    p.add_argument("--min-write-interval", type=float, default=3600.0,
+                   metavar="SECONDS",
+                   help="never write more often than this (default 3600), so"
+                        " there are long free-running stretches to measure"
+                        " drift across")
     p.add_argument("--rtc-bias", type=int, default=0, metavar="SECONDS",
                    help="starting guess for the camera's own RTC offset; it is"
                         " learned from the first write, so 0 is fine (default 0)")

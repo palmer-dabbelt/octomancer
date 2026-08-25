@@ -244,9 +244,11 @@ async def aligned_write(client, target_sod_at, offset, bias, args, log):
 
     send_at = datetime.now(timezone.utc)
     when = send_at + timedelta(seconds=offset + bias)
-    # Force the value to the exact whole second we aimed at, rather than
-    # re-truncating whatever the clock says at this instant.
-    when = when.replace(microsecond=0)
+    # Round to the nearest second, do NOT truncate. We deliberately send
+    # `lead` early, so the value sitting in `when` is a hair *below* the whole
+    # second we aimed at -- truncating it throws away a whole second and the
+    # camera lands ~1 s slow every single time.
+    when = (when + timedelta(seconds=0.5)).replace(microsecond=0)
     pkt = rtc_packet(when, 0)
     t0 = time.monotonic()
     await client.write_gatt_char(CH_OUTGOING_CTRL, pkt, response=True)
@@ -413,13 +415,23 @@ async def cycle(state, args, log):
         err2 = wrap_delta(cam2 - (secs_of_day(datetime.now()) + offset))
         rec["error_after_s"] = round(err2, 4)
         rec["camera_tc_after"] = "%02d:%02d:%02d:%02d" % view.tc
-        moved = abs(err2) < abs(error) - 0.25 or abs(err2) <= args.tolerance
-        rec["verified"] = bool(moved)
+        # "The error did not change" is NOT evidence the write was ignored.
+        # If the camera was already sitting where this write puts it, a
+        # perfectly applied write moves nothing -- the same trap that made the
+        # original RTC probe conclude group 7.0 was unimplemented. So a
+        # residual is treated as the bias being wrong and fed back, and only a
+        # write that still misses after the bias has been given a fair chance
+        # to converge counts as a failure.
+        ok = abs(err2) <= args.tolerance
+        improved = abs(err2) < abs(error) - 0.25
+        adapts = state.get("adapts", 0)
+        rec["verified"] = bool(ok or improved)
         state["wrote_since_obs"] = True
         state["last_obs"] = (time.monotonic(), err2)
 
-        if moved:
+        if ok or improved:
             state["failures"] = 0
+            state["adapts"] = 0
             rec["action"] = "write:ok"
             log.say("  verified: error %+.3fs -> %+.3fs" % (error, err2))
             # A residual after a verified write means the bias is wrong. Fold
@@ -428,22 +440,29 @@ async def cycle(state, args, log):
             # was -75s before a power cycle and 0 after one, so the bias has
             # to be learned rather than configured.
             if abs(err2) > args.tolerance and args.adapt_bias:
-                step = int(round(-err2))
-                if abs(step) > args.max_bias_step:
-                    step = args.max_bias_step * (1 if step > 0 else -1)
-                    log.say("  (clamping bias correction to %+ds)" % step)
-                state["rtc_bias"] = bias + step
+                state["rtc_bias"] = bias + int(round(-err2))
                 rec["rtc_bias_next"] = state["rtc_bias"]
-                log.say("  learned: RTC bias %+ds -> %+ds, will retry next"
-                        " cycle" % (bias, state["rtc_bias"]))
-            elif abs(err2) > args.tolerance:
-                log.say("  NOTE: still outside tolerance; --rtc-bias may need"
-                        " to move by %+d" % round(-err2))
+                log.say("  learned: RTC bias %+ds -> %+ds"
+                        % (bias, state["rtc_bias"]))
+        elif args.adapt_bias and adapts < args.max_adapts:
+            step = int(round(-err2))
+            if abs(step) > args.max_bias_step:
+                step = args.max_bias_step * (1 if step > 0 else -1)
+            state["rtc_bias"] = bias + step
+            state["adapts"] = adapts + 1
+            rec["action"] = "write:adapting"
+            rec["rtc_bias_next"] = state["rtc_bias"]
+            log.say("  landed %+.3fs out; RTC bias %+ds -> %+ds, retrying next"
+                    " cycle (attempt %d/%d)"
+                    % (err2, bias, state["rtc_bias"], adapts + 1,
+                       args.max_adapts))
         else:
             state["failures"] = state.get("failures", 0) + 1
+            state["adapts"] = 0
             rec["action"] = "write:no-effect"
-            log.say("  WRITE DID NOT TAKE: error %+.3fs -> %+.3fs (%d in a row)"
-                    % (error, err2, state["failures"]))
+            log.say("  WRITE DID NOT TAKE: error %+.3fs -> %+.3fs after %d bias"
+                    " adjustments (%d in a row)"
+                    % (error, err2, adapts, state["failures"]))
             log.say("  something else may be driving this camera's timecode")
         log.record(rec)
     finally:
@@ -519,6 +538,8 @@ def main():
                         " lands on (default: on)")
     p.add_argument("--max-bias-step", type=int, default=120, metavar="SECONDS",
                    help="largest single correction to the learned bias")
+    p.add_argument("--max-adapts", type=int, default=4, metavar="N",
+                   help="bias corrections to try before calling a write failed")
     p.add_argument("--lead", type=float, default=0.05, metavar="SECONDS",
                    help="how early to send, to cover BLE latency (default 0.05)")
     p.add_argument("--verify-wait", type=float, default=3.0, metavar="SECONDS",

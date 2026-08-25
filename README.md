@@ -82,6 +82,17 @@ Two things it learns rather than assumes: the camera's RTC offset (-75 s before
 a power cycle, 0 after one, so a fixed value never converges), and whether the
 Tentacle bench agrees with itself.
 
+`scripts/sync_report.py` turns that log into the numbers you'd tune against:
+
+```
+.venv/bin/python scripts/sync_report.py octomancer-sync.jsonl
+```
+
+It reports drift only from free-running stretches between writes, and only
+from stretches long enough to mean anything -- the camera reports whole frames,
+so a half-minute sample yields four figures of pure quantisation noise. Expect
+it to say "leave it running" until there's an hour or so of log.
+
 `scripts/test_packets.py` checks the packet encoder against the six worked
 examples printed on p105 of the Blackmagic documentation, and needs no hardware:
 

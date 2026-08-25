@@ -4,3 +4,4 @@ __pycache__/
 .claude/worktrees/
 octomancer-sync.jsonl
 *.jsonl
+octomancer-sync.out

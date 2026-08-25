@@ -45,7 +45,7 @@ volatile sig_atomic_t g_stop = 0;
 
 void on_signal(int) { g_stop = 1; }
 
-enum class Mode { kSync, kScanOnly, kWatch, kPacket, kRtcTest };
+enum class Mode { kSync, kScanOnly, kWatch, kPacket, kRtcTest, kPoke };
 
 enum class Source { kTentacle, kMac };
 
@@ -64,6 +64,9 @@ struct Options {
   // poll.
   double presence_poll = 5.0;
   double watch_seconds = 20.0;
+  // Hand-written packets for --poke, in the order given.
+  std::vector<std::string> pokes;
+  double poke_watch = 4.0;
   // Where the per-camera database lives. Empty disables it.
   std::string camdb_path = octo::default_camera_db_path();
   // Whether a path was named on the command line. The look-but-do-not-touch
@@ -794,6 +797,150 @@ int mode_watch(octo::CameraLink* link, octo::SyncState* state,
 // the timecode not moving that group 7.0 was unimplemented. It was not: the
 // camera was already there. A test whose pass and fail states look identical
 // is not a test, so this one aims somewhere the camera demonstrably is not.
+// Parse "ff 08 00 ff 09 04 03 00 12 33 22 11" into bytes. Whitespace and
+// colons are ignored so a packet can be pasted from any of our own logs.
+bool parse_hex(const std::string& in, std::vector<uint8_t>* out,
+               std::string* err) {
+  out->clear();
+  int hi = -1;
+  for (char c : in) {
+    if (c == ' ' || c == ':' || c == ',' || c == '\t') continue;
+    int v;
+    if (c >= '0' && c <= '9') v = c - '0';
+    else if (c >= 'a' && c <= 'f') v = c - 'a' + 10;
+    else if (c >= 'A' && c <= 'F') v = c - 'A' + 10;
+    else { *err = std::string("not hex: '") + c + "'"; return false; }
+    if (hi < 0) { hi = v; continue; }
+    out->push_back(static_cast<uint8_t>((hi << 4) | v));
+    hi = -1;
+  }
+  if (hi >= 0) { *err = "odd number of hex digits"; return false; }
+  if (out->empty()) { *err = "empty packet"; return false; }
+  return true;
+}
+
+// Send hand-written packets and watch what the camera does about it.
+//
+// This exists to answer questions whose answer is probably "nothing happens",
+// which is exactly the shape of experiment that does not deserve a permanent
+// flag. It is here to be used for one session and then argued about.
+int mode_poke(octo::CameraLink* link, octo::SyncState* state,
+              const Options& opt, octo::CamDb* db) {
+  std::vector<std::vector<uint8_t>> packets;
+  for (const std::string& hex : opt.pokes) {
+    std::vector<uint8_t> bytes;
+    std::string perr;
+    if (!parse_hex(hex, &bytes, &perr)) {
+      std::fprintf(stderr, "octomancer-sync: --poke %s: %s\n", hex.c_str(),
+                   perr.c_str());
+      return 2;
+    }
+    packets.push_back(bytes);
+  }
+
+  if (!connect_camera(link, state, opt, db)) return 1;
+  std::string err;
+  if (!link->subscribe(opt.sync.camera_wait, &err)) {
+    std::fprintf(stderr, "octomancer-sync: %s\n", err.c_str());
+    link->disconnect();
+    return 1;
+  }
+  octo::CameraView view = link->await_state(opt.sync.camera_wait);
+
+  // A timecode discontinuity mid-take corrupts the take. This is the one gate
+  // that matters more than any answer these probes could return.
+  if (view.has_transport && view.transport == octo::bmd::kTransportRecord) {
+    std::fprintf(stderr, "octomancer-sync: the camera is RECORDING."
+                         " Refusing to write anything.\n");
+    link->disconnect();
+    return 3;
+  }
+
+  std::printf("\nwhat the camera volunteered (%d parameters):\n",
+              static_cast<int>(view.state.size()));
+  for (const auto& entry : view.state) {
+    const octo::bmd::Value& v = entry.second;
+    std::string vals;
+    for (size_t i = 0; i < v.ints.size(); ++i) {
+      vals += fmt("%s%lld", i ? ", " : "", static_cast<long long>(v.ints[i]));
+    }
+    for (size_t i = 0; i < v.reals.size(); ++i) {
+      vals += fmt("%s%.4f", i ? ", " : "", v.reals[i]);
+    }
+    if (!v.text.empty()) vals += v.text;
+    std::printf("   %d.%-3d op=%d  [%s]\n", entry.first.first,
+                entry.first.second, v.op, vals.c_str());
+  }
+  std::printf("\n");
+  std::fflush(stdout);
+
+  const int fps = view.has_fps ? view.fps : opt.sync.fps;
+  int sent = 0;
+  for (const std::vector<uint8_t>& packet : packets) {
+    if (g_stop) break;
+    const octo::CameraView before = link->view();
+    say("--> %s", octo::bmd::to_hex(packet).c_str());
+    if (before.has_timecode) {
+      say("    timecode before: %s",
+          octo::bmd::format_timecode(before.timecode).c_str());
+    }
+    std::string werr;
+    const double t0 = octo::mono_now();
+    const bool ok = link->write_control(packet, opt.sync.camera_wait, &werr);
+    const double latency = octo::mono_now() - t0;
+    if (!ok) {
+      say("    GATT REFUSED after %.0fms: %s", latency * 1000.0, werr.c_str());
+    } else {
+      say("    GATT accepted in %.0fms", latency * 1000.0);
+    }
+    ++sent;
+
+    // Watch long enough for a state echo and a few timecode notifications.
+    const double until = octo::mono_now() + opt.poke_watch;
+    std::map<std::pair<int, int>, octo::bmd::Value> was = before.state;
+    while (octo::mono_now() < until && !g_stop) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(150));
+      const octo::CameraView now = link->view();
+      for (const auto& entry : now.state) {
+        auto old = was.find(entry.first);
+        std::string vals;
+        for (size_t i = 0; i < entry.second.ints.size(); ++i) {
+          vals += fmt("%s%lld", i ? ", " : "",
+                      static_cast<long long>(entry.second.ints[i]));
+        }
+        if (old == was.end()) {
+          say("    ECHO new %d.%d = [%s]", entry.first.first,
+              entry.first.second, vals.c_str());
+          was[entry.first] = entry.second;
+        } else if (old->second.ints != entry.second.ints) {
+          say("    ECHO %d.%d changed to [%s]", entry.first.first,
+              entry.first.second, vals.c_str());
+          old->second = entry.second;
+        }
+      }
+    }
+    const octo::CameraView after = link->view();
+    if (after.has_timecode) {
+      const double moved =
+          octo::bmd::timecode_sod(after.timecode, fps) -
+          octo::bmd::timecode_sod(before.timecode, fps);
+      say("    timecode after:  %s   (moved %+.2fs, %.1fs elapsed)",
+          octo::bmd::format_timecode(after.timecode).c_str(), moved,
+          opt.poke_watch);
+      // Anything beyond free-running is the signal we are hunting.
+      if (std::fabs(moved - opt.poke_watch) > 0.5) {
+        say("    *** THE TIMECODE DID SOMETHING OTHER THAN FREE-RUN ***");
+      }
+    }
+    std::printf("\n");
+    std::fflush(stdout);
+  }
+
+  say("sent %d packet(s)", sent);
+  link->disconnect();
+  return 0;
+}
+
 int mode_rtc_test(octo::CameraLink* link, octo::SyncState* state,
                   const Options& opt, octo::CamDb* db) {
   if (!connect_camera(link, state, opt, db)) return 1;
@@ -938,6 +1085,10 @@ void usage(FILE* out) {
       "  --db-max-samples N    writes kept per camera (default 1000)\n"
       "  --no-adapt-lead       keep --lead fixed instead of measuring it\n"
       "  --no-centre-frames    read timecode at face value, not frame centre\n"
+      "  --poke HEX            write a hand-written packet and watch (repeat"
+      " for a sweep)\n"
+      "  --poke-watch SEC      how long to watch after each --poke"
+      " (default 4)\n"
       "  --lead-window N       writes the measured lead is a median of"
       " (default 9)\n"
       "  --max-lead SEC        clamp on the measured lead (default 0.5)\n"
@@ -980,6 +1131,7 @@ bool parse_args(int argc, char** argv, Options* opt) {
     kMaxFailures, kBenchSpread, kRtcBias, kNoAdaptBias, kMaxBiasStep,
     kMaxAdapts, kLead, kVerifyWait, kCameraWait, kScanTimeout, kConnectTimeout,
     kMinDriftInterval, kFps, kScanOnly, kAll, kWatch, kRtcTest, kPacket,
+    kPoke, kPokeWatch,
     kMaxPoll, kPollSlices, kFixedPoll, kPresencePoll, kConsole, kLogMax,
     kLogKeep, kMinPpm, kRestartStep,
     kCameraDb, kNoCameraDb, kDbMaxSamples, kNoAdaptLead, kLeadWindow, kMaxLead,
@@ -1034,6 +1186,8 @@ bool parse_args(int argc, char** argv, Options* opt) {
       {"watch", required_argument, nullptr, kWatch},
       {"rtc-test", no_argument, nullptr, kRtcTest},
       {"packet", no_argument, nullptr, kPacket},
+      {"poke", required_argument, nullptr, kPoke},
+      {"poke-watch", required_argument, nullptr, kPokeWatch},
       {"version", no_argument, nullptr, kVersion},
       {"help", no_argument, nullptr, kHelp},
       {nullptr, 0, nullptr, 0},
@@ -1122,6 +1276,11 @@ bool parse_args(int argc, char** argv, Options* opt) {
         break;
       case kRtcTest: opt->mode = Mode::kRtcTest; break;
       case kPacket: opt->mode = Mode::kPacket; break;
+      case kPoke:
+        opt->mode = Mode::kPoke;
+        opt->pokes.push_back(optarg);
+        break;
+      case kPokeWatch: opt->poke_watch = std::atof(optarg); break;
       case kVersion:
         std::printf("octomancer-sync %s\n", OCTO_VERSION);
         std::exit(0);
@@ -1200,8 +1359,9 @@ int main(int argc, char** argv) {
   // once rename over each other and one of them loses the history. The modes
   // that only look at a camera have nothing worth recording anyway, so they
   // leave the file alone unless a path was asked for explicitly.
-  const bool read_only_mode =
-      opt.mode == Mode::kScanOnly || opt.mode == Mode::kWatch;
+  const bool read_only_mode = opt.mode == Mode::kScanOnly ||
+                              opt.mode == Mode::kWatch ||
+                              opt.mode == Mode::kPoke;
   if (read_only_mode && !opt.camdb_explicit) opt.camdb_path.clear();
 
   octo::CamDb db;
@@ -1212,6 +1372,7 @@ int main(int argc, char** argv) {
 
   if (opt.mode == Mode::kScanOnly) return mode_scan_only(link.get(), opt);
   if (opt.mode == Mode::kWatch) return mode_watch(link.get(), &state, opt, &db);
+  if (opt.mode == Mode::kPoke) return mode_poke(link.get(), &state, opt, &db);
   if (opt.mode == Mode::kRtcTest) {
     return mode_rtc_test(link.get(), &state, opt, &db);
   }

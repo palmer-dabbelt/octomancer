@@ -437,6 +437,43 @@ void test_cameras_persist_but_go_absent() {
   CHECK(s.cameras[0].present);
 }
 
+// A camera's name is only learned by scanning, and most cycles skip the scan
+// and connect straight to a known identifier. Publishing the later, nameless
+// picture must not blank a name that was already learned -- it showed up as
+// "(unnamed)" from the second cycle onwards.
+void test_a_learned_name_is_not_blanked() {
+  Control control;
+  CameraStatus named;
+  named.id = "id";
+  named.name = "A:1EAE18A7";
+  named.present = true;
+  control.publish_camera(named);
+
+  CameraStatus nameless;
+  nameless.id = "id";
+  nameless.present = true;
+  nameless.has_error = true;
+  nameless.error_s = -0.078;
+  control.publish_camera(nameless);
+
+  Status s;
+  std::string err;
+  CHECK(octo::parse_status(control.handle("status"), &s, &err));
+  CHECK_EQ(static_cast<int>(s.cameras.size()), 1);
+  CHECK_EQ(s.cameras[0].name, std::string("A:1EAE18A7"));
+  // ...while everything else still updates.
+  CHECK(s.cameras[0].has_error);
+  CHECK_NEAR(s.cameras[0].error_s, -0.078, 1e-4);
+
+  // A genuinely new name still replaces the old one.
+  CameraStatus renamed;
+  renamed.id = "id";
+  renamed.name = "B:CAM2";
+  control.publish_camera(renamed);
+  CHECK(octo::parse_status(control.handle("status"), &s, &err));
+  CHECK_EQ(s.cameras[0].name, std::string("B:CAM2"));
+}
+
 void test_unknown_command_is_an_error_not_a_status() {
   Control control;
   Status s;
@@ -589,6 +626,7 @@ int main() {
   test_request_carries_its_cameras();
   test_events_are_delivered_once();
   test_cameras_persist_but_go_absent();
+  test_a_learned_name_is_not_blanked();
   test_unknown_command_is_an_error_not_a_status();
   test_ping();
   test_round_trip_over_a_socket();

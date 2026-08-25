@@ -542,7 +542,13 @@ void Control::publish_camera(const CameraStatus& cam) {
   std::lock_guard<std::mutex> lock(mu_);
   for (CameraStatus& c : cameras_) {
     if (c.id == cam.id) {
+      // A name once learned is kept. It is only discovered by scanning, and
+      // most cycles connect straight to a known identifier without scanning,
+      // so taking the new value unconditionally would blank the name on the
+      // second cycle and leave it blank thereafter.
+      const std::string known = c.name;
       c = cam;
+      if (c.name.empty()) c.name = known;
       return;
     }
   }

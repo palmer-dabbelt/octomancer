@@ -46,6 +46,10 @@
 
 namespace octo {
 
+// Bumped whenever a change in how a reading becomes an error makes new samples
+// incomparable with old ones.
+inline constexpr int kMeasureEpoch = 1;
+
 // One write, and what it taught us. Filled in after the verification read, so
 // error_after is a measurement rather than an expectation.
 struct WriteSample {
@@ -61,6 +65,14 @@ struct WriteSample {
   // that verified but missed by more than half a second missed because the
   // whole-second bias was wrong, and that says nothing about timing.
   bool timing_ok = false;
+
+  // Which measurement basis produced error_after_s. A sample taken before the
+  // reader was corrected for arrival staleness and frame centring is not
+  // comparable with one taken after: the two differ by tens of milliseconds on
+  // the same hardware, which is the size of the very quantity being learned.
+  // Old records replay as epoch 0 and are kept as history, but they do not
+  // teach the current lead.
+  int measure_epoch = 0;
 
   // How late the camera actually acted, in seconds.
   //

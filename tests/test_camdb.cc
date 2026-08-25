@@ -64,6 +64,7 @@ octo::WriteSample sample(double wall, double lead, double after) {
   s.bias = 0;
   s.verified = true;
   s.timing_ok = true;
+  s.measure_epoch = octo::kMeasureEpoch;
   return s;
 }
 
@@ -395,6 +396,53 @@ void test_only_fair_measurements_teach_timing() {
   for (double d : delays) CHECK_NEAR(d, 0.15, 1e-6);
 }
 
+// A sample measured before the reader was corrected for arrival staleness and
+// frame centring differs from a current one by tens of milliseconds -- which
+// is the size of the thing being learned. It stays in the history and stays
+// out of the estimate.
+void test_an_older_measurement_basis_does_not_teach() {
+  octo::CameraRecord rec;
+  octo::WriteSample old_basis = sample(1000.0, 0.05, -0.14);
+  old_basis.measure_epoch = 0;
+  octo::WriteSample current = sample(1060.0, 0.05, -0.10);
+
+  rec.samples.push_back(old_basis);
+  rec.samples.push_back(current);
+  rec.samples.push_back(current);
+
+  const std::vector<double> delays = rec.recent_apply_delays(10);
+  CHECK_EQ(delays.size(), size_t(2));
+  for (double d : delays) CHECK_NEAR(d, 0.15, 1e-6);
+  // Still on the record, just not consulted.
+  CHECK_EQ(rec.samples.size(), size_t(3));
+}
+
+// An epoch that was never written must not be read as the current one, or the
+// guard passes exactly the records it exists to stop.
+void test_an_unversioned_record_replays_as_older() {
+  const std::string text =
+      "{\"t\":\"write\",\"id\":\"cam\",\"wall\":1000.0,"
+      "\"error_before_s\":-0.4,\"error_after_s\":-0.1,"
+      "\"lead_used_s\":0.05,\"latency_s\":0.05,\"fps\":24,\"bias\":0,"
+      "\"verified\":true,\"timing_ok\":true}\n";
+  std::map<std::string, octo::CameraRecord> out;
+  octo::replay_camera_db(text, 100, &out);
+  CHECK_EQ(out.count("cam"), size_t(1));
+  CHECK_EQ(out["cam"].samples.size(), size_t(1));
+  CHECK_EQ(out["cam"].samples[0].measure_epoch, 0);
+  CHECK(out["cam"].recent_apply_delays(10).empty());
+}
+
+// And one that was written comes back intact.
+void test_the_measurement_basis_survives_a_round_trip() {
+  octo::WriteSample s = sample(1000.0, 0.05, -0.1);
+  std::map<std::string, octo::CameraRecord> out;
+  octo::replay_camera_db(octo::write_line("cam", s) + "\n", 100, &out);
+  CHECK_EQ(out["cam"].samples.size(), size_t(1));
+  CHECK_EQ(out["cam"].samples[0].measure_epoch, octo::kMeasureEpoch);
+  CHECK_EQ(out["cam"].recent_apply_delays(10).size(), size_t(1));
+}
+
 void test_a_missing_file_is_not_an_error() {
   const std::string dir = scratch("fresh");
   const std::string path = dir + "/db.json";
@@ -439,6 +487,9 @@ int main() {
   test_a_truncated_line_costs_one_record_not_the_history();
   test_a_hostile_camera_name();
   test_only_fair_measurements_teach_timing();
+  test_an_older_measurement_basis_does_not_teach();
+  test_an_unversioned_record_replays_as_older();
+  test_the_measurement_basis_survives_a_round_trip();
   test_a_missing_file_is_not_an_error();
   test_an_empty_path_disables_it_quietly();
   return octotest::report("test_camdb");

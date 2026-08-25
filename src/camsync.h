@@ -101,6 +101,12 @@ struct SyncOptions {
   // can make arbitrarily large, and the value is used to decide how long to
   // sleep before transmitting.
   double max_lead = 0.5;
+
+  // Add half a frame to every camera reading, so the figure is the centre of
+  // the frame the camera named rather than its leading edge. See
+  // frame_centre_s: on by default because face value is provably biased, off
+  // by a flag because which edge the camera means has not been measured.
+  bool centre_frames = true;
   double verify_wait = 3.0;
   double camera_wait = 6.0;
   double scan_timeout = 20.0;
@@ -307,6 +313,42 @@ LeadEstimate estimate_lead(const std::vector<double>& delays,
 // The lead to actually send with: the learned figure once there is one, and
 // the configured one until then.
 double effective_lead(const SyncOptions& opt, const SyncState& state);
+
+// --- reading a timecode against the right instant --------------------------
+
+// How stale a camera reading is, in seconds.
+//
+// A timecode notification is stamped with a monotonic arrival time and then
+// sits in the view until somebody looks. Comparing that stored reading against
+// a host clock sampled *now* charges the camera for however long it sat there,
+// which makes the camera look late by an amount that has nothing to do with
+// the camera. Subtracting this age from the host clock compares the two at the
+// same instant.
+//
+// A reading with no stamp (a default-constructed view) or one stamped in the
+// future is reported as zero age, so the correction degrades to the old
+// behaviour rather than to a wild one. The age is also capped: a reading
+// staler than `max_age` is not evidence about a clock, and the caller is
+// expected to treat a capped value as a reason to distrust the sample rather
+// than to correct it.
+double reading_age_s(double now_mono, double stamp_mono, double max_age = 5.0);
+
+// The offset from the timecode a camera reports to the best estimate of where
+// its clock actually stood when it reported.
+//
+// A timecode names a frame, and that frame occupies a whole 1/fps of time. A
+// camera that says "frame 15" is somewhere inside frame 15, not at its leading
+// edge -- so reading the value at face value is low by half a frame on
+// average, 20.8ms at 24fps, on every single reading. Adding half a frame makes
+// the estimate unbiased under the assumption that the reported frame is the
+// one in progress.
+//
+// That assumption is the whole content of this function. If the camera instead
+// reports the frame it has just finished, the correction belongs on the other
+// side and this makes matters worse by the same 20.8ms -- which is why the
+// caller can switch it off, and why it is worth measuring rather than
+// believing.
+double frame_centre_s(int fps);
 
 // --- how long to wait before looking again ---------------------------------
 

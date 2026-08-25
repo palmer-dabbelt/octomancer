@@ -467,15 +467,24 @@ void run_cycle(octo::CameraLink* link, octo::SyncState* state,
     return;
   }
 
-  const double cam = octo::bmd::timecode_sod(view.timecode, fps);
-  const double want = octo::local_seconds_of_day(octo::wall_now()) + offset;
-  const double error = octo::wrap_delta(cam - want);
+  // The reading in `view` arrived at view.timecode_mono and has been sitting
+  // there ever since. Charging the camera for that wait is what made every
+  // measurement before this one come out negative.
   const double now_mono = octo::mono_now();
+  const double tc_age = octo::reading_age_s(now_mono, view.timecode_mono);
+  const double centre =
+      opt.sync.centre_frames ? octo::frame_centre_s(fps) : 0.0;
+  const double cam = octo::bmd::timecode_sod(view.timecode, fps) + centre;
+  const double want =
+      octo::local_seconds_of_day(octo::wall_now() - tc_age) + offset;
+  const double error = octo::wrap_delta(cam - want);
 
   rec.str("camera_tc", octo::bmd::format_timecode(view.timecode));
   rec.num("camera_sod", cam);
   rec.num("target_sod", want);
   rec.num("error_s", error);
+  rec.num("tc_age_s", tc_age, 4);
+  rec.num("frame_centre_s", centre, 4);
 
   const octo::Drift drift = octo::observe(opt.sync, state, error, now_mono);
   if (drift.restarted) {
@@ -592,10 +601,13 @@ void run_cycle(octo::CameraLink* link, octo::SyncState* state,
     return;
   }
 
-  const double cam2 = octo::bmd::timecode_sod(view.timecode, fps);
-  const double err2 =
-      octo::wrap_delta(cam2 - (octo::local_seconds_of_day(octo::wall_now()) + offset));
+  const double cam2 = octo::bmd::timecode_sod(view.timecode, fps) +
+                      (opt.sync.centre_frames ? octo::frame_centre_s(fps) : 0.0);
+  const double age2 = octo::reading_age_s(octo::mono_now(), view.timecode_mono);
+  const double err2 = octo::wrap_delta(
+      cam2 - (octo::local_seconds_of_day(octo::wall_now() - age2) + offset));
   rec.num("error_after_s", err2);
+  rec.num("tc_age_after_s", age2, 4);
   rec.str("camera_tc_after", octo::bmd::format_timecode(view.timecode));
 
   const octo::WriteOutcome outcome =
@@ -640,6 +652,8 @@ void run_cycle(octo::CameraLink* link, octo::SyncState* state,
     sample.bias = bias;
     sample.verified = outcome.verified;
     sample.timing_ok = outcome.timing_usable;
+    // Only claim the current basis when the reader is actually running on it.
+    sample.measure_epoch = opt.sync.centre_frames ? octo::kMeasureEpoch : 0;
 
     std::string derr;
     if (!db->record_write(state->camera_id, sample, &derr)) {
@@ -736,11 +750,14 @@ int mode_watch(octo::CameraLink* link, octo::SyncState* state,
     have_last = true;
 
     const int fps = view.has_fps ? view.fps : opt.sync.fps;
-    const double cam = octo::bmd::timecode_sod(last, fps);
-    const double mac = octo::local_seconds_of_day(octo::wall_now());
-    say("%s   this Mac %s   diff %+.3fs   %dfps%s",
+    const double age = octo::reading_age_s(octo::mono_now(), view.timecode_mono);
+    const double cam = octo::bmd::timecode_sod(last, fps) +
+                       (opt.sync.centre_frames ? octo::frame_centre_s(fps) : 0.0);
+    const double mac = octo::local_seconds_of_day(octo::wall_now() - age);
+    say("%s   this Mac %s   diff %+.3fs   age %.0fms   %dfps%s",
         octo::bmd::format_timecode(last).c_str(),
-        octo::format_sod(mac).c_str(), octo::wrap_delta(cam - mac), fps,
+        octo::format_sod(mac).c_str(), octo::wrap_delta(cam - mac),
+        age * 1000.0, fps,
         (view.has_transport && view.transport == octo::bmd::kTransportRecord)
             ? "   RECORDING"
             : "");
@@ -916,6 +933,7 @@ void usage(FILE* out) {
       "  --no-camera-db        do not remember anything between runs\n"
       "  --db-max-samples N    writes kept per camera (default 1000)\n"
       "  --no-adapt-lead       keep --lead fixed instead of measuring it\n"
+      "  --no-centre-frames    read timecode at face value, not frame centre\n"
       "  --lead-window N       writes the measured lead is a median of"
       " (default 9)\n"
       "  --max-lead SEC        clamp on the measured lead (default 0.5)\n"
@@ -961,6 +979,7 @@ bool parse_args(int argc, char** argv, Options* opt) {
     kMaxPoll, kPollSlices, kFixedPoll, kPresencePoll, kConsole, kLogMax,
     kLogKeep, kMinPpm, kRestartStep,
     kCameraDb, kNoCameraDb, kDbMaxSamples, kNoAdaptLead, kLeadWindow, kMaxLead,
+    kNoCentreFrames,
     kVersion, kHelp,
   };
   static const struct option longs[] = {
@@ -980,6 +999,7 @@ bool parse_args(int argc, char** argv, Options* opt) {
       {"no-camera-db", no_argument, nullptr, kNoCameraDb},
       {"db-max-samples", required_argument, nullptr, kDbMaxSamples},
       {"no-adapt-lead", no_argument, nullptr, kNoAdaptLead},
+      {"no-centre-frames", no_argument, nullptr, kNoCentreFrames},
       {"lead-window", required_argument, nullptr, kLeadWindow},
       {"max-lead", required_argument, nullptr, kMaxLead},
       {"listen", required_argument, nullptr, kListen},
@@ -1070,6 +1090,7 @@ bool parse_args(int argc, char** argv, Options* opt) {
         opt->camdb.max_samples = static_cast<size_t>(std::atol(optarg));
         break;
       case kNoAdaptLead: opt->sync.adapt_lead = false; break;
+      case kNoCentreFrames: opt->sync.centre_frames = false; break;
       case kLeadWindow: opt->sync.lead_window = std::atoi(optarg); break;
       case kMaxLead: opt->sync.max_lead = std::atof(optarg); break;
       case kNoAdaptBias: opt->sync.adapt_bias = false; break;

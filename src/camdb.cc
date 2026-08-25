@@ -57,6 +57,8 @@ std::vector<double> CameraRecord::recent_apply_delays(size_t n) const {
   // plotting them does, and returning them shuffled invites a subtle bug.
   for (auto it = samples.rbegin(); it != samples.rend() && out.size() < n; ++it) {
     if (!it->timing_ok) continue;
+    // A sample measured on an older basis is history, not evidence.
+    if (it->measure_epoch != kMeasureEpoch) continue;
     out.push_back(it->apply_delay_s());
   }
   std::reverse(out.begin(), out.end());
@@ -98,6 +100,7 @@ std::string write_line(const std::string& id, const WriteSample& s) {
   out += fmt(",\"bias\":%d", s.bias);
   out += std::string(",\"verified\":") + (s.verified ? "true" : "false");
   out += std::string(",\"timing_ok\":") + (s.timing_ok ? "true" : "false");
+  out += fmt(",\"measure_epoch\":%d", s.measure_epoch);
   out += "}";
   return out;
 }
@@ -159,6 +162,10 @@ void replay_camera_db(const std::string& text, size_t max_samples,
       // their writes all predate the correction being applied -- so they are
       // exactly the samples worth learning from. Fall back to verified.
       s.timing_ok = rec.flag("timing_ok", s.verified);
+      // Absent means it was written before the basis was versioned, which is
+      // exactly the case the epoch exists to exclude -- so the default is 0,
+      // never the current epoch.
+      s.measure_epoch = static_cast<int>(rec.number("measure_epoch", 0.0));
       c.samples.push_back(s);
       while (max_samples > 0 && c.samples.size() > max_samples) {
         c.samples.pop_front();

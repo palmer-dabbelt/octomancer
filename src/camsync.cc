@@ -215,6 +215,20 @@ double effective_lead(const SyncOptions& opt, const SyncState& state) {
   return opt.lead;
 }
 
+double reading_age_s(double now_mono, double stamp_mono, double max_age) {
+  // An unstamped view carries 0.0, which would otherwise read as an age of
+  // however long this process has been up.
+  if (stamp_mono <= 0.0) return 0.0;
+  const double age = now_mono - stamp_mono;
+  if (age <= 0.0) return 0.0;
+  return age < max_age ? age : max_age;
+}
+
+double frame_centre_s(int fps) {
+  if (fps <= 0) return 0.0;
+  return 0.5 / static_cast<double>(fps);
+}
+
 double drift_bound_ppm(const SyncOptions& opt, const DriftEstimate& est,
                        int fps) {
   if (!est.has) return 0.0;

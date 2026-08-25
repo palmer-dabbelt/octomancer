@@ -505,7 +505,91 @@ void test_the_schedule_converges_and_does_not_overshoot() {
 
 }  // namespace
 
+
+// --- the age of a reading -------------------------------------------------
+
+// The bug this fixes: a reading that arrived 80ms ago was compared against a
+// host clock read now, so the camera was charged 80ms it never owed.
+void test_a_stale_reading_is_aged() {
+  CHECK_NEAR(octo::reading_age_s(1000.080, 1000.000), 0.080, 1e-9);  // a reading 80ms old is 80ms old
+}
+
+// A default-constructed view carries 0.0, and mono_now() is uptime -- so
+// treating that as a stamp would age the reading by however long the process
+// had been running, which is the one error worse than the one being fixed.
+void test_an_unstamped_reading_is_treated_as_fresh() {
+  CHECK_NEAR(octo::reading_age_s(9999.0, 0.0), 0.0, 1e-9);  // no stamp means no correction
+}
+
+void test_a_stamp_in_the_future_is_treated_as_fresh() {
+  CHECK_NEAR(octo::reading_age_s(1000.0, 1000.5), 0.0, 1e-9);  // a negative age is not a correction
+}
+
+// Past a few seconds the reading is not evidence about a clock at all, and a
+// correction that large would move the answer further than the error does.
+void test_a_very_stale_reading_is_capped() {
+  CHECK_NEAR(octo::reading_age_s(1100.0, 1000.0, 5.0), 5.0, 1e-9);  // the cap holds
+}
+
+// The whole point, stated as the arithmetic the caller performs: a camera that
+// is actually correct must measure as correct, however long its reading sat.
+void test_correcting_for_age_removes_the_apparent_lateness() {
+  const double host_at_arrival = 43200.000;
+  const double camera_said = 43200.000;   // exactly right, at that instant
+  const double sat_for = 0.080;
+  const double host_now = host_at_arrival + sat_for;
+
+  const double uncorrected = camera_said - host_now;
+  CHECK_NEAR(uncorrected, -0.080, 1e-9);  // without the fix the camera looks 80ms late
+
+  const double age = octo::reading_age_s(500.080, 500.000);
+  const double corrected = camera_said - (host_now - age);
+  CHECK_NEAR(corrected, 0.0, 1e-9);  // with the fix it looks correct
+}
+
+// --- reading the centre of a frame, not its edge --------------------------
+
+void test_half_a_frame_is_half_a_frame() {
+  CHECK_NEAR(octo::frame_centre_s(24), 0.5 / 24.0, 1e-12);
+  CHECK_NEAR(octo::frame_centre_s(60), 0.5 / 60.0, 1e-12);
+}
+
+// An unknown frame rate must not invent a correction out of a division by zero.
+void test_no_frame_rate_means_no_correction() {
+  CHECK_NEAR(octo::frame_centre_s(0), 0.0, 1e-12);
+  CHECK_NEAR(octo::frame_centre_s(-1), 0.0, 1e-12);
+}
+
+// The bias being removed: a camera whose clock is exactly right, sampled at a
+// uniformly random moment inside a frame, reads low by half a frame on average
+// when its frame number is taken at face value.
+void test_face_value_is_biased_low_by_half_a_frame() {
+  const int fps = 24;
+  const double frame = 1.0 / fps;
+  const int steps = 1000;
+
+  double raw = 0.0;
+  double centred = 0.0;
+  for (int i = 0; i < steps; ++i) {
+    // The camera's true clock, somewhere inside the frame it is naming.
+    const double truth = (i + 0.5) / steps * frame;
+    // The frame it names starts at zero.
+    raw += 0.0 - truth;
+    centred += octo::frame_centre_s(fps) - truth;
+  }
+  CHECK_NEAR(raw / steps, -frame / 2.0, 1e-6);
+  CHECK_NEAR(centred / steps, 0.0, 1e-6);
+}
+
 int main() {
+  test_half_a_frame_is_half_a_frame();
+  test_no_frame_rate_means_no_correction();
+  test_face_value_is_biased_low_by_half_a_frame();
+  test_a_stale_reading_is_aged();
+  test_an_unstamped_reading_is_treated_as_fresh();
+  test_a_stamp_in_the_future_is_treated_as_fresh();
+  test_a_very_stale_reading_is_capped();
+  test_correcting_for_age_removes_the_apparent_lateness();
   test_tolerance_scales_with_frame_rate();
   test_recording_beats_everything();
   test_external_source_backs_off();

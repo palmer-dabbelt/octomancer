@@ -1,5 +1,7 @@
 # octomancer
 
+**This entire repository is vibe-coded, so I wouldn't read too much into any of it...**
+
 Synchronise a Blackmagic camera's timecode with a Tentacle Sync, using a Mac as
 the proxy in the middle.
 

@@ -27,6 +27,13 @@ happens.
 # watch a camera's timecode and telemetry without writing anything
 .venv/bin/python scripts/timecode_probe.py --name <address> --watch 20
 
+# set the camera's clock from this Mac (this is the one that works)
+.venv/bin/python scripts/set_rtc.py --name <address>
+.venv/bin/python scripts/set_rtc.py --name <address> --bias 75 --no-calibrate
+
+# prove the RTC write lands, by writing a deliberately wrong clock
+.venv/bin/python scripts/timecode_probe.py --name <address> --rtc-test
+
 # try to set the clock
 .venv/bin/python scripts/timecode_probe.py --name <address> --method both
 
@@ -52,11 +59,15 @@ examples printed on p105 of the Blackmagic documentation, and needs no hardware:
 Tested against a **Pocket Cinema Camera 6K Pro**:
 
 * Reading timecode over BLE works well — time-of-day, continuous, ~7.5 Hz.
-* **Setting timecode over BLE does not work.** Both the documented Real Time
-  Clock (group 7.0) and the undocumented timecode parameter (9.4) are accepted
-  by GATT and then ignored.
-* This isn't our bug: a white balance write over the identical path takes effect
-  and is echoed back. Group 7 is simply absent on this body.
+* **Setting the Real Time Clock (group 7.0) over BLE works**, and on a camera in
+  Time of Day mode the timecode follows it. So the Mac *can* put wall-clock time
+  on the camera with no cable, to about ±1 s.
+* Two corrections are needed to land the right time: write **UTC** and let the
+  camera apply its own timezone, and add **~75 s**, because the clock lands that
+  far behind the value written — repeatably, with no spread. `set_rtc.py`
+  measures that offset and corrects it rather than assuming it.
+* Setting the timecode *directly* still doesn't work: the undocumented 9.4
+  parameter is accepted by GATT and ignored.
 * The Timecode characteristic is **read-only**: it advertises `notify` alone,
   and writes to it are rejected with GATT `Write Not Permitted` whatever the
   payload. That closes the other BLE pipe -- and it's a firmer no than the SDI

@@ -1,4 +1,4 @@
-# Setting timecode over Bluetooth LE: what we tried and how each attempt failed
+# Setting the clock over Bluetooth LE: a 75-second offset, and no way to set timecode directly
 
 **Camera:** Blackmagic Pocket Cinema Camera 6K Pro
 **CCU protocol version reported over BLE:** `0.1.0`
@@ -10,84 +10,111 @@ it is not readable over BLE)_
 
 ## Summary
 
-There are two ways to put bytes into the camera over BLE. We tried both — three
-attempts in total — and none of them changes the camera's timecode.
+Setting the **Real Time Clock (group 7, parameter 0) over BLE works** on this
+body, and on a camera in Time of Day mode the timecode follows it. Two things
+about it are worth reporting:
 
-| # | Mechanism | Target | How it fails |
-| --- | --- | --- | --- |
-| 1 | SDI tunnel | group 7.0 Real Time Clock (documented) | GATT ack, silently ignored |
-| 2 | SDI tunnel | group 9.4 Timecode (undocumented) | GATT ack, silently ignored |
-| 3 | Timecode characteristic, written directly | — | GATT refuses: `Write Not Permitted` |
+| # | What | Status |
+| --- | --- | --- |
+| 1 | RTC (7.0) write via the SDI tunnel | **Works, but lands ~75 s behind the value written** |
+| 2 | Timecode (9.4) write via the SDI tunnel | GATT ack, silently ignored |
+| 3 | Timecode characteristic, written directly | GATT refuses: `Write Not Permitted` |
 
-The two mechanisms fail in *different* ways, which matters when reading this
-report: attempts 1 and 2 are accepted and dropped somewhere above the GATT
-layer, while attempt 3 never reaches application code at all.
+Item 1 looks like a straightforward bug and is the main reason for this report.
+Items 2 and 3 are a feature gap: there is no way to set the camera's *timecode*
+over BLE, only its clock.
 
-These two mechanisms are not a selection — they are everything available. The
-camera exposes exactly two GATT services and nine characteristics in total, of
-which only three are writable at all:
+## Finding 1 — the RTC lands 75 seconds behind what was written
+
+The write itself is honoured promptly: the timecode jumps within a second, and
+by the amount asked for. Asking for a clock 1h02m03s in the past moved the
+timecode by 1h02m00s:
+
+```
+timecode before: 20:36:15
+WRITING Real Time Clock (7.0) = 2026-08-25 02:35:26 UTC
+  bytes: ff 0c 00 00 07 00 03 00 00 26 35 02 25 08 26 20
+timecode after:  19:34:21
+clock moved -1h02m00s more than the 6.1s that actually elapsed
+```
+
+But the value that lands is consistently about **75 seconds earlier** than the
+value sent. Writing the true current time and then comparing the camera against
+the host's clock, once per second:
+
+```
+  t      camera tc    host clock   error
+  +1    s 20:48:07     20:49:23     -76s
+  +2    s 20:48:08     20:49:24     -76s
+  +3    s 20:48:09     20:49:25     -76s
+  +4    s 20:48:11     20:49:26     -75s
+  +5    s 20:48:11     20:49:27     -76s
+  +6    s 20:48:13     20:49:28     -75s
+  -> settled at -75s (spread 1s)
+```
+
+Three properties of this offset:
+
+* **It is not latency.** The camera lands 75 s behind the *value sent*, not
+  75 s behind the moment it was sent — the discontinuity appears within one
+  second of the write.
+* **It is constant, not drift.** Spread across readings is 0–1 s, and the same
+  −75 s appeared on every write we made across roughly twenty minutes.
+* **It cancels exactly.** Adding 75 s to the written time brings the camera to
+  the host's clock with zero error:
+
+```
+pass 2: writing RTC = 2026-08-25 03:50:43 UTC  (+75s bias)
+  +1    s 20:49:29     20:49:29     +0s
+  +4    s 20:49:32     20:49:32     +0s
+  +6    s 20:49:34     20:49:34     +0s
+  -> settled at +0s (spread 1s)
+```
+
+That last point is what makes us fairly confident this is a bug rather than
+something on our side: an error we can subtract out as a clean constant isn't
+coming from the encoding or the transport.
+
+For completeness, the timezone behaviour is *correct* and is not part of this
+report: the camera adds its Timezone parameter to the RTC before displaying, so
+writing UTC (as p102 specifies) produces local time on screen. The 75 s is on
+top of that, and is not a whole-minute or whole-hour quantity.
+
+Our packet encoder is validated against **all six worked examples printed on
+p105** of the documentation, byte for byte, with no hardware involved
+(`scripts/test_packets.py`, 15 checks, all passing).
+
+## Finding 2 — no way to set the camera's timecode directly
+
+Separately from the clock, there is no way to jam-sync the camera's *timecode*
+over BLE. Both available routes fail.
+
+There are only two ways to put bytes into the camera over BLE, and this is not
+a selection — it is everything. The camera exposes exactly two GATT services
+and nine characteristics, of which only three are writable at all:
 
 ```
 SERVICE 0000180a  Device Information
    00002a29  [read]                 Manufacturer Name String
    00002a24  [read]                 Model Number String
 SERVICE 291d567a  Blackmagic Camera Service
-   5dd3465f  [write]                Outgoing Camera Control   <-- mechanism A
+   5dd3465f  [write]                Outgoing Camera Control   <-- route A
    b864e140  [indicate]             Incoming Camera Control
-   6d8f2110  [notify]               Timecode                  <-- mechanism B
+   6d8f2110  [notify]               Timecode                  <-- route B
    7fe8691d  [notify,read,write]    Camera Status
    ffac0c52  [write]                Device Name
    8f1fd018  [read]                 Protocol Version
 ```
 
 Of the three writable characteristics, Camera Status takes only a power on/off
-flag and Device Name takes only a display string. So Outgoing Camera Control is
-the only general-purpose write path on the device, and the Timecode
-characteristic is the only other one that concerns timecode at all. There is no
-third avenue we have overlooked.
+flag and Device Name only a display string. So there is no third avenue.
 
-## Mechanism A — the SDI Camera Control tunnel
+### Route A — group 9.4 over the SDI tunnel
 
-The doc (p109) states that messages written to **Outgoing Camera Control**
-(`5DD3465F-1AEE-4299-8493-D2ECA2F8E1BB`) "are identical to those described in
-the Blackmagic SDI Camera Control Protocol section", so this characteristic is a
-transparent pipe for SDI protocol packets. The camera advertises it as `write`.
-
-Our packet encoder is validated against **all six worked examples printed on
-p105** of the documentation, byte for byte, with no hardware involved
-(`scripts/test_packets.py`, 15 checks, all passing). So the framing below is
-known-good against Blackmagic's own published examples.
-
-### Attempt 1 — group 7.0, Real Time Clock (documented)
-
-This is the documented way to set the camera clock (p102): group 7 parameter 0,
-int32 array, `[0]` = time as BCD `HHMMSSFF`, `[1]` = date as BCD `YYYYMMDD`, in
-UTC.
-
-For 2026-08-24 09:12:53:10 UTC, broadcast:
-
-```
-ff 0c 00 00  07 00 03 00  10 53 12 09  24 08 26 20
-^dest=255    ^group 7     ^time BCD    ^date BCD
-   ^len=12   ^param 0     little-endian
-             ^int32
-                ^assign
-```
-
-**Result:** the GATT write-with-response completes without error. The camera's
-timecode is unaffected and continues free-running time-of-day.
-
-Corroborating detail: **group 7 never appears anywhere in the camera's initial
-state dump.** On connection the camera pushes its full state over Incoming
-Camera Control, and groups 0, 1, 3, 9, 10 and 12 all appear. Group 7 does not.
-This is consistent with the group simply not being implemented on this body.
-
-### Attempt 2 — group 9.4, Timecode (undocumented)
-
-Group 9 is not in the published parameter table — the table skips from 8
-(Colour Correction) to 10 (Media) — but this camera *reports* its running
-timecode as group 9 parameter 4. Since the camera uses that parameter to
-describe its own timecode, we tried assigning to it:
+Group 9 is not in the published parameter table — it skips from 8 (Colour
+Correction) to 10 (Media) — but this camera *reports* its running timecode as
+group 9 parameter 4. Since the camera uses that parameter to describe its own
+timecode, we tried assigning to it:
 
 ```
 ff 08 00 00  09 04 03 00  <time BCD little-endian>
@@ -97,18 +124,14 @@ ff 08 00 00  09 04 03 00  <time BCD little-endian>
                 ^assign
 ```
 
-**Result:** identical to attempt 1. GATT write completes, timecode unaffected.
-Observed running undisturbed from 17:58:34 through 17:58:39 across the write.
+**Result:** the GATT write completes without error and the timecode is
+unaffected, observed running undisturbed from 17:58:34 through 17:58:39 across
+the write.
 
-### Why we are confident this is not a malformed-packet problem
-
-A GATT write-with-response acknowledgement only means the characteristic
-accepted the bytes. It says nothing about whether the camera acted on them. So
-a silent no-op is ambiguous on its own, and we isolated it with a control.
-
-We wrote **white balance** (group 1, parameter 2, int16) over the *identical*
-code path — same characteristic, same destination byte, same header framing,
-same helper function — and it took effect:
+That the camera obeys control writes on this path generally is confirmed by a
+control experiment: **white balance** (group 1, parameter 2, int16) written over
+the *identical* code path took effect and was echoed back in the camera's own
+telemetry.
 
 ```
 white balance is currently [3200, 0]; setting it to 5600
@@ -117,25 +140,21 @@ white balance now reads [5600, 0]      <- echoed back in the camera's telemetry
 white balance restored to [3200, 0]
 ```
 
-The change was confirmed in the camera's own reported state, not merely assumed
-from the ack. So the transport works, the addressing works, the packet framing
-works, and the camera does obey control writes on this path. Groups 7.0 and 9.4
-specifically are being accepted and discarded.
+So the transport, addressing and framing all work — 9.4 specifically is being
+accepted and discarded. (The same is true of the RTC path, which is how we know
+Finding 1's offset isn't a framing problem.)
 
-## Mechanism B — writing the Timecode characteristic directly
+### Route B — writing the Timecode characteristic directly
 
-**Timecode** (`6D8F2110-86F1-41BF-9AFB-451D87E976C8`) is a separate
-characteristic in the same Blackmagic Camera Service. The documentation
-describes it only as a source of notifications and does not mention writing.
+**Timecode** (`6D8F2110-86F1-41BF-9AFB-451D87E976C8`) is described in the
+documentation only as a source of notifications. We tested it anyway rather
+than ruling it out on paper, because the same paragraph that calls it
+notify-only also states the payload is "a 32-bit BCD number", and that is not
+what the camera sends (see below) — a description that is wrong about the read
+format is not authoritative about the write behaviour.
 
-We tested it anyway rather than ruling it out on paper, for a specific reason:
-the same paragraph that calls it notify-only also states the payload is "a
-32-bit BCD number", and that is **not** what the camera sends (see below). A
-description that is wrong about the read format is not authoritative about the
-write behaviour.
-
-Because nothing documents what a write *would* look like, we tried three
-mutually exclusive payload shapes:
+Because nothing documents what a write would look like, we tried three mutually
+exclusive payload shapes:
 
 | Payload shape | Bytes | Result |
 | --- | --- | --- |
@@ -148,45 +167,35 @@ Permitted**, surfaced as
 `BleakGATTProtocolError: (3, 'GATT Protocol Error: Write Not Permitted')`.
 Timecode free-ran through all three attempts (23:34:39 → 23:34:47).
 
-This is a **firmer** negative than mechanism A. There, the camera accepted the
-write and dropped it, which always leaves room for an encoding mistake on our
-side. Here the GATT server refuses before any application logic runs, so the
-payload shape is irrelevant — there is no encoding that would have worked.
-
-The refusal matches the declared properties. As advertised by the 6K Pro:
-
-```
-5dd3465f-...  write              Outgoing Camera Control
-b864e140-...  indicate           Incoming Camera Control
-6d8f2110-...  notify             Timecode            <-- notify only, no write
-7fe8691d-...  write,read,notify  Camera Status
-ffac0c52-...  write              Device Name
-8f1fd018-...  read               Protocol Version
-```
+This is a firmer negative than route A: there the camera accepted the write and
+dropped it, which leaves room for an encoding mistake on our side. Here the
+GATT server refuses before any application logic runs, so the payload shape is
+irrelevant — there is no encoding that would have worked. It matches the
+declared properties, which advertise `notify` and nothing else.
 
 ## The ask
 
-Both BLE paths into the camera's clock are closed, so there is currently no way
-for a paired host to set this camera's timecode wirelessly — only to read it.
-Either of these would be enough to enable it:
+**The bug:** the RTC lands 75 s behind the value written. Since it is a clean
+constant, it looks like a fixed offset applied somewhere in the write path.
+
+**The gap, in order of how useful each would be:**
 
 1. **Make the Timecode characteristic writable**, accepting the same wrapped
    SDI message the camera already emits on it. This looks like the smallest
-   change: the parse path and the value semantics already exist.
-2. **Implement group 7.0 (Real Time Clock)** on this body, as already
-   documented on p102. This is the path the documentation implies should work,
-   and it needs no new protocol surface at all.
+   change — the parse path and the value semantics already exist.
+2. **Or implement assignment to 9.4** over the existing SDI tunnel, which needs
+   no new protocol surface at all.
 
-The use case is straightforward and common on set: a host holding external
-timecode (from a Tentacle Sync or similar) jam-syncing the camera over the
-Bluetooth link that already exists, instead of requiring a cable into the
-3.5 mm input or a USB trip through Blackmagic Camera Setup.
+The use case is common on set: a host holding external timecode (from a
+Tentacle Sync or similar) jam-syncing the camera over the Bluetooth link that
+already exists, instead of requiring a cable into the 3.5 mm input. The RTC
+path gets us to roughly ±1 s once the 75 s offset is compensated, which is
+enough to place clips on a timeline but not enough for frame-accurate sync.
 
 ## Incidental findings, offered as documentation feedback
 
-These are places where the August 2025 documentation and this camera disagree.
-They cost us real debugging time and may be worth correcting regardless of the
-request above.
+Places where the August 2025 documentation and this camera disagree. They cost
+real debugging time and may be worth correcting regardless of the above.
 
 **The Timecode notification format is not a bare 32-bit BCD number.** The doc
 says "Timecode (HH:MM:SS:mm) is represented by a 32-bit BCD number (eg.
@@ -214,14 +223,17 @@ from 0 "assign this".
 (`[millivolts, percent, flags]`), 9.4 is running timecode, and 12.9–12.12 carry
 lens metadata strings.
 
+**Group 7 is write-only and absent from the state dump.** On connection the
+camera pushes its full state over Incoming Camera Control; groups 0, 1, 3, 9,
+10 and 12 appear, and group 7 does not — even though 7.0 is demonstrably
+writable. Being able to read back the RTC and Timezone would make it possible
+to verify a write instead of inferring it from the timecode, and would have
+made the 75 s offset obvious immediately.
+
 **No bonding prompt appeared.** The doc (p110) says writing to an encrypted
 characteristic initiates bonding and displays a 6-digit PIN. Against an
 already-paired camera, reads, writes and notifications all worked immediately
 with no prompt.
-
-**Timecode is local time, not UTC.** The camera read `23:34` local while our UTC
-target was `03:03`. Worth noting because the documented RTC parameter is
-specified as UTC, so the two are in different frames of reference.
 
 **Firmware revision is not exposed over BLE.** The Device Information Service
 implements only Manufacturer Name (`2A29`) and Model Number (`2A24`). The
@@ -236,10 +248,14 @@ this report identify its own test firmware automatically.
 ```
 .venv/bin/python scripts/test_packets.py                        # encoder vs p105, no hardware
 
+.venv/bin/python scripts/set_rtc.py --name <addr>               # finding 1, with calibration
+.venv/bin/python scripts/set_rtc.py --name <addr> --no-calibrate  # finding 1, raw offset
+
 .venv/bin/python scripts/timecode_probe.py --name <addr> --watch 20      # read timecode
-.venv/bin/python scripts/timecode_probe.py --name <addr> --method both   # attempts 1 and 2
-.venv/bin/python scripts/timecode_probe.py --name <addr> --tc-char-test  # attempt 3
-.venv/bin/python scripts/timecode_probe.py --name <addr> --control-test  # the white balance control
+.venv/bin/python scripts/timecode_probe.py --name <addr> --rtc-test      # RTC write lands
+.venv/bin/python scripts/timecode_probe.py --name <addr> --method timecode  # 9.4 ignored
+.venv/bin/python scripts/timecode_probe.py --name <addr> --tc-char-test  # characteristic refuses
+.venv/bin/python scripts/timecode_probe.py --name <addr> --control-test  # white balance control
 ```
 
 One practical note for anyone reproducing this: **Tentacle Sync boxes advertise

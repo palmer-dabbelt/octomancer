@@ -187,20 +187,21 @@ Reproduce with:
 **Reading timecode over BLE works well.** The camera runs time-of-day timecode,
 correct to the second, and streams it continuously.
 
-**Setting it does not work.** Two attempts, both accepted by GATT and both
-ignored by the camera:
+**Setting the Real Time Clock (7.0) works.** This corrects an earlier note here
+that said it didn't — see the section below for how that mistake happened.
 
 | Attempt | Packet | Result |
 | --- | --- | --- |
-| 7.0 Real Time Clock (documented) | `ff 0c 00 00 07 00 03 00 ...` | no change |
+| 7.0 Real Time Clock (documented) | `ff 0c 00 00 07 00 03 00 ...` | **works**, lands ~75 s late |
 | 9.4 Timecode (undocumented) | `ff 08 00 00 09 04 03 00 ...` | no change |
 
 A GATT write-with-response ack only means the characteristic accepted the
-bytes. It says nothing about whether the camera acted on them.
+bytes. It says nothing about whether the camera acted on them — which is why
+every claim here is backed by watching the timecode actually move.
 
-**This was isolated with a control test**, so the negative result is about the
-camera and not about our packets. Writing white balance (1.2) 3200 → 5600 K
-took effect and was echoed back in the camera's own telemetry, then restored:
+**A control test still matters** for the 9.4 negative. Writing white balance
+(1.2) 3200 → 5600 K took effect and was echoed back in the camera's own
+telemetry, then restored:
 
 ```
 white balance is currently [3200, 0]; setting it to 5600
@@ -209,11 +210,13 @@ white balance now reads [5600, 0]
 white balance restored to [3200, 0]
 ```
 
-Same framing, same destination, same characteristic, same code path. So the
-addressing and encoding are right, the BLE path is right, and **group 7 / 9.4
-are simply not implemented on this body**. Consistent with that, group 7 never
-appears anywhere in the camera's initial state dump, while groups 0, 1, 3, 9,
-10 and 12 all do.
+Same framing, same destination, same characteristic, same code path. So where
+a parameter is ignored, that's the parameter and not our packets.
+
+Group 7 never appears in the camera's initial state dump, while groups 0, 1, 3,
+9, 10 and 12 all do. That looked like evidence group 7 was unimplemented. It
+isn't — the group is write-only here, not absent. Absence from a state dump
+says nothing about whether a parameter can be written.
 
 Reproduce with:
 
@@ -222,22 +225,80 @@ Reproduce with:
 .venv/bin/python scripts/timecode_probe.py --name <addr> --control-test
 ```
 
+## The RTC is writable over BLE (tested 2026-08-24, corrects the above)
+
+Group 7 parameter 0 **does** work on this body, and on a camera set to Time of
+Day the timecode follows it within a second. `scripts/set_rtc.py` does it.
+
+### How the earlier "it doesn't work" result was wrong
+
+The first test wrote the *correct current UTC time* to a camera whose clock was
+already right, and concluded "no change, therefore ignored". But a correct
+write to an already-correct clock produces no change either — the experiment
+could not tell success from failure, so it had no power to detect anything.
+
+Writing a clock that is deliberately wrong by a known amount fixes that. Asking
+for −1h02m03s moved the timecode by −1h02m00s:
+
+```
+timecode before: 20:36:15
+WRITING Real Time Clock (7.0) = 2026-08-25 02:35:26 UTC
+timecode after:  19:34:21
+clock moved -1h02m00s more than the 6.1s that actually elapsed
+```
+
+The general lesson: **a negative result is only worth anything if the positive
+result would have looked different.** Always set the thing to a value it isn't
+already at.
+
+### Two corrections needed to land the right time
+
+**The camera applies its Timezone to what you write.** Write UTC, as the doc
+specifies, and the displayed timecode comes out at UTC + timezone. On this body
+the timezone is −7 h, matching the Mac, so writing UTC makes the timecode read
+local wall-clock time. Writing *local* time instead gets the offset applied
+twice and lands 7 hours out.
+
+**The clock lands ~75 s behind what was written.** Repeatably, with zero spread
+across readings, across every write tested:
+
+```
+  t      camera tc    this Mac     error
+  +1    s 20:48:07     20:49:23     -76s
+  +4    s 20:48:11     20:49:26     -75s
+  +6    s 20:48:13     20:49:28     -75s
+  -> settled at -75s (spread 1s)
+```
+
+It is not latency — the jump appears within a second of the write, and the
+camera lands 75 s behind the *value sent*, not 75 s behind when it was sent.
+Adding 75 s to the written time cancels it exactly, to 0 s:
+
+```
+pass 2: writing RTC = 2026-08-25 03:50:43 UTC  (+75s bias)
+  +4    s 20:49:32     20:49:32     +0s
+  -> settled at +0s (spread 1s)
+```
+
+Whether 75 s is universal or particular to this body and power cycle is
+untested, so `set_rtc.py` measures it and corrects in a second pass rather than
+hardcoding it. `--bias 75` skips the calibration once you trust the number.
+
 ### What this means for octomancer
 
-The Mac cannot push timecode into a Pocket 6K Pro over Bluetooth. Approaches
-still open, roughly in order of how promising they look:
+The Mac *can* put wall-clock time on a Pocket 6K Pro over Bluetooth, so
+timeline placement against time of day is workable without a cable. Accuracy is
+about ±1 s — fine for placing clips on a timeline, not frame-accurate sync.
 
-* **Feed LTC into the camera's 3.5 mm input** from the Tentacle — the normal,
-  supported path, and frame-accurate. The Mac's role shrinks to configuration
-  rather than carrying timecode.
-* **Set the camera's clock over USB** via Blackmagic Camera Setup, so its
-  time-of-day timecode lines up. Coarse, but it's the only documented way to
-  set this body's clock.
+Where that isn't good enough:
+
+* **Feed LTC into the camera's 3.5 mm input** from the Tentacle — frame
+  accurate, and the normal supported path.
 * **Invert the problem**: read the camera's timecode over BLE (which works
-  well) and use it to discipline or annotate the other side.
-* Re-test group 7 on a body that documents REST support (URSA Cine, PYXIS).
-  The REST API has explicit timecode endpoints; the 6K Pro isn't on its
-  compatibility list.
+  well) and use it to annotate the other side.
+
+Still closed: setting the timecode *directly* (9.4 is ignored, and the Timecode
+characteristic refuses writes), so the RTC is the only way in.
 
 ### Field note: Tentacle Sync boxes impersonate cameras
 

@@ -18,7 +18,8 @@ import argparse
 import asyncio
 import struct
 import sys
-from datetime import datetime, timezone
+import time
+from datetime import datetime, timedelta, timezone
 
 from bleak import BleakClient, BleakScanner
 
@@ -425,6 +426,129 @@ async def timecode_char_test(client, seen, when, args):
     return 0
 
 
+def tc_seconds(line):
+    """'23:34:47:10   (9.4)' -> seconds since midnight, or None."""
+    head = line.split()[0] if line else ""
+    parts = head.split(":")
+    if len(parts) != 4:
+        return None
+    try:
+        h, m, s, _f = (int(p) for p in parts)
+    except ValueError:
+        return None
+    return h * 3600 + m * 60 + s
+
+
+def wrap_delta(seconds):
+    """Shortest signed distance around a 24-hour clock."""
+    return (seconds + 43200) % 86400 - 43200
+
+
+def fmt_hms(seconds):
+    """-3723 -> '-1h02m03s'."""
+    sign = "-" if seconds < 0 else "+"
+    h, rem = divmod(abs(int(seconds)), 3600)
+    m, s = divmod(rem, 60)
+    return "%s%dh%02dm%02ds" % (sign, h, m, s)
+
+
+async def rtc_test(client, seen, args):
+    """Does the camera obey a Real Time Clock (7.0) write?
+
+    Our first attempt at this wrote the *correct* current UTC time, which is
+    not a test at all: a camera whose clock is already right looks exactly the
+    same whether it honoured the write or dropped it on the floor. So write a
+    clock that is deliberately wrong by a known amount, watch for a jump of
+    that exact size, then put the clock back.
+
+    This only shows anything if the camera's timecode is set to Time of Day.
+    In Record Run the timecode isn't derived from the clock and the test is
+    blind -- it would report "ignored" even for a write that landed.
+    """
+    off = args.rtc_offset
+    print("\n--- RTC test: write a deliberately wrong clock, watch for the jump ---")
+    print("offset under test: %s (%+d s)" % (fmt_hms(off), off))
+
+    print("\nletting timecode settle %.1fs ..." % args.settle)
+    await asyncio.sleep(args.settle)
+
+    before = seen[-1] if seen else None
+    b = tc_seconds(before) if before else None
+    t0 = time.monotonic()
+    utc0 = datetime.now(timezone.utc)
+    if b is None:
+        print("no usable timecode notifications -- nothing to measure a jump")
+        print("against. Check that the camera's timecode is running.")
+        return 4
+    print("timecode before: %s" % before)
+
+    # Worth knowing before we touch anything: the camera reports time-of-day
+    # timecode in local time, while the RTC parameter is specified in UTC.
+    utc_secs = utc0.hour * 3600 + utc0.minute * 60 + utc0.second
+    skew = wrap_delta(b - utc_secs)
+    print("camera clock sits %s from UTC (%s UTC now)"
+          % (fmt_hms(skew), utc0.strftime("%H:%M:%S")))
+
+    target = utc0 + timedelta(seconds=off)
+    pkt = rtc_packet(target, args.frames, args.dest)
+    print("\nWRITING Real Time Clock (7.0) = %s UTC"
+          % target.strftime("%Y-%m-%d %H:%M:%S"))
+    print("  bytes: %s" % hexdump(pkt))
+    await client.write_gatt_char(CH_OUTGOING_CTRL, pkt, response=True)
+    print("  write returned without error (GATT ack only -- this does NOT")
+    print("  mean the camera acted on it)")
+
+    print("\nwatching %.1fs for the timecode to move ..." % args.settle)
+    await asyncio.sleep(args.settle)
+
+    after = seen[-1]
+    elapsed = time.monotonic() - t0
+    a = tc_seconds(after)
+    print("timecode after:  %s" % after)
+
+    jump = None
+    if a is not None:
+        # Subtract the wall-clock time that genuinely passed, so what's left is
+        # the discontinuity the write caused, if any.
+        jump = wrap_delta(a - b - int(round(elapsed)))
+        print("\nclock moved %s more than the %.1fs that actually elapsed"
+              % (fmt_hms(jump), elapsed))
+
+    worked = jump is not None and abs(jump - off) <= args.tolerance
+
+    print("\nrestoring the clock to true UTC ...")
+    restore = rtc_packet(datetime.now(timezone.utc), args.frames, args.dest)
+    print("  bytes: %s" % hexdump(restore))
+    try:
+        await client.write_gatt_char(CH_OUTGOING_CTRL, restore, response=True)
+        await asyncio.sleep(args.settle)
+        print("timecode now:    %s" % (seen[-1] if seen else "(none)"))
+    except Exception as exc:
+        print("  restore FAILED: %s" % exc)
+        print("  if the write worked, the camera's clock is still %s off."
+              % fmt_hms(off))
+
+    print("\n--- RTC test result ---")
+    if worked:
+        print("The camera FOLLOWED the write. Timecode jumped %s, within %ds of"
+              % (fmt_hms(jump), args.tolerance))
+        print("the %s we asked for. Setting the RTC over BLE works, and that's"
+              % fmt_hms(off))
+        print("enough to place a timeline against wall-clock time.")
+    elif jump is not None and abs(jump) <= args.tolerance:
+        print("The camera IGNORED the write. Timecode kept free-running with no")
+        print("discontinuity at all, so the RTC parameter looks unimplemented")
+        print("here -- the GATT ack was just the characteristic taking bytes.")
+        print("\nOne thing to rule out first: if the camera is in Record Run")
+        print("rather than Time of Day, its timecode wouldn't follow the clock")
+        print("even for a write that landed. Check that setting on the camera.")
+    else:
+        print("The clock moved %s, which is neither the %s we asked for nor"
+              % (fmt_hms(jump), fmt_hms(off)))
+        print("standing still. Something responded -- worth a second run.")
+    return 0 if worked else 5
+
+
 async def control_test(client, latest, args):
     """Does this camera act on ANY camera-control write?
 
@@ -612,6 +736,9 @@ async def run(args):
             await asyncio.sleep(args.settle)
             return await timecode_char_test(client, seen, when, args)
 
+        if args.rtc_test:
+            return await rtc_test(client, seen, args)
+
         if args.control_test:
             return await control_test(client, latest, args)
 
@@ -701,6 +828,14 @@ def main():
     p.add_argument("--tc-char-test", action="store_true",
                    help="try writing timecode DIRECTLY to the Timecode "
                         "characteristic instead of the SDI tunnel")
+    p.add_argument("--rtc-test", action="store_true",
+                   help="write a deliberately wrong clock, check the timecode "
+                        "jumps by that exact amount, then restore it")
+    p.add_argument("--rtc-offset", type=int, default=-3723, metavar="SECONDS",
+                   help="how wrong to make the test clock "
+                        "(default -3723, ie 1h02m03s back)")
+    p.add_argument("--tolerance", type=int, default=3, metavar="SECONDS",
+                   help="how close the observed jump must be to count (default 3)")
     p.add_argument("--control-test", action="store_true",
                    help="briefly change and restore white balance, to prove whether "
                         "the camera obeys control writes at all")

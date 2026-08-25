@@ -49,7 +49,38 @@ happens.
 # read timecode from every Tentacle Sync box in range (passive, no pairing)
 .venv/bin/python scripts/tentacle_scan.py 45
 .venv/bin/python scripts/tentacle_scan.py 30 --raw
+
+# pick a Tentacle to sync against, and see how far this Mac is from it
+.venv/bin/python scripts/tentacle_ref.py 30
+
+# record raw adverts for offline analysis
+.venv/bin/python scripts/tentacle_capture.py 150 -o cap.jsonl
 ```
+
+## Keeping the camera on Tentacle time
+
+`scripts/octomancer_sync.py` ties the two halves together. It runs until
+Ctrl-C, reads Tentacle time passively, and corrects the camera's clock when
+that is both needed and allowed:
+
+```
+.venv/bin/python scripts/octomancer_sync.py                     # auto-detect
+.venv/bin/python scripts/octomancer_sync.py --dry-run --poll 20
+```
+
+It will not touch the clock while the camera is **recording**, while the error
+is already inside `--tolerance` (default 1 s), or once it looks like an
+**external timecode source** owns the camera -- nothing in the protocol reports
+that, so it is inferred from writes that do not take. The camera is polled once
+a minute by default, because connecting is slow and intrudes on the operator.
+
+Every cycle is logged to `octomancer-sync.jsonl`, including the ones where
+nothing happened, so there is drift data to tune the tolerance and poll
+interval against later.
+
+Two things it learns rather than assumes: the camera's RTC offset (-75 s before
+a power cycle, 0 after one, so a fixed value never converges), and whether the
+Tentacle bench agrees with itself.
 
 `scripts/test_packets.py` checks the packet encoder against the six worked
 examples printed on p105 of the Blackmagic documentation, and needs no hardware:

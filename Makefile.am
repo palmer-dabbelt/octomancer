@@ -11,7 +11,9 @@ ACLOCAL_AMFLAGS = -I m4
 # the entire tree; for the one string actually wanted from it, that trade is
 # not worth making.
 AM_CPPFLAGS = -I$(top_srcdir)/src -I$(top_builddir) \
-	-DOCTO_VERSION=\"$(PACKAGE_VERSION)\"
+	-DOCTO_VERSION=\"$(PACKAGE_VERSION)\" \
+	-DOCTO_BINDIR=\"$(EXPANDED_BINDIR)\" \
+	-DOCTO_LOGDIR=\"$(OCTO_LOGDIR)\"
 
 EXTRA_DIST = autogen.sh README.md tests/data/adverts.golden
 
@@ -111,11 +113,16 @@ APPBUNDLE = Octomancer.app
 
 all-local: $(APPBUNDLE)/Contents/MacOS/Octomancer
 
-$(APPBUNDLE)/Contents/MacOS/Octomancer: octomancer-ui ui/Info.plist
+$(APPBUNDLE)/Contents/MacOS/Octomancer: octomancer-ui ui/Info.plist \
+		$(AGENT_PLISTS)
 	$(AM_V_GEN)rm -rf $(APPBUNDLE)
 	$(AM_V_at)$(MKDIR_P) $(APPBUNDLE)/Contents/MacOS $(APPBUNDLE)/Contents/Resources
 	$(AM_V_at)cp ui/Info.plist $(APPBUNDLE)/Contents/Info.plist
 	$(AM_V_at)cp octomancer-ui $@
+# The app's "Start at boot" installs these. They are copied in rather than
+# written out by the app so that the templates stay the one place a
+# LaunchAgent's contents are decided.
+	$(AM_V_at)cp $(AGENT_PLISTS) $(APPBUNDLE)/Contents/Resources/
 	$(AM_V_at)if test "x$(CODESIGN)" != xno; then \
 	  $(CODESIGN) --force --sign - "$(APPBUNDLE)" >/dev/null 2>&1 || \
 	    echo "warning: could not sign $(APPBUNDLE); notifications may not appear"; \
@@ -141,19 +148,32 @@ uninstall-app:
 .PHONY: install-app uninstall-app
 endif
 
-AGENT_PLIST = launchd/com.dabbelt.octomancerd.plist
-AGENT_LABEL = com.dabbelt.octomancerd
+# Two agents, because there are two daemons: the one that only listens and the
+# one that can write to a camera. Keeping them separate is what makes the
+# second one revocable on its own.
+AGENT_PLISTS = launchd/com.dabbelt.octomancerd.plist \
+	launchd/com.dabbelt.octomancer-sync.plist
+AGENT_LABELS = com.dabbelt.octomancerd com.dabbelt.octomancer-sync
 
-install-agent: install $(AGENT_PLIST)
+install-agent: install $(AGENT_PLISTS)
 	$(MKDIR_P) "$$HOME/Library/LaunchAgents"
-	cp $(AGENT_PLIST) "$$HOME/Library/LaunchAgents/$(AGENT_LABEL).plist"
-	-launchctl bootout "gui/$$(id -u)/$(AGENT_LABEL)" 2>/dev/null
-	launchctl bootstrap "gui/$$(id -u)" "$$HOME/Library/LaunchAgents/$(AGENT_LABEL).plist"
-	@echo "octomancerd is running; check it with: octomancerctl status"
+	$(MKDIR_P) "$(OCTO_LOGDIR)"
+	@for plist in $(AGENT_PLISTS); do \
+	  label=`basename $$plist .plist`; \
+	  cp "$$plist" "$$HOME/Library/LaunchAgents/$$label.plist"; \
+	  launchctl bootout "gui/$$(id -u)/$$label" 2>/dev/null || true; \
+	  launchctl bootstrap "gui/$$(id -u)" \
+	    "$$HOME/Library/LaunchAgents/$$label.plist" || exit 1; \
+	  echo "loaded $$label"; \
+	done
+	@echo "both agents are running; check them with: octomancer status"
 
 uninstall-agent:
-	-launchctl bootout "gui/$$(id -u)/$(AGENT_LABEL)" 2>/dev/null
-	rm -f "$$HOME/Library/LaunchAgents/$(AGENT_LABEL).plist"
+	@for label in $(AGENT_LABELS); do \
+	  launchctl bootout "gui/$$(id -u)/$$label" 2>/dev/null || true; \
+	  rm -f "$$HOME/Library/LaunchAgents/$$label.plist"; \
+	  echo "removed $$label"; \
+	done
 
 .PHONY: install-agent uninstall-agent
 

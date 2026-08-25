@@ -22,12 +22,14 @@
 /src/octomancer-sync-Info.plist
 /ui/Info.plist
 /launchd/com.dabbelt.octomancerd.plist
+/launchd/com.dabbelt.octomancer-sync.plist
 
 # build output
 *.o
 *.a
 .deps/
 .dirstamp
+/octomancer
 /octomancerd
 /octomancerctl
 /octomancer-sync
@@ -37,6 +39,7 @@
 /tests/test_bmd
 /tests/test_camdb
 /tests/test_camsync
+/tests/test_control
 /tests/test_jsonlog
 /tests/test_logscan
 /tests/test_proto

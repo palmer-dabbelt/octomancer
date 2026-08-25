@@ -6,9 +6,15 @@
 // request taken by the loop and then abandoned sits in `running` forever while
 // a client polls it -- and that is checked here in microseconds.
 #include <cmath>
+#include <atomic>
 #include <string>
+#include <thread>
 
+#include <unistd.h>
+
+#include "client.h"
 #include "control.h"
+#include "server.h"
 #include "proto.h"
 #include "harness.h"
 
@@ -441,6 +447,122 @@ void test_ping() {
   CHECK(reply.find("pong") != std::string::npos);
 }
 
+// -------------------------------------------------------- over a real socket
+//
+// Everything above tests Control in isolation. This runs the whole path a
+// client actually takes -- Server on one thread, octo::query from another,
+// over a Unix socket -- because the seam between them is where a line protocol
+// usually breaks: a reply that never terminates, a request read in two pieces,
+// a handler that blocks the accept loop.
+
+void test_round_trip_over_a_socket() {
+  Control control;
+  {
+    octo::DaemonStatus d;
+    d.version = "test";
+    d.poll_s = 60.0;
+    control.set_daemon(d);
+  }
+  CameraStatus cam;
+  cam.id = "id-1";
+  cam.name = "A:1EAE18A7";
+  cam.present = true;
+  cam.has_error = true;
+  cam.error_s = -0.078;
+  control.publish_camera(cam);
+
+  const std::string path =
+      "/tmp/octo-test-" + std::to_string(getpid()) + ".sock";
+  ::unlink(path.c_str());
+
+  octo::Server server(
+      [&control](const std::string& line) { return control.handle(line); },
+      path);
+  std::string err;
+  CHECK(server.start(&err));
+
+  std::atomic<bool> running{true};
+  std::thread serving([&server, &running] {
+    while (running.load()) server.serve(50);
+  });
+
+  // A status query comes back parseable, with what was published in it.
+  std::string reply;
+  Status s;
+  CHECK(octo::query(path, "status", &reply, &err, 5.0));
+  CHECK(octo::parse_status(reply, &s, &err));
+  CHECK_EQ(static_cast<int>(s.cameras.size()), 1);
+  CHECK_EQ(s.cameras[0].name, std::string("A:1EAE18A7"));
+  CHECK_NEAR(s.cameras[0].error_s, -0.078, 1e-4);
+
+  // Queue a request over the wire, and see it arrive on the daemon side.
+  RequestResult r;
+  CHECK(octo::query(path, "sync camera=id-1", &reply, &err, 5.0));
+  CHECK(octo::parse_result(reply, &r, &err));
+  CHECK(r.state == RequestState::kQueued);
+
+  Request req;
+  CHECK(control.take_request(&req));
+  CHECK_EQ(static_cast<int>(req.cameras.size()), 1);
+  CHECK_EQ(req.cameras[0], std::string("id-1"));
+
+  // ...and the answer comes back through the same door.
+  control.finish(req.id, true, "corrected to within +4ms");
+  CHECK(octo::query(path, "result id=" + std::to_string(r.id), &reply, &err,
+                    5.0));
+  CHECK(octo::parse_result(reply, &r, &err));
+  CHECK(r.state == RequestState::kDone);
+  CHECK_EQ(r.message, std::string("corrected to within +4ms"));
+
+  // An unknown command over the wire is an error a client can read, not a
+  // dropped connection.
+  CHECK(octo::query(path, "frobnicate", &reply, &err, 5.0));
+  Status ignored;
+  CHECK(!octo::parse_status(reply, &ignored, &err));
+
+  // Several clients in a row, because the server drops each one after its
+  // reply and getting that wrong leaves the second hanging.
+  for (int i = 0; i < 5; ++i) {
+    CHECK(octo::query(path, "ping", &reply, &err, 5.0));
+    CHECK(reply.find("pong") != std::string::npos);
+  }
+
+  running = false;
+  serving.join();
+  server.shutdown();
+}
+
+void test_second_daemon_is_refused_the_socket() {
+  // Two sync daemons on one socket would each answer half the requests. The
+  // second one has to fail to start rather than silently take the path over.
+  const std::string path =
+      "/tmp/octo-test-dup-" + std::to_string(getpid()) + ".sock";
+  ::unlink(path.c_str());
+
+  Control control;
+  octo::Server first(
+      [&control](const std::string& line) { return control.handle(line); },
+      path);
+  std::string err;
+  CHECK(first.start(&err));
+
+  std::atomic<bool> running{true};
+  std::thread serving([&first, &running] {
+    while (running.load()) first.serve(50);
+  });
+
+  octo::Server second(
+      [&control](const std::string& line) { return control.handle(line); },
+      path);
+  std::string err2;
+  CHECK(!second.start(&err2));
+  CHECK(!err2.empty());
+
+  running = false;
+  serving.join();
+  first.shutdown();
+}
+
 }  // namespace
 
 int main() {
@@ -465,5 +587,7 @@ int main() {
   test_cameras_persist_but_go_absent();
   test_unknown_command_is_an_error_not_a_status();
   test_ping();
+  test_round_trip_over_a_socket();
+  test_second_daemon_is_refused_the_socket();
   return octotest::report("test_control");
 }

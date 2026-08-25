@@ -5,19 +5,28 @@
 Synchronise a Blackmagic camera's timecode with a Tentacle Sync, using a Mac as
 the proxy in the middle.
 
-Three programs, all C++, sharing one library:
+Two daemons, and the tools that talk to them. All C++, sharing one library:
 
 | | |
 |---|---|
 | `octomancerd` | watches the Tentacle Sync bench and says when a box has drifted. Passive: it never connects to anything. |
 | `octomancer-sync` | connects to the camera and sets its clock from the bench. The only part that acts. |
+| `octomancer` | the command everyone runs. Asks the daemons things and tells them to do things, over a socket. |
+| `Octomancer.app` | the same, with buttons. Also where notifications come from. |
 | `octomancer-report` | reads the log the sync daemon leaves behind and says what the clocks are actually doing. |
+| `octomancerctl` | the older, bench-only view of `octomancerd`. Still there; `octomancer` covers more. |
 
-The split between the first two is deliberate and is the main design decision
+The split between the two daemons is deliberate and is the main design decision
 in the project. `octomancerd` is meant to run all the time under launchd, so it
 is built so that it *cannot* disturb a recording: there is no `connect` and no
 `write` anywhere in it. Setting a clock is an action, and an action belongs in
-a program somebody chose to run.
+a program somebody chose to run — and in one whose Bluetooth grant can be taken
+away on its own, without also blinding the listener.
+
+Neither daemon has a user interface. Both serve a Unix socket, and everything
+you look at or press is a separate process asking over it. That is what lets
+the app be quit, restarted, or never run at all without affecting a single
+measurement.
 
 ## Building
 
@@ -116,6 +125,51 @@ confirmation, so a box parked near the threshold cannot spam you.
 
 `doc/service-notes.md` covers the architecture, the wire protocol, the
 threading, and why drift is refused rather than estimated from short samples.
+
+## Driving it
+
+`octomancer` is the front door. It has no radio of its own: every command is a
+question or an instruction put to a running daemon over its socket.
+
+```
+octomancer                          # status: the daemon, the bench, the cameras
+octomancer list-cameras             # one line each
+octomancer sync                     # correct the clock now, even if it looks fine
+octomancer sync --camera A:1EAE18A7 # ...that one. Repeat --camera for several.
+octomancer source                   # what is the timecode following?
+octomancer source time-of-day       # make it follow the camera's clock
+octomancer status --json | jq .     # for everything that isn't this program
+```
+
+`sync` overrules the gates that mean *there is no need* — already close enough,
+written recently, backed off after repeated failures. It does not overrule the
+ones that mean *must not*: a camera that is recording, one whose timecode does
+not follow its clock, or a daemon started with `--dry-run`. It says which it
+refused on and why.
+
+Because a correction takes tens of seconds — scan, connect, wait for a frame,
+write on a second boundary, verify — the daemon takes the request, hands back an
+id, and `octomancer` asks after it until it finishes. Interrupting the command
+does not interrupt the sync; `--no-wait` queues it and returns immediately.
+
+### The app
+
+`Octomancer.app` is the same set of controls with a window: a camera picker, the
+live figures, a **Sync Now** button, a timecode-source picker, and a menu-bar
+item showing the bench at a glance.
+
+It can notify you when a sync fails, when a camera syncs for the first time,
+and when a camera drops off the air — each one separately switchable, because
+which of those is worth interrupting someone for is a matter of taste and not
+something the daemon should decide on their behalf. The daemon emits all three
+regardless and the app filters, so turning one off costs nothing and turning it
+back on loses nothing but the backlog.
+
+**Start at boot** installs both daemons as LaunchAgents in your login session
+and starts them. Agents rather than system daemons, and deliberately:
+CoreBluetooth access is gated by the per-user privacy database, so a process
+outside a login session has no user to grant it the radio. `make install-agent`
+does exactly the same thing from a terminal.
 
 ## Keeping the camera on Tentacle time
 
@@ -337,7 +391,21 @@ Tested against a **Pocket Cinema Camera 6K Pro**:
   measures that offset and learns it rather than assuming it, which turned out
   to matter: it was −75 s before a power cycle and 0 after one.
 * Setting the timecode *directly* still doesn't work: the undocumented 9.4
-  parameter is accepted by GATT and ignored.
+  parameter is accepted by GATT and ignored. This is not an encoding mistake at
+  our end — seven distinct encodings were tried, five of them against a
+  deliberately frozen generator so that "no effect" and "small effect" could not
+  be confused, and none moved anything. 9.4 is read-only telemetry.
+  `doc/timecode-write-sweep.md` has the packets.
+* **4.7 is writable, and it is the only write ever found that moves the
+  timecode generator.** It selects what the timecode follows. At 0 it
+  free-runs as time of day and follows the RTC, which is the mode this whole
+  program depends on; at 1 it parks at `00:00:00:00` and stops. Anything above
+  1 is clamped to 1.
+
+  This matters beyond curiosity: with 4.7 set to 1 the camera reports a clock
+  roughly twelve hours wrong that no RTC write can fix, so `octomancer-sync`
+  reads 4.7 on connect and refuses to write, saying why, rather than trying
+  once an hour forever.
 
 Tested against a bench of **five Tentacle Sync boxes**:
 

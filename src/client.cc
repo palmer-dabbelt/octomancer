@@ -37,7 +37,7 @@ bool query(const std::string& socket_path, const std::string& command,
       // The overwhelmingly common failure is that the agent is not running,
       // and saying so beats reporting ENOENT at the user.
       if (saved == ENOENT || saved == ECONNREFUSED) {
-        *err = "octomancerd is not running (no socket at " + socket_path + ")";
+        *err = "no daemon is listening at " + socket_path;
       } else {
         *err = "connect " + socket_path + ": " + strerror(saved);
       }
@@ -54,7 +54,7 @@ bool query(const std::string& socket_path, const std::string& command,
     const double left = deadline - mono_now();
     if (left <= 0) {
       ::close(fd);
-      if (err) *err = "timed out sending to octomancerd";
+      if (err) *err = "timed out sending to " + socket_path;
       return false;
     }
     struct pollfd pfd = {fd, POLLOUT, 0};
@@ -75,7 +75,7 @@ bool query(const std::string& socket_path, const std::string& command,
     const double left = deadline - mono_now();
     if (left <= 0) {
       ::close(fd);
-      if (err) *err = "timed out waiting for octomancerd";
+      if (err) *err = "timed out waiting for " + socket_path;
       return false;
     }
     struct pollfd pfd = {fd, POLLIN, 0};

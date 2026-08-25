@@ -1,0 +1,58 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  octomancer-sync as a per-user LaunchAgent.
+
+  An Agent for the same reason octomancerd is one: CoreBluetooth access is
+  gated by the per-user privacy database, and a process outside a login session
+  has no user to grant it.
+
+  This is the half of octomancer that acts. It connects to a camera and writes
+  to its clock, and it is a separate agent from the listener precisely so that
+  it can be unloaded on its own -- `launchctl bootout gui/$UID/com.dabbelt
+  .octomancer-sync` stops anything being written without also stopping the
+  bench being watched.
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.dabbelt.octomancer-sync</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>@EXPANDED_BINDIR@/octomancer-sync</string>
+    <string>--poll</string>
+    <string>60</string>
+    <string>--log</string>
+    <string>@OCTO_LOGDIR@/octomancer-sync.jsonl</string>
+    <!--
+      Through the program rather than a StandardOutPath, because only the
+      process holding the descriptor can rotate the file it is writing to.
+    -->
+    <string>--console</string>
+    <string>@OCTO_LOGDIR@/octomancer-sync.out</string>
+  </array>
+
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <dict>
+    <key>SuccessfulExit</key>
+    <false/>
+  </dict>
+  <key>ThrottleInterval</key>
+  <integer>10</integer>
+
+  <!--
+    Not Background, unlike the listener. A Background ProcessType is subject to
+    App Nap and timer coalescing, and this process writes on a second boundary
+    after sleeping a measured number of milliseconds: coalescing that timer is
+    coalescing the whole point of the program.
+  -->
+  <key>ProcessType</key>
+  <string>Interactive</string>
+
+  <key>StandardErrorPath</key>
+  <string>@OCTO_LOGDIR@/octomancer-sync.err</string>
+</dict>
+</plist>

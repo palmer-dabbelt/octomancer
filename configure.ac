@@ -121,7 +121,8 @@ AC_CONFIG_FILES([Makefile
                  src/octomancerd-Info.plist
                  src/octomancer-sync-Info.plist
                  ui/Info.plist
-                 launchd/com.dabbelt.octomancerd.plist])
+                 launchd/com.dabbelt.octomancerd.plist
+                 launchd/com.dabbelt.octomancer-sync.plist])
 AC_OUTPUT
 
 AC_MSG_NOTICE([

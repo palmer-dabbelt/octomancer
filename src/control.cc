@@ -345,6 +345,8 @@ std::string render_status_json(const Status& s) {
   out += ",\"poll_s\":" + num_json(s.daemon.poll_s, 1);
   out += ",\"dry_run\":";
   out += s.daemon.dry_run ? "true" : "false";
+  out += ",\"any_writes\":";
+  out += s.daemon.any_writes_enabled ? "true" : "false";
   out += ",\"queued\":" + std::to_string(s.queued);
 
   if (s.bench.has) {
@@ -368,6 +370,8 @@ std::string render_status_json(const Status& s) {
     out += c.present ? "true" : "false";
     out += ",\"connected\":";
     out += c.connected ? "true" : "false";
+    out += ",\"may_write\":";
+    out += c.writes_enabled ? "true" : "false";
     if (c.has_error) out += ",\"error_s\":" + num_json(c.error_s, 4);
     if (!c.timecode.empty()) out += ",\"timecode\":" + json_string(c.timecode);
     if (c.has_fps) out += ",\"fps\":" + std::to_string(c.fps);
@@ -566,6 +570,24 @@ void Control::set_present(const std::string& id, bool present) {
   }
 }
 
+void Control::set_writes_enabled(const std::string& id, bool enabled) {
+  std::lock_guard<std::mutex> lock(mu_);
+  for (CameraStatus& c : cameras_) {
+    if (c.id == id) {
+      c.writes_enabled = enabled;
+      return;
+    }
+  }
+}
+
+std::vector<std::string> Control::camera_ids() const {
+  std::lock_guard<std::mutex> lock(mu_);
+  std::vector<std::string> out;
+  out.reserve(cameras_.size());
+  for (const CameraStatus& c : cameras_) out.push_back(c.id);
+  return out;
+}
+
 int64_t Control::queue(const Request& req) {
   std::lock_guard<std::mutex> lock(mu_);
   Entry e;
@@ -631,6 +653,11 @@ bool Control::take_reload() {
   const bool wanted = reload_requested_;
   reload_requested_ = false;
   return wanted;
+}
+
+bool Control::reload_pending() const {
+  std::lock_guard<std::mutex> lock(mu_);
+  return reload_requested_;
 }
 
 int Control::queued_count() const {

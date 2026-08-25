@@ -1085,8 +1085,8 @@ NSTextField* mono_label(NSString* text) {
 }
 
 // Permission is written to the configuration file, not sent over the socket:
-// the daemon only ever reads that file. Then it is told to re-read it, so the
-// change takes effect on the next cycle rather than at the next restart.
+// the daemon only ever reads that file. Then it is told to re-read it, which
+// it does within a quarter of a second, rather than at the next restart.
 - (void)writesToggled:(id)sender {
   (void)sender;
   const octo::CameraStatus* c = [self selectedCamera];

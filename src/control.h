@@ -221,6 +221,13 @@ class Control {
   void publish_camera(const CameraStatus& cam);
   void set_present(const std::string& id, bool present);
 
+  // Permission is the one part of a camera's published state that does not
+  // come from having just talked to it, so it has to be settable without a
+  // cycle: a camera enabled at midnight should not read as disabled until the
+  // next connection, a quarter of an hour later.
+  void set_writes_enabled(const std::string& id, bool enabled);
+  std::vector<std::string> camera_ids() const;
+
   // Take the oldest queued request, marking it running. False if none.
   bool take_request(Request* out);
   void finish(int64_t id, bool ok, const std::string& message);
@@ -238,6 +245,11 @@ class Control {
   // to read, on the daemon's thread, at a moment when it is not halfway
   // through deciding something with the old values.
   bool take_reload();
+
+  // Whether one is waiting, without taking it. The loop sleeps in slices and
+  // uses this to stop sleeping early, so a reload is acted on in a quarter of
+  // a second rather than whenever the next cycle happened to be due.
+  bool reload_pending() const;
 
   // Queue from inside the daemon rather than from a socket, which is how the
   // command line's one-shot modes reach the same code path.

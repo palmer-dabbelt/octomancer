@@ -8,6 +8,7 @@
 #include <cmath>
 #include <atomic>
 #include <string>
+#include <vector>
 #include <thread>
 
 #include <unistd.h>
@@ -604,6 +605,89 @@ void test_second_daemon_is_refused_the_socket() {
   first.shutdown();
 }
 
+// Enabling a camera has to be visible without waiting for the daemon to talk
+// to it again. The published picture of a camera is written when a cycle ends,
+// so permission -- which comes from a file, not from the camera -- would
+// otherwise read as unchanged until the next connection, which on a camera
+// that is already in step is a quarter of an hour away. This is exactly what
+// "I enabled it and it still says disabled" looks like from the outside.
+void test_permission_can_be_restated_without_a_cycle() {
+  Control control;
+  CameraStatus c;
+  c.id = "id";
+  c.name = "A";
+  c.present = true;
+  c.writes_enabled = false;
+  control.publish_camera(c);
+
+  Status s;
+  std::string err;
+  CHECK(octo::parse_status(control.handle("status"), &s, &err));
+  CHECK_EQ(static_cast<int>(s.cameras.size()), 1);
+  CHECK(!s.cameras[0].writes_enabled);
+
+  const std::vector<std::string> ids = control.camera_ids();
+  CHECK_EQ(static_cast<int>(ids.size()), 1);
+  CHECK_EQ(ids[0], std::string("id"));
+
+  control.set_writes_enabled("id", true);
+  CHECK(octo::parse_status(control.handle("status"), &s, &err));
+  CHECK(s.cameras[0].writes_enabled);
+  // Nothing else about the camera was disturbed on the way past.
+  CHECK_EQ(s.cameras[0].name, std::string("A"));
+  CHECK(s.cameras[0].present);
+
+  // An id nobody has published is not invented.
+  control.set_writes_enabled("other", true);
+  CHECK(octo::parse_status(control.handle("status"), &s, &err));
+  CHECK_EQ(static_cast<int>(s.cameras.size()), 1);
+}
+
+// The loop sleeps in quarter-second slices and needs to know a reload is
+// waiting without consuming it: taking it is the loop's job, at the top, where
+// nothing is halfway through being decided.
+void test_reload_can_be_seen_without_taking_it() {
+  Control control;
+  CHECK(!control.reload_pending());
+  CHECK(!control.take_reload());
+
+  control.handle("reload");
+  CHECK(control.reload_pending());
+  // Asking twice does not consume it.
+  CHECK(control.reload_pending());
+
+  CHECK(control.take_reload());
+  CHECK(!control.reload_pending());
+  CHECK(!control.take_reload());
+}
+
+// The JSON is a second rendering of the same status, and it had been missing
+// the two fields that say whether anything may be written at all -- so
+// anything reading it saw a camera that was enabled as though it were not.
+void test_json_carries_permission() {
+  Control control;
+  octo::DaemonStatus d;
+  d.version = "0";
+  d.any_writes_enabled = true;
+  control.set_daemon(d);
+
+  CameraStatus c;
+  c.id = "id";
+  c.writes_enabled = true;
+  control.publish_camera(c);
+
+  const std::string on = control.handle("json");
+  CHECK(on.find("\"any_writes\":true") != std::string::npos);
+  CHECK(on.find("\"may_write\":true") != std::string::npos);
+
+  d.any_writes_enabled = false;
+  control.set_daemon(d);
+  control.set_writes_enabled("id", false);
+  const std::string off = control.handle("json");
+  CHECK(off.find("\"any_writes\":false") != std::string::npos);
+  CHECK(off.find("\"may_write\":false") != std::string::npos);
+}
+
 }  // namespace
 
 int main() {
@@ -631,5 +715,8 @@ int main() {
   test_ping();
   test_round_trip_over_a_socket();
   test_second_daemon_is_refused_the_socket();
+  test_permission_can_be_restated_without_a_cycle();
+  test_reload_can_be_seen_without_taking_it();
+  test_json_carries_permission();
   return octotest::report("test_control");
 }

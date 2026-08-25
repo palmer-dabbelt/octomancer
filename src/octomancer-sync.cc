@@ -1686,7 +1686,8 @@ int main(int argc, char** argv) {
   // fresh install: no camera is enabled until somebody enables one.
   if (!conf.any_writes_enabled()) {
     say("NOTHING WILL BE SYNCED: no camera has writes enabled.");
-    say("  Enable one with `octomancer writes on`, or in Octomancer.app.");
+    say("  Enable one with `octomancer writes on --camera <id>`, or in"
+        " Octomancer.app.");
     say("  Configuration: %s%s", conf.path().c_str(),
         conf.file_exists() ? "" : " (does not exist yet)");
   } else {
@@ -1812,6 +1813,13 @@ int main(int argc, char** argv) {
             conf.any_writes_enabled() ? "writes enabled for at least one camera"
                                       : "NO camera has writes enabled");
         publish_daemon();
+        // Every camera already published is carrying the permission it had
+        // when it was last talked to. Restate it now, or enabling a camera
+        // reads as having done nothing until the next cycle -- which, on a
+        // camera that is already in step, is a quarter of an hour away.
+        for (const std::string& id : control.camera_ids()) {
+          control.set_writes_enabled(id, conf.writes_enabled(id));
+        }
       }
     }
 
@@ -1916,6 +1924,10 @@ int main(int argc, char** argv) {
     double remain = next_cycle - octo::mono_now();
     if (opt.use_daemon && remain > opt.presence_poll) remain = opt.presence_poll;
     for (double slept = 0.0; slept < remain && !g_stop; slept += 0.25) {
+      // A reload is somebody waiting at a terminal for an answer, so it is
+      // worth cutting the wait short for. Taking it is still the loop's job,
+      // at the top, where nothing is halfway through being decided.
+      if (control.reload_pending()) break;
       std::this_thread::sleep_for(std::chrono::milliseconds(250));
     }
   }

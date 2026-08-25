@@ -14,8 +14,6 @@
 // The Tentacle offset comes from octomancerd when it is running, because it
 // already keeps an hour of history per box and takes proper medians across it.
 // Failing that, this listens for itself.
-#include "config.h"
-
 #include <getopt.h>
 #include <signal.h>
 #include <unistd.h>
@@ -57,6 +55,13 @@ struct Options {
   std::string camera;  // name hint or BLE identifier
   std::string socket_path = octo::default_socket_path();
   std::string log_path = "octomancer-sync.jsonl";
+  std::string console_path;
+  octo::Rotation rotation;
+  // How often to ask octomancerd whether the camera is on the air. This is a
+  // socket read, not a scan: it costs nothing and it is what turns "the camera
+  // was switched on" into something noticed in seconds rather than at the next
+  // poll.
+  double presence_poll = 5.0;
   double watch_seconds = 20.0;
   bool once = false;
   bool show_all = false;
@@ -234,6 +239,36 @@ Bench read_bench(const Options& opt) {
   return listen_for_bench(opt);
 }
 
+// What octomancerd can see of the camera without connecting to it.
+//
+// `known` is false when there is nothing to ask -- no daemon running, or one
+// too old to watch for cameras -- and then this program falls back to finding
+// out the expensive way, with a scan.
+struct Presence {
+  bool known = false;
+  bool present = false;
+  uint64_t sessions = 0;
+  double since = 0.0;
+  std::string id;
+  std::string name;
+};
+
+Presence read_presence(const Options& opt) {
+  Presence p;
+  if (!opt.use_daemon) return p;
+  octo::Snapshot snap;
+  std::string err;
+  if (!octo::fetch(opt.socket_path, &snap, &err)) return p;
+  if (!snap.camera.reported) return p;
+  p.known = true;
+  p.present = snap.camera.present;
+  p.sessions = snap.camera.sessions;
+  p.since = snap.camera.since;
+  p.id = snap.camera.id;
+  p.name = snap.camera.name;
+  return p;
+}
+
 // ------------------------------------------------------------ camera side
 
 // Connect, scanning only when we have to. Once the identifier is known,
@@ -301,6 +336,11 @@ bool connect_camera(octo::CameraLink* link, octo::SyncState* state,
     say("connect failed: %s", err.c_str());
     return false;
   }
+  if (!state->camera_id.empty() && state->camera_id != id) {
+    // A different body. Nothing measured about the last one's clock says
+    // anything about this one's.
+    octo::forget_drift(state);
+  }
   state->camera_id = id;
   return true;
 }
@@ -330,8 +370,12 @@ bool aligned_write(octo::CameraLink* link, const Options& opt, double offset,
 // ------------------------------------------------------------------ a cycle
 
 void run_cycle(octo::CameraLink* link, octo::SyncState* state,
-               const Options& opt, octo::JsonLog* log) {
+               const Options& opt, octo::JsonLog* log, octo::PollPlan* plan) {
   Record rec;
+  // A cycle that never reaches the camera learns nothing about when to look
+  // again, so the floor stands until one does.
+  *plan = octo::PollPlan();
+  plan->seconds = opt.sync.poll;
 
   const Bench bench = read_bench(opt);
   const double offset = (opt.source == Source::kMac) ? 0.0 : bench.offset;
@@ -405,6 +449,12 @@ void run_cycle(octo::CameraLink* link, octo::SyncState* state,
   rec.num("error_s", error);
 
   const octo::Drift drift = octo::observe(opt.sync, state, error, now_mono);
+  if (drift.restarted) {
+    say("camera's clock jumped %+.3fs -- that is a power cycle, not drift;"
+        " forgetting what was measured about the old one", drift.restart_step);
+    rec.boolean("camera_restarted", true);
+    rec.num("restart_step_s", drift.restart_step, 3);
+  }
   if (drift.has_step) {
     rec.num("drift_ppm", drift.step_ppm, 2);
     rec.num("drift_dt_s", drift.step_dt, 1);
@@ -439,6 +489,23 @@ void run_cycle(octo::CameraLink* link, octo::SyncState* state,
         drift_note.c_str());
   }
 
+  // Worked out from whatever the cycle ends up knowing, so a write's effect on
+  // the rate limit is already in the state by the time this is asked.
+  auto plan_next = [&](double latest_error) {
+    *plan = octo::next_poll(opt.sync, *state, latest_error, fps,
+                            octo::mono_now());
+    rec.num("next_poll_s", plan->seconds, 1);
+    rec.str("next_poll_reason", plan->reason);
+    if (plan->until_actionable > 0.0) {
+      rec.num("actionable_in_s", plan->until_actionable, 1);
+    }
+    if (state->drift.has) {
+      rec.num("drift_estimate_ppm", state->drift.ppm, 2);
+      rec.num("drift_estimate_span_s", state->drift.span, 1);
+    }
+    if (!plan->message.empty()) say("%s", plan->message.c_str());
+  };
+
   const octo::Decision decision =
       octo::decide(opt.sync, *state, error, fps, recording, now_mono);
   rec.num("tolerance_s", decision.tolerance, 6);
@@ -450,6 +517,7 @@ void run_cycle(octo::CameraLink* link, octo::SyncState* state,
     say("%s", decision.message.c_str());
     rec.action(octo::action_name(decision.action));
     link->disconnect();
+    plan_next(error);
     log->record("cycle", rec.fields());
     return;
   }
@@ -523,6 +591,7 @@ void run_cycle(octo::CameraLink* link, octo::SyncState* state,
   }
 
   link->disconnect();
+  plan_next(err2);
   log->record("cycle", rec.fields());
 }
 
@@ -701,7 +770,20 @@ void usage(FILE* out) {
       "\n"
       "  --camera NAME|ID      which camera (default: the first one found)\n"
       "  --source tentacle|mac what to sync to (default tentacle)\n"
-      "  --poll SEC            how often to touch the camera (default 60)\n"
+      "  --poll SEC            shortest gap between cycles (default 60). Once\n"
+      "                        drift has been measured the real interval\n"
+      "                        stretches towards whenever a write could next\n"
+      "                        matter, and tightens again as that nears.\n"
+      "  --max-poll SEC        longest it may stretch to (default 900)\n"
+      "  --poll-slices N       observations to take across that wait (default"
+      " 4)\n"
+      "  --fixed-poll          do not adapt; use --poll for every cycle\n"
+      "  --presence-poll SEC   how often to ask octomancerd whether the camera"
+      "\n"
+      "                        is on the air (default 5). This is a socket"
+      " read,\n"
+      "                        not a scan, and it is what makes switching the\n"
+      "                        camera on trigger a sync within seconds.\n"
       "  --listen SEC          how long to listen for Tentacles when"
       " octomancerd\n"
       "                        is not running (default 8)\n"
@@ -709,6 +791,10 @@ void usage(FILE* out) {
       "  --no-daemon           always listen directly, never ask octomancerd\n"
       "  --log PATH            JSONL log ('' to disable, default"
       " octomancer-sync.jsonl)\n"
+      "  --console PATH        send stdout and stderr here, and rotate them\n"
+      "  --log-max-bytes N     rotate past this size, 0 to never (default"
+      " 16M)\n"
+      "  --log-keep N          generations to keep beside it (default 5)\n"
       "  --once                run a single cycle and exit\n"
       "  --dry-run             decide and log, but never write\n"
       "\n"
@@ -751,9 +837,18 @@ void usage(FILE* out) {
       "  --camera-wait SEC     how long to wait for camera state (default 6)\n"
       "  --scan-timeout SEC    BLE scan duration (default 20)\n"
       "  --connect-timeout SEC camera connect timeout (default 15)\n"
-      "  --min-drift-interval SEC   shortest gap whose drift is worth printing\n"
+      "  --min-drift-interval SEC   shortest gap whose drift is worth"
+      " believing\n"
       "                        (default 1800; shorter is quantisation, and is\n"
-      "                        logged but not shown)\n"
+      "                        logged but neither shown nor scheduled"
+      " against)\n"
+      "  --min-ppm N           floor under the drift used for scheduling\n"
+      "                        (default 5; a clock that measured 2 ppm this\n"
+      "                        afternoon will not hold it all night)\n"
+      "  --restart-step SEC    an error jump larger than this is a power"
+      " cycle,\n"
+      "                        not drift; everything learned is discarded\n"
+      "                        (default 1)\n"
       "  --fps N               fallback frame rate if the camera reports none\n"
       "\n"
       "instead of syncing\n"
@@ -774,12 +869,23 @@ bool parse_args(int argc, char** argv, Options* opt) {
     kMaxFailures, kBenchSpread, kRtcBias, kNoAdaptBias, kMaxBiasStep,
     kMaxAdapts, kLead, kVerifyWait, kCameraWait, kScanTimeout, kConnectTimeout,
     kMinDriftInterval, kFps, kScanOnly, kAll, kWatch, kRtcTest, kPacket,
+    kMaxPoll, kPollSlices, kFixedPoll, kPresencePoll, kConsole, kLogMax,
+    kLogKeep, kMinPpm, kRestartStep,
     kVersion, kHelp,
   };
   static const struct option longs[] = {
       {"camera", required_argument, nullptr, kCamera},
       {"source", required_argument, nullptr, kSource},
       {"poll", required_argument, nullptr, kPoll},
+      {"max-poll", required_argument, nullptr, kMaxPoll},
+      {"poll-slices", required_argument, nullptr, kPollSlices},
+      {"fixed-poll", no_argument, nullptr, kFixedPoll},
+      {"presence-poll", required_argument, nullptr, kPresencePoll},
+      {"console", required_argument, nullptr, kConsole},
+      {"log-max-bytes", required_argument, nullptr, kLogMax},
+      {"log-keep", required_argument, nullptr, kLogKeep},
+      {"min-ppm", required_argument, nullptr, kMinPpm},
+      {"restart-step", required_argument, nullptr, kRestartStep},
       {"listen", required_argument, nullptr, kListen},
       {"socket", required_argument, nullptr, kSocket},
       {"no-daemon", no_argument, nullptr, kNoDaemon},
@@ -830,6 +936,15 @@ bool parse_args(int argc, char** argv, Options* opt) {
         }
         break;
       case kPoll: opt->sync.poll = std::atof(optarg); break;
+      case kMaxPoll: opt->sync.max_poll = std::atof(optarg); break;
+      case kPollSlices: opt->sync.poll_slices = std::atoi(optarg); break;
+      case kFixedPoll: opt->sync.adaptive_poll = false; break;
+      case kPresencePoll: opt->presence_poll = std::atof(optarg); break;
+      case kConsole: opt->console_path = optarg; break;
+      case kLogMax: opt->rotation.max_bytes = std::atof(optarg); break;
+      case kLogKeep: opt->rotation.keep = std::atoi(optarg); break;
+      case kMinPpm: opt->sync.min_assumed_ppm = std::atof(optarg); break;
+      case kRestartStep: opt->sync.restart_step = std::atof(optarg); break;
       case kListen: opt->sync.listen = std::atof(optarg); break;
       case kSocket: opt->socket_path = optarg; break;
       case kNoDaemon: opt->use_daemon = false; break;
@@ -873,7 +988,7 @@ bool parse_args(int argc, char** argv, Options* opt) {
       case kRtcTest: opt->mode = Mode::kRtcTest; break;
       case kPacket: opt->mode = Mode::kPacket; break;
       case kVersion:
-        std::printf("octomancer-sync %s\n", PACKAGE_VERSION);
+        std::printf("octomancer-sync %s\n", OCTO_VERSION);
         std::exit(0);
       case kHelp:
         usage(stdout);
@@ -884,6 +999,17 @@ bool parse_args(int argc, char** argv, Options* opt) {
     }
   }
 
+  if (opt->sync.max_poll < opt->sync.poll) {
+    std::fprintf(stderr,
+                 "octomancer-sync: --max-poll (%.0f) is below --poll (%.0f);"
+                 " the ceiling cannot be under the floor.\n",
+                 opt->sync.max_poll, opt->sync.poll);
+    return false;
+  }
+  if (opt->sync.poll_slices < 1) {
+    std::fprintf(stderr, "octomancer-sync: --poll-slices must be at least 1.\n");
+    return false;
+  }
   if (opt->sync.max_failures < 1) {
     std::fprintf(stderr, "octomancer-sync: --max-failures must be at least 1,"
                          " or the daemon gives up before it has tried.\n");
@@ -933,7 +1059,14 @@ int main(int argc, char** argv) {
   if (opt.mode == Mode::kWatch) return mode_watch(link.get(), &state, opt);
   if (opt.mode == Mode::kRtcTest) return mode_rtc_test(link.get(), &state, opt);
 
+  octo::ConsoleLog console;
+  if (!console.open(opt.console_path, opt.rotation, &err)) {
+    std::fprintf(stderr, "octomancer-sync: %s\n", err.c_str());
+    return 1;
+  }
+
   octo::JsonLog log;
+  log.set_rotation(opt.rotation);
   if (!log.open(opt.log_path, &err)) {
     std::fprintf(stderr, "octomancer-sync: %s\n", err.c_str());
     return 1;
@@ -944,14 +1077,21 @@ int main(int argc, char** argv) {
           ? fmt("%.3fs", opt.sync.tolerance)
           : fmt("%g frame%s", opt.sync.tolerance_frames,
                 opt.sync.tolerance_frames == 1.0 ? "" : "s");
-  say("octomancer sync starting -- poll every %.0fs, tolerance %s, write at"
-      " most once per %s, %s",
-      opt.sync.poll, tol_desc.c_str(),
+  const std::string poll_desc =
+      opt.sync.adaptive_poll
+          ? fmt("poll every %.0fs to %s, by measured drift", opt.sync.poll,
+                octo::format_span(opt.sync.max_poll).c_str())
+          : fmt("poll every %.0fs", opt.sync.poll);
+  say("octomancer sync starting -- %s, tolerance %s, write at most once per"
+      " %s, %s",
+      poll_desc.c_str(), tol_desc.c_str(),
       octo::format_span(opt.sync.min_write_interval).c_str(),
       opt.sync.dry_run ? "DRY RUN" : "will write");
 
   Record start;
   start.num("poll_s", opt.sync.poll, 1);
+  start.num("max_poll_s", opt.sync.max_poll, 1);
+  start.boolean("adaptive_poll", opt.sync.adaptive_poll);
   if (opt.sync.has_tolerance) start.num("tolerance_s", opt.sync.tolerance, 6);
   start.num("tolerance_frames", opt.sync.tolerance_frames, 3);
   start.num("write_tolerance_s", opt.sync.write_tolerance, 3);
@@ -961,14 +1101,87 @@ int main(int argc, char** argv) {
   start.str("source", opt.source == Source::kMac ? "mac" : "tentacle");
   log.record("start", start.fields());
 
-  while (!g_stop) {
-    const double started = octo::mono_now();
-    run_cycle(link.get(), &state, opt, &log);
-    if (opt.once) break;
+  // The camera comes and goes, and the two ways of finding that out cost
+  // wildly different amounts. Asking octomancerd is a socket read; scanning
+  // for it is twenty seconds of radio. So the loop below asks the cheap
+  // question often and the expensive one only when it has a reason to.
+  Presence last = read_presence(opt);
+  if (last.known) {
+    say("octomancerd is watching for the camera -- %s%s%s",
+        last.present ? "on the air now" : "not on the air",
+        last.name.empty() ? "" : ", ", last.name.c_str());
+  } else if (opt.use_daemon) {
+    say("no camera watch from octomancerd -- scanning for the camera each"
+        " cycle instead");
+  }
 
-    // Sleep in slices so a signal is noticed promptly rather than a minute
-    // later: an operator who hits Ctrl-C expects the radio released now.
-    const double remain = opt.sync.poll - (octo::mono_now() - started);
+  double next_cycle = octo::mono_now();  // the first one runs straight away
+  // Even with a presence signal, look properly now and then. The daemon can be
+  // wrong about a camera -- one that is connected to another app stops
+  // advertising -- and a whole night on a wrong answer is worth avoiding for
+  // the price of one scan a quarter of an hour.
+  double next_blind_check = 0.0;
+
+  while (!g_stop) {
+    console.maybe_rotate();
+    const double now = octo::mono_now();
+    const Presence cam = read_presence(opt);
+
+    const bool came_up = cam.known && cam.present &&
+                         (!last.known || !last.present ||
+                          cam.sessions != last.sessions);
+    if (came_up) {
+      say("camera came up%s%s -- syncing now",
+          cam.name.empty() ? "" : " -- ", cam.name.c_str());
+      Record up;
+      up.str("state", "up");
+      up.str("camera_id", cam.id);
+      up.str("camera_name", cam.name);
+      up.integer("sessions", static_cast<long long>(cam.sessions));
+      log.record("camera", up.fields());
+      // Almost every way a camera goes off the air and comes back involves its
+      // clock being reset, so nothing measured before this point can be
+      // trusted to describe what is running now.
+      octo::forget_drift(&state);
+      next_cycle = now;
+    } else if (cam.known && last.known && last.present && !cam.present) {
+      // Expected after every cycle that connects -- a camera stops
+      // advertising while something is talking to it -- so this is a log line,
+      // not a cause for alarm.
+      Record down;
+      down.str("state", "down");
+      down.str("camera_id", cam.id);
+      log.record("camera", down.fields());
+    }
+    last = cam;
+
+    if (now >= next_cycle) {
+      const bool blind_due = now >= next_blind_check;
+      if (!cam.known || cam.present || blind_due) {
+        if (cam.known && !cam.present) {
+          // The presence signal can be wrong -- a camera connected to another
+          // app stops advertising -- so it is checked directly now and then
+          // rather than trusted for a whole night.
+          say("octomancerd has not heard the camera; looking directly anyway");
+        }
+        next_blind_check = now + opt.sync.max_poll;
+        octo::PollPlan plan;
+        run_cycle(link.get(), &state, opt, &log, &plan);
+        if (opt.once) break;
+        next_cycle = octo::mono_now() + plan.seconds;
+      } else {
+        // Nothing on the air to connect to. The presence check at the top of
+        // the loop is what will notice when that changes.
+        next_cycle = now + opt.presence_poll;
+      }
+    }
+
+    // Sleep in slices so a signal is noticed promptly rather than a quarter of
+    // an hour later: an operator who hits Ctrl-C expects the radio released
+    // now. The wait is capped at the presence interval so a camera coming up
+    // is never sat on for longer than that.
+    double remain = next_cycle - octo::mono_now();
+    if (opt.use_daemon && remain > opt.presence_poll) remain = opt.presence_poll;
     for (double slept = 0.0; slept < remain && !g_stop; slept += 0.25) {
       std::this_thread::sleep_for(std::chrono::milliseconds(250));
     }

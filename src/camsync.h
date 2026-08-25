@@ -56,6 +56,26 @@ struct SyncOptions {
   int max_bias_step = 120;
   int max_adapts = 4;
 
+  // --- how often to look -------------------------------------------------
+  //
+  // `poll` is the floor, not the schedule. Once drift has been measured, the
+  // interval stretches towards the moment something could actually need doing
+  // and shortens again as that moment approaches; see next_poll().
+  bool adaptive_poll = true;
+  double max_poll = 900.0;
+  // How many observations to take across the wait. Each poll sleeps 1/N of the
+  // remaining wait, so the cadence is coarse when the next action is far off
+  // and tightens as it nears, without ever overshooting it by more than one
+  // interval.
+  int poll_slices = 4;
+  // A floor under the drift figure used for scheduling. A clock that measured
+  // 2 ppm this afternoon is not a clock that will hold 2 ppm all night --
+  // temperature alone moves these by more than that.
+  double min_assumed_ppm = 5.0;
+  // An error jump larger than this is not drift; it is the camera having been
+  // switched off and on again. See observe().
+  double restart_step = 1.0;
+
   double min_drift_interval = 1800.0;
   double lead = 0.05;
   double verify_wait = 3.0;
@@ -66,6 +86,16 @@ struct SyncOptions {
   double bench_spread = 0.5;
   int fps = 24;
   bool dry_run = false;
+};
+
+// A drift figure good enough to schedule against, learned from a completed
+// free-running stretch. Not the same thing as the per-cycle Drift below: this
+// one survives writes, and only a camera restart clears it.
+struct DriftEstimate {
+  bool has = false;
+  double ppm = 0.0;
+  double span = 0.0;   // the lever arm it was measured over
+  int samples = 0;     // how many stretches have contributed
 };
 
 // Everything carried between cycles. Kept in one struct so a test can put the
@@ -90,8 +120,23 @@ struct SyncState {
   double anchor_mono = 0.0;
   double anchor_error = 0.0;
 
+  DriftEstimate drift;
+
   std::string camera_id;
 };
+
+// Throw away everything measured against the camera's old clock.
+//
+// A power cycle resets the camera's RTC, so every drift figure taken across it
+// is measuring the step, not the clock. It also clears the failure counters:
+// if the daemon had decided an external source owned this camera, a camera
+// that has just been switched on deserves to be asked again.
+//
+// The learned RTC bias deliberately survives. It is the only thing here that
+// took hours to acquire -- a bias adjustment costs a write, and writes are
+// rationed -- and if the power cycle did change it, judge_write() will find
+// that out on the next write anyway.
+void forget_drift(SyncState* state);
 
 enum class Action {
   kWrite,
@@ -134,6 +179,11 @@ struct Drift {
   double anchor_ppm = 0.0;
   double anchor_span = 0.0;
   bool anchor_shown = false;
+
+  // The camera's clock moved further in one interval than drift can explain.
+  // Everything learned about the old clock has been discarded.
+  bool restarted = false;
+  double restart_step = 0.0;
 };
 
 // Fold one observation into the state and report what it implies about drift.
@@ -186,6 +236,42 @@ double aligned_wait(double now_unix, double offset, double bias, double lead);
 // truncating throws away a whole second and lands the camera ~1 s slow every
 // single time.
 bmd::Civil aligned_value(double send_unix, double offset, double bias);
+
+// --- how long to wait before looking again ---------------------------------
+
+// The drift figure to schedule against, in ppm, widened for what the
+// measurement cannot resolve.
+//
+// The camera reports whole frames, so a figure measured over `span` carries a
+// frame of quantisation at each end -- half an hour of watching at 24 fps
+// cannot distinguish 25 ppm from 48. Scheduling against the fast end of that
+// range costs a few extra wakeups; scheduling against the middle means
+// arriving late, which is the failure that matters.
+double drift_bound_ppm(const SyncOptions& opt, const DriftEstimate& est,
+                       int fps);
+
+struct PollPlan {
+  double seconds = 60.0;
+  // When the clock could next be both wrong enough to matter and allowed to be
+  // written. Zero means "now", which is the ordinary case.
+  double until_actionable = 0.0;
+  const char* reason = "floor";  // floor | drift | rate-limit | fixed
+  std::string message;           // the console line, empty when unremarkable
+};
+
+// How long to sleep before the next cycle.
+//
+// Two things have to be true before a write can happen: the clock has to be
+// wrong by more than the trigger threshold, and the rate limit has to have
+// lapsed. Whichever is further away sets the horizon, and the interval is one
+// slice of it -- so a camera that has just been corrected is left alone for
+// most of the hour, and one about to cross the threshold is watched closely.
+//
+// Never longer than max_poll and never shorter than poll: the first bounds how
+// long a camera can be unattended after something unexpected, and the second
+// is what a caller asking for a fixed cadence gets.
+PollPlan next_poll(const SyncOptions& opt, const SyncState& state, double error,
+                   int fps, double now_mono);
 
 // A duration a human reads at a glance: "38s", "2m", "1.0h".
 std::string format_span(double seconds);

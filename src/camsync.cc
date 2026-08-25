@@ -77,7 +77,12 @@ Decision decide(const SyncOptions& opt, const SyncState& state, double error,
   // whether it is worth doing anything about it yet. They are separate
   // questions once the threshold is tight enough that the answer to the first
   // one is nearly always yes.
-  if (state.has_last_write) {
+  //
+  // A write that is still converging is exempt. judge_write() promises to
+  // retry on the next cycle after a bias adjustment, and the rate limit would
+  // otherwise turn "next cycle" into "next hour" and make convergence take
+  // half a day. max_adapts bounds how many writes this can let through.
+  if (state.has_last_write && state.adapts == 0) {
     const double since = now_mono - state.last_write_mono;
     if (since < opt.min_write_interval) {
       d.action = Action::kSkipRateLimited;
@@ -99,9 +104,30 @@ Decision decide(const SyncOptions& opt, const SyncState& state, double error,
   return d;
 }
 
+void forget_drift(SyncState* state) {
+  state->drift = DriftEstimate();
+  state->has_last_obs = false;
+  state->has_anchor = false;
+  state->wrote_since_obs = false;
+  state->failures = 0;
+  state->adapts = 0;
+}
+
 Drift observe(const SyncOptions& opt, SyncState* state, double error,
               double now_mono) {
   Drift drift;
+
+  // A jump this large is not a clock walking, it is a clock being set. In
+  // practice that means the camera was switched off and on again: this bench
+  // logged -0.023s at 06:32 and -3.897s at 06:47, which fits as 4300 ppm and
+  // is nothing of the sort. Fitting it would poison the poll schedule for the
+  // rest of the night, so everything measured against the old clock goes.
+  if (state->has_last_obs && !state->wrote_since_obs &&
+      std::fabs(error - state->last_obs_error) > opt.restart_step) {
+    drift.restarted = true;
+    drift.restart_step = error - state->last_obs_error;
+    forget_drift(state);
+  }
 
   if (state->has_last_obs && !state->wrote_since_obs) {
     const double dt = now_mono - state->last_obs_mono;
@@ -132,8 +158,85 @@ Drift observe(const SyncOptions& opt, SyncState* state, double error,
     drift.anchor_span = span;
     drift.anchor_ppm = (error - state->anchor_error) / span * 1e6;
     drift.anchor_shown = span >= opt.min_drift_interval;
+    // Only a lever arm long enough to have resolved something is worth
+    // scheduling against. The same threshold that decides whether to print the
+    // figure decides whether to believe it.
+    if (drift.anchor_shown) {
+      const int seen = state->drift.samples;
+      state->drift.has = true;
+      state->drift.ppm = drift.anchor_ppm;
+      state->drift.span = span;
+      state->drift.samples = seen + 1;
+    }
   }
   return drift;
+}
+
+double drift_bound_ppm(const SyncOptions& opt, const DriftEstimate& est,
+                       int fps) {
+  if (!est.has) return 0.0;
+  int rate = fps > 0 ? fps : opt.fps;
+  if (rate <= 0) rate = 24;
+  const double quantisation =
+      est.span > 0.0 ? (1.0 / rate) / est.span * 1e6 : 0.0;
+  double bound = std::fabs(est.ppm) + quantisation;
+  if (bound < opt.min_assumed_ppm) bound = opt.min_assumed_ppm;
+  return bound;
+}
+
+PollPlan next_poll(const SyncOptions& opt, const SyncState& state, double error,
+                   int fps, double now_mono) {
+  PollPlan plan;
+  plan.seconds = opt.poll;
+  if (!opt.adaptive_poll) {
+    plan.reason = "fixed";
+    return plan;
+  }
+
+  // How long until the clock is wrong by more than the trigger threshold.
+  // Without a drift figure this is zero: not knowing how fast a clock walks is
+  // a reason to keep watching it, not a licence to look away.
+  double until_wrong = 0.0;
+  double bound = 0.0;
+  const double tolerance = trigger_tolerance(opt, fps);
+  if (state.drift.has) {
+    bound = drift_bound_ppm(opt, state.drift, fps);
+    const double headroom = tolerance - std::fabs(error);
+    if (headroom > 0.0 && bound > 0.0) until_wrong = headroom / (bound * 1e-6);
+  }
+
+  // How long until a write would be allowed at all.
+  double until_allowed = 0.0;
+  if (state.has_last_write && state.adapts == 0) {
+    until_allowed = opt.min_write_interval - (now_mono - state.last_write_mono);
+    if (until_allowed < 0.0) until_allowed = 0.0;
+  }
+
+  const bool gated = until_allowed >= until_wrong;
+  plan.until_actionable = gated ? until_allowed : until_wrong;
+
+  const int slices = opt.poll_slices > 0 ? opt.poll_slices : 1;
+  double want = plan.until_actionable / slices;
+  if (want > opt.max_poll) want = opt.max_poll;
+  if (want < opt.poll) want = opt.poll;
+  plan.seconds = want;
+
+  if (want <= opt.poll) {
+    plan.reason = "floor";
+    return plan;
+  }
+  if (gated) {
+    plan.reason = "rate-limit";
+    plan.message = fmt("  nothing to do for %s (rate limit) -- next look in %s",
+                       format_span(plan.until_actionable).c_str(),
+                       format_span(want).c_str());
+  } else {
+    plan.reason = "drift";
+    plan.message = fmt("  %.0f ppm needs %s to reach %.0fms -- next look in %s",
+                       bound, format_span(plan.until_actionable).c_str(),
+                       tolerance * 1000.0, format_span(want).c_str());
+  }
+  return plan;
 }
 
 WriteOutcome judge_write(const SyncOptions& opt, SyncState* state,

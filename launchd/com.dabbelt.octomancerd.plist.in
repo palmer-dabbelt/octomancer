@@ -19,6 +19,14 @@
     <string>--foreground</string>
     <string>--log</string>
     <string>@OCTO_LOGDIR@/octomancerd.jsonl</string>
+    <!--
+      The console goes through the program rather than through a
+      StandardOutPath, because only the process holding the descriptor can
+      rotate the file it is writing to. Renaming a file launchd opened leaves
+      the daemon appending to an unnamed inode for the rest of the night.
+    -->
+    <string>--console</string>
+    <string>@OCTO_LOGDIR@/octomancerd.out</string>
   </array>
 
   <!-- launchd supervises the process; the daemon must not fork away from it. -->
@@ -38,8 +46,8 @@
   <key>LowPriorityIO</key>
   <true/>
 
-  <key>StandardOutPath</key>
-  <string>@OCTO_LOGDIR@/octomancerd.out</string>
+  <!-- Only what escapes before --console takes effect, plus anything launchd
+       itself has to say about a failed start. -->
   <key>StandardErrorPath</key>
   <string>@OCTO_LOGDIR@/octomancerd.err</string>
 </dict>

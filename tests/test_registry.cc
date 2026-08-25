@@ -181,6 +181,87 @@ void test_median_helper() {
   CHECK_NEAR(median_offset({}), 0.0, 1e-9);
 }
 
+
+// --- the camera -----------------------------------------------------------
+
+// A camera stops advertising while something holds a connection to it, and
+// octomancer-sync holds one for about twenty seconds every cycle. If that read
+// as the camera being switched off, every correction would look like a power
+// cycle and throw away the drift figure it had just spent an hour measuring.
+void test_a_sync_cycle_is_not_a_power_cycle() {
+  octo::Policy policy;
+  octo::Registry reg(policy, 0.0);
+
+  for (double t = 0.0; t < 60.0; t += 1.0) {
+    reg.observe_camera("CAM", "BMPCC 6K Pro", -60, t, 1000.0 + t);
+  }
+  octo::Snapshot snap = reg.snapshot(60.0, 1060.0);
+  CHECK(snap.camera.reported);
+  CHECK(snap.camera.seen);
+  CHECK(snap.camera.present);
+  CHECK_EQ(snap.camera.sessions, 1u);
+
+  // Silent for twenty-five seconds while a write happens: still present.
+  snap = reg.snapshot(85.0, 1085.0);
+  CHECK(snap.camera.present);
+  CHECK_EQ(snap.camera.sessions, 1u);
+
+  // ...and back, with no new session.
+  reg.observe_camera("CAM", "BMPCC 6K Pro", -60, 86.0, 1086.0);
+  snap = reg.snapshot(86.0, 1086.0);
+  CHECK(snap.camera.present);
+  CHECK_EQ(snap.camera.sessions, 1u);
+}
+
+void test_power_cycle_counts_a_new_session() {
+  octo::Policy policy;
+  octo::Registry reg(policy, 0.0);
+
+  reg.observe_camera("CAM", "BMPCC", -60, 10.0, 1010.0);
+  CHECK(reg.snapshot(10.0, 1010.0).camera.present);
+
+  // Gone for well past the timeout.
+  octo::Snapshot gone = reg.snapshot(200.0, 1200.0);
+  CHECK(gone.camera.seen);
+  CHECK(!gone.camera.present);
+  CHECK_EQ(gone.camera.sessions, 1u);
+  // The absence is dated from when it stopped talking, not from when the
+  // timeout expired.
+  CHECK_NEAR(gone.camera.since, 190.0, 1e-6);
+
+  reg.observe_camera("CAM", "BMPCC", -58, 300.0, 1300.0);
+  octo::Snapshot back = reg.snapshot(300.0, 1300.0);
+  CHECK(back.camera.present);
+  CHECK_EQ(back.camera.sessions, 2u);
+  CHECK_NEAR(back.camera.up_wall, 1300.0, 1e-6);
+  CHECK_NEAR(back.camera.since, 0.0, 1e-6);
+}
+
+// Two cameras in the room is not a situation octomancer has an answer for, and
+// alternating between them would flap the presence flag every advertisement.
+void test_a_second_camera_is_ignored() {
+  octo::Policy policy;
+  octo::Registry reg(policy, 0.0);
+
+  reg.observe_camera("FIRST", "Ursa", -50, 1.0, 1001.0);
+  reg.observe_camera("SECOND", "Pocket", -40, 2.0, 1002.0);
+
+  const octo::Snapshot snap = reg.snapshot(2.0, 1002.0);
+  CHECK_STR(snap.camera.id, "FIRST");
+  CHECK_STR(snap.camera.name, "Ursa");
+  CHECK_EQ(snap.camera.adverts, 1u);
+  CHECK_EQ(snap.camera.sessions, 1u);
+}
+
+void test_never_seen_is_reported_as_such() {
+  octo::Policy policy;
+  octo::Registry reg(policy, 0.0);
+  const octo::Snapshot snap = reg.snapshot(100.0, 1100.0);
+  CHECK(snap.camera.reported);
+  CHECK(!snap.camera.seen);
+  CHECK(!snap.camera.present);
+  CHECK_EQ(snap.camera.sessions, 0u);
+}
 }  // namespace
 
 int main() {
@@ -191,5 +272,9 @@ int main() {
   test_no_flapping_in_the_band();
   test_host_clock_step_is_not_drift();
   test_staleness_and_bench_spread();
+  test_a_sync_cycle_is_not_a_power_cycle();
+  test_power_cycle_counts_a_new_session();
+  test_a_second_camera_is_ignored();
+  test_never_seen_is_reported_as_such();
   return octotest::report("test_registry");
 }

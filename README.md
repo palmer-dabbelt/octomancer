@@ -37,6 +37,25 @@ make install-agent    # run the watcher at login as a LaunchAgent
 make install-app      # the menu-bar app, into ~/Applications
 ```
 
+One `configure`, one `Makefile`, no recursion and no generated `config.h` —
+a config header is a file every translation unit depends on and that
+`./configure` rewrites, so keeping one would mean a no-op reconfigure rebuilt
+the whole tree for the sake of a single version string.
+
+While working on it:
+
+```
+./configure --enable-sanitizers   # address,undefined, in .cc and .mm alike
+./configure --enable-werror
+```
+
+The sanitizer flags go into `CXXFLAGS`, `OBJCXXFLAGS` and `LDFLAGS` together,
+because instrumenting the C++ differently from the Objective-C++ it links
+against produces reports about nothing. Leak detection is deliberately not in
+that set: LeakSanitizer is not implemented on macOS, so asking for it would
+give a build that succeeds and silently never checks. Use
+`leaks --atExit -- ./octomancerd --probe 5` for that.
+
 macOS will ask for Bluetooth permission the first time each binary runs. Until
 it is granted, a scan finds nothing rather than failing, so grant it before
 wondering why nothing happens. `octomancerd` and `octomancer-sync` ask
@@ -70,6 +89,24 @@ octomancerctl watch        # redraw until interrupted
 octomancerctl json | jq .  # for everything that isn't this program
 ```
 
+It also watches for the camera, which is the one thing it does that is not
+about Tentacles. Nothing is decoded and nothing is connected to — a camera puts
+no clock in its advertisement — so all it can report is whether the camera is
+on the air, and how many times it has come and gone:
+
+```
+camera on the air -- Pocket Cinema Camera 6K Pro  up for 2h14m,  3 sessions
+```
+
+That is worth having because it is the cheap half of a question
+`octomancer-sync` would otherwise answer with a twenty-second scan every
+minute. The radio is already listening, so noticing costs nothing.
+
+A camera stops advertising while something holds a connection to it, so "off
+the air" means "not advertising", not "switched off"; `--camera-gone-after`
+(90 s) is set well above the twenty seconds a sync cycle spends connected, so
+an ordinary correction is not mistaken for a power cycle.
+
 It notifies you when a box drifts more than a minute from this Mac, which is
 the signal to re-jam it in the Tentacle app. That judgement is made on a median
 rather than a single reading, with hysteresis and three-observation
@@ -96,8 +133,8 @@ produce. Failing that it listens for itself.
 
 The camera is the expensive half: connecting takes seconds, and every
 connection is a chance to disturb an operator mid-shot. So the Tentacle side is
-sampled passively and the camera is touched once a minute at most, with a gate
-on every write:
+sampled passively and the camera is touched as rarely as the arithmetic allows,
+with a gate on every write:
 
 * **Recording.** Never touch the clock while transport mode (10.1) says Record.
   Jumping timecode mid-take corrupts the take.
@@ -132,8 +169,61 @@ Two things it learns rather than assumes: the camera's own RTC offset (−75 s
 before a power cycle, 0 after one, so a fixed value never converges), and
 whether the Tentacle bench agrees with itself.
 
+### How often it looks
+
+`--poll` is the floor, not the schedule. Two things have to be true before a
+write can happen — the clock has to be wrong by more than the threshold, and
+the rate limit has to have lapsed — and whichever is further off sets the
+horizon. Each cycle sleeps a quarter of the remaining wait, so the cadence is
+coarse when there is nothing to do and tightens as the moment approaches,
+bounded by `--poll` below and `--max-poll` (15 minutes) above.
+
+This is what a measured drift figure buys. At the −24.8 ppm this camera
+actually shows, half a frame at 24 fps takes about nine minutes to accumulate,
+so watching every sixty seconds is nine times more often than the clock can
+change its mind. An hour that used to cost sixty connections now costs a dozen
+or so, without ever arriving late.
+
+The figure used for scheduling is deliberately pessimistic. The camera reports
+whole frames, so a drift measured over an hour carries about 12 ppm it cannot
+resolve; that is added rather than averaged away, and `--min-ppm` puts a floor
+under the whole thing, because a clock that measured 2 ppm this afternoon is
+not a clock that will hold 2 ppm all night. Arriving early costs a radio
+wakeup. Arriving late costs the take.
+
+### Power cycles
+
+A power cycle resets the camera's RTC, which makes every drift figure measured
+across it a measurement of the step rather than of the clock. This bench logged
+−0.023 s at 06:32 and −3.897 s at 06:47: fitted as drift that is 4300 ppm, and
+it is nothing of the sort.
+
+Two things catch it. `octomancerd` counts the camera's absent-to-present
+transitions, and a new session makes `octomancer-sync` sync immediately and
+throw away what it had learned. Independently, any error jump larger than
+`--restart-step` (1 s) between consecutive observations is treated as a clock
+being *set* rather than a clock walking, which catches the case where the
+camera went away and came back between two looks. Either way the drift
+estimate, the drift anchor and the failure counters are cleared — including the
+"an external source owns this camera" back-off, because a camera that has just
+been switched on deserves to be asked again. The learned RTC bias survives,
+being the one thing here that costs hours to reacquire.
+
+Switching the camera on is noticed within seconds rather than at the next poll:
+`--presence-poll` (5 s) is a read of `octomancerd`'s socket, not a scan.
+Without a daemon to ask, it falls back to scanning each cycle as before.
+
+### Logs
+
 Every cycle is logged to `octomancer-sync.jsonl`, including the ones where
-nothing happened, so there is drift data to tune against later.
+nothing happened, so there is drift data to tune against later. Both programs
+rotate their own logs — `--log-max-bytes` (16M) and `--log-keep` (5) — which
+bounds them at six generations on disk.
+
+Rotating the human-readable output needs `--console PATH` rather than a shell
+redirect or launchd's `StandardOutPath`. A file the program does not hold open
+cannot be rotated safely: renaming it leaves the writer appending to an inode
+with no name, which is how rotation silently loses a night of data.
 
 ## Looking at the log
 

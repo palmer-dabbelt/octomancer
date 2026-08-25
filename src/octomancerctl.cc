@@ -1,6 +1,4 @@
 // octomancerctl -- ask the running agent what it can see.
-#include "config.h"
-
 #include <getopt.h>
 #include <time.h>
 #include <signal.h>

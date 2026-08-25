@@ -5,7 +5,13 @@
 
 ACLOCAL_AMFLAGS = -I m4
 
-AM_CPPFLAGS = -I$(top_srcdir)/src -I$(top_builddir)
+# The version is handed over on the command line rather than through a
+# generated config.h. A config header is a file every translation unit
+# depends on and that ./configure rewrites, so a no-op reconfigure rebuilds
+# the entire tree; for the one string actually wanted from it, that trade is
+# not worth making.
+AM_CPPFLAGS = -I$(top_srcdir)/src -I$(top_builddir) \
+	-DOCTO_VERSION=\"$(PACKAGE_VERSION)\"
 
 EXTRA_DIST = autogen.sh README.md tests/data/adverts.golden
 
@@ -157,6 +163,7 @@ AM_OBJCXXFLAGS = -fobjc-arc -std=c++17
 check_PROGRAMS = \
 	tests/test_bmd \
 	tests/test_camsync \
+	tests/test_jsonlog \
 	tests/test_logscan \
 	tests/test_proto \
 	tests/test_registry \
@@ -181,6 +188,9 @@ tests_test_bmd_LDADD = libocto.a
 
 tests_test_camsync_SOURCES = tests/test_camsync.cc tests/harness.h
 tests_test_camsync_LDADD = libocto.a
+
+tests_test_jsonlog_SOURCES = tests/test_jsonlog.cc tests/harness.h
+tests_test_jsonlog_LDADD = libocto.a
 
 tests_test_logscan_SOURCES = tests/test_logscan.cc tests/harness.h
 tests_test_logscan_LDADD = libocto.a

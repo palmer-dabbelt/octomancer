@@ -175,6 +175,42 @@ void Registry::observe(const std::string& id, const std::string& name, int rssi,
   }
 }
 
+void Registry::observe_camera(const std::string& id, const std::string& name,
+                              int rssi, double mono, double wall) {
+  std::lock_guard<std::mutex> lock(mu_);
+
+  // A second camera in the room is not something octomancer has an answer for,
+  // and picking one arbitrarily every advertisement would flap the presence
+  // flag between them. Keep the first one heard and ignore the rest; the sync
+  // daemon's --camera hint is where choosing between cameras belongs.
+  if (camera_.seen && !camera_.id.empty() && camera_.id != id) return;
+
+  age_camera(mono);
+
+  camera_.id = id;
+  if (!name.empty()) camera_.name = name;
+  camera_.rssi = rssi;
+  camera_.adverts += 1;
+  camera_.last_seen_mono = mono;
+  camera_.seen = true;
+
+  if (!camera_.present) {
+    camera_.present = true;
+    camera_.sessions += 1;
+    camera_.state_since_mono = mono;
+    camera_.up_wall = wall;
+  }
+}
+
+void Registry::age_camera(double mono) const {
+  if (!camera_.present) return;
+  if (mono - camera_.last_seen_mono <= policy_.camera_gone_after) return;
+  camera_.present = false;
+  // Date the absence from the last time it was heard, not from the moment the
+  // timeout expired: the camera went away when it stopped talking.
+  camera_.state_since_mono = camera_.last_seen_mono;
+}
+
 Snapshot Registry::snapshot() const { return snapshot(mono_now(), wall_now()); }
 
 Snapshot Registry::snapshot(double mono, double wall) const {
@@ -237,6 +273,21 @@ Snapshot Registry::snapshot(double mono, double wall) const {
               if (a.name != b.name) return a.name < b.name;
               return a.id < b.id;
             });
+
+  age_camera(mono);
+  snap.camera.reported = true;
+  snap.camera.seen = camera_.seen;
+  snap.camera.present = camera_.present;
+  snap.camera.id = camera_.id;
+  snap.camera.name = camera_.name;
+  snap.camera.rssi = camera_.rssi;
+  snap.camera.adverts = camera_.adverts;
+  snap.camera.sessions = camera_.sessions;
+  snap.camera.up_wall = camera_.up_wall;
+  if (camera_.seen) {
+    snap.camera.age = mono - camera_.last_seen_mono;
+    snap.camera.since = mono - camera_.state_since_mono;
+  }
 
   if (!live_medians.empty()) {
     snap.has_bench = true;

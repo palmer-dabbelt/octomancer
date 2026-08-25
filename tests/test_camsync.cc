@@ -272,6 +272,237 @@ void test_format_span() {
   CHECK_STR(octo::format_span(7200.0), "2.0h");
 }
 
+
+// --- power cycles ----------------------------------------------------------
+
+// The step this bench actually recorded: -0.023s at 06:32, -3.897s at 06:47.
+// Fitted as drift that is 4300 ppm, which would tell the scheduler the clock
+// crosses half a frame every five seconds and pin the poll to its floor for
+// the rest of the night -- and would be wrong, because nothing drifted.
+void test_power_cycle_is_not_drift() {
+  SyncOptions opt = defaults();
+  SyncState state;
+
+  octo::observe(opt, &state, -0.0228, 1000.0);
+  // Let a real drift figure accumulate first, so there is something to lose.
+  octo::observe(opt, &state, -0.0700, 1000.0 + 1900.0);
+  CHECK(state.drift.has);
+
+  const octo::Drift d = octo::observe(opt, &state, -3.8973, 1000.0 + 2836.0);
+  CHECK(d.restarted);
+  CHECK_NEAR(d.restart_step, -3.8273, 1e-6);
+  CHECK(!state.drift.has);
+  // ...and the anchor restarts here, so the next stretch is measured against
+  // the clock that is actually running.
+  CHECK(state.has_anchor);
+  CHECK_NEAR(state.anchor_error, -3.8973, 1e-9);
+  CHECK_NEAR(state.anchor_mono, 1000.0 + 2836.0, 1e-9);
+}
+
+void test_ordinary_movement_is_still_drift() {
+  SyncOptions opt = defaults();
+  SyncState state;
+  octo::observe(opt, &state, 0.020, 0.0);
+  // 40 ms in a minute is a lot, but it is a frame of quantisation, not a
+  // camera being switched off and on again.
+  const octo::Drift d = octo::observe(opt, &state, 0.060, 60.0);
+  CHECK(!d.restarted);
+  CHECK(d.has_step);
+}
+
+void test_forgetting_reopens_the_external_gate() {
+  SyncOptions opt = defaults();
+  SyncState state;
+  state.failures = 5;   // the daemon had given up
+  state.adapts = 2;
+  state.rtc_bias = -75; // ...but this cost hours to learn
+
+  octo::forget_drift(&state);
+
+  CHECK_EQ(state.failures, 0);
+  CHECK_EQ(state.adapts, 0);
+  CHECK_EQ(state.rtc_bias, -75);
+  const Decision d = octo::decide(opt, state, 2.0, 24, false, 0.0);
+  CHECK(d.action == Action::kWrite);
+}
+
+// --- convergence -----------------------------------------------------------
+
+// judge_write() prints "retrying next cycle", and the rate limit used to turn
+// that into "retrying next hour" -- four bias steps would have taken half a
+// day to converge.
+void test_adapting_write_is_not_held_by_the_rate_limit() {
+  SyncOptions opt = defaults();
+  SyncState state;
+  state.has_last_write = true;
+  state.last_write_mono = 0.0;
+
+  state.adapts = 0;
+  Decision held = octo::decide(opt, state, 2.0, 24, false, 60.0);
+  CHECK(held.action == Action::kSkipRateLimited);
+
+  state.adapts = 1;  // mid-convergence
+  Decision retry = octo::decide(opt, state, 2.0, 24, false, 60.0);
+  CHECK(retry.action == Action::kWrite);
+}
+
+// --- the poll schedule -----------------------------------------------------
+
+void test_no_drift_figure_polls_at_the_floor() {
+  SyncOptions opt = defaults();
+  SyncState state;
+  const octo::PollPlan plan = octo::next_poll(opt, state, 0.0, 24, 0.0);
+  CHECK_NEAR(plan.seconds, opt.poll, 1e-9);
+  CHECK_STR(plan.reason, "floor");
+}
+
+void test_fixed_poll_ignores_everything() {
+  SyncOptions opt = defaults();
+  opt.adaptive_poll = false;
+  SyncState state;
+  state.drift.has = true;
+  state.drift.ppm = 1.0;
+  state.drift.span = 7200.0;
+  state.has_last_write = true;
+  state.last_write_mono = 0.0;
+
+  const octo::PollPlan plan = octo::next_poll(opt, state, 0.0, 24, 10.0);
+  CHECK_NEAR(plan.seconds, opt.poll, 1e-9);
+  CHECK_STR(plan.reason, "fixed");
+}
+
+// The measured figure for this camera: -24.8 ppm over most of a night.
+void test_measured_drift_stretches_the_interval() {
+  SyncOptions opt = defaults();
+  SyncState state;
+  state.drift.has = true;
+  state.drift.ppm = -24.8;
+  state.drift.span = 3600.0;
+
+  // A frame at 24 fps over an hour is 11.6 ppm the measurement cannot resolve,
+  // so schedule against 36.4, not 24.8.
+  const double bound = octo::drift_bound_ppm(opt, state.drift, 24);
+  CHECK_NEAR(bound, 24.8 + (1.0 / 24.0) / 3600.0 * 1e6, 1e-6);
+
+  const octo::PollPlan plan = octo::next_poll(opt, state, 0.0, 24, 0.0);
+  const double tol = octo::trigger_tolerance(opt, 24);
+  CHECK_NEAR(plan.until_actionable, tol / (bound * 1e-6), 1e-6);
+  CHECK_NEAR(plan.seconds, plan.until_actionable / opt.poll_slices, 1e-6);
+  CHECK_STR(plan.reason, "drift");
+  // Concretely: minutes rather than the fixed one.
+  CHECK(plan.seconds > 120.0);
+}
+
+void test_interval_tightens_as_the_threshold_nears() {
+  SyncOptions opt = defaults();
+  SyncState state;
+  state.drift.has = true;
+  state.drift.ppm = -24.8;
+  state.drift.span = 3600.0;
+
+  const double far = octo::next_poll(opt, state, 0.000, 24, 0.0).seconds;
+  const double near = octo::next_poll(opt, state, 0.018, 24, 0.0).seconds;
+  CHECK(near < far);
+  // Past the threshold there is no headroom left, so it drops to the floor.
+  const octo::PollPlan over = octo::next_poll(opt, state, 0.500, 24, 0.0);
+  CHECK_NEAR(over.seconds, opt.poll, 1e-9);
+}
+
+void test_a_slow_clock_still_gets_looked_at() {
+  SyncOptions opt = defaults();
+  SyncState state;
+  state.drift.has = true;
+  state.drift.ppm = 0.05;   // suspiciously good
+  state.drift.span = 7200.0;
+
+  // Believing 0.05 ppm would put the threshold a week away. Two hours of
+  // watching at 24 fps cannot resolve better than 5.8 ppm, and that alone is
+  // enough to keep the schedule honest.
+  const double two_hours = octo::drift_bound_ppm(opt, state.drift, 24);
+  CHECK_NEAR(two_hours, 0.05 + (1.0 / 24.0) / 7200.0 * 1e6, 1e-9);
+
+  // Once the arm is long enough that quantisation stops mattering, the floor
+  // is what remains: a clock measured at 0.05 ppm this afternoon is not a
+  // clock that will hold 0.05 ppm overnight.
+  state.drift.span = 200000.0;
+  CHECK_NEAR(octo::drift_bound_ppm(opt, state.drift, 24), opt.min_assumed_ppm,
+             1e-9);
+
+  const octo::PollPlan plan = octo::next_poll(opt, state, 0.0, 24, 0.0);
+  CHECK(plan.seconds <= opt.max_poll);
+  CHECK(plan.seconds >= opt.poll);
+}
+
+void test_rate_limit_sets_the_horizon_when_it_is_further_off() {
+  SyncOptions opt = defaults();
+  SyncState state;
+  state.has_last_write = true;
+  state.last_write_mono = 0.0;
+
+  // Ten minutes after a write, with fifty still to run: nothing found in the
+  // next fifty minutes can be acted on, so there is no point looking every
+  // minute to find it.
+  const octo::PollPlan plan = octo::next_poll(opt, state, 0.400, 24, 600.0);
+  CHECK_STR(plan.reason, "rate-limit");
+  CHECK_NEAR(plan.until_actionable, 3000.0, 1e-6);
+  CHECK_NEAR(plan.seconds, 750.0, 1e-6);
+}
+
+void test_the_horizon_is_the_later_of_the_two() {
+  SyncOptions opt = defaults();
+  SyncState state;
+  state.drift.has = true;
+  state.drift.ppm = -24.8;
+  state.drift.span = 3600.0;
+  state.has_last_write = true;
+  state.last_write_mono = 0.0;
+
+  // Drift alone would say ~570s; the rate limit says 3540s. The later one wins.
+  const octo::PollPlan plan = octo::next_poll(opt, state, 0.0, 24, 60.0);
+  CHECK_STR(plan.reason, "rate-limit");
+  CHECK_NEAR(plan.until_actionable, 3540.0, 1e-6);
+}
+
+void test_the_ceiling_and_the_floor_both_hold() {
+  SyncOptions opt = defaults();
+  SyncState state;
+  state.has_last_write = true;
+  state.last_write_mono = 0.0;
+
+  // Straight after a write the horizon is a full hour; a quarter of that is
+  // still over the ceiling.
+  const octo::PollPlan capped = octo::next_poll(opt, state, 0.4, 24, 0.0);
+  CHECK_NEAR(capped.seconds, opt.max_poll, 1e-9);
+
+  // ...and as it lapses, the floor catches it.
+  const octo::PollPlan lapsed = octo::next_poll(opt, state, 0.4, 24, 3599.0);
+  CHECK_NEAR(lapsed.seconds, opt.poll, 1e-9);
+}
+
+// Sleeping a quarter of the remaining wait each time converges on the moment
+// something can be done without ever overshooting it, and gathers a handful of
+// observations on the way -- which is what the drift fit is made of.
+void test_the_schedule_converges_and_does_not_overshoot() {
+  SyncOptions opt = defaults();
+  SyncState state;
+  state.has_last_write = true;
+  state.last_write_mono = 0.0;
+
+  double now = 0.0;
+  int looks = 0;
+  while (now < opt.min_write_interval && looks < 500) {
+    const octo::PollPlan plan = octo::next_poll(opt, state, 0.400, 24, now);
+    // Never past the moment the gate lifts by more than one floor interval.
+    CHECK(now + plan.seconds <= opt.min_write_interval + opt.poll);
+    now += plan.seconds;
+    looks++;
+  }
+  // Far fewer than the sixty a fixed minute would have cost, but not so few
+  // that a free-running hour has nothing to fit a line to.
+  CHECK(looks > 5);
+  CHECK(looks < 25);
+}
+
 }  // namespace
 
 int main() {
@@ -288,5 +519,18 @@ int main() {
   test_drift_uses_the_write_anchor();
   test_aligned_write_lands_on_a_whole_second();
   test_format_span();
+  test_power_cycle_is_not_drift();
+  test_ordinary_movement_is_still_drift();
+  test_forgetting_reopens_the_external_gate();
+  test_adapting_write_is_not_held_by_the_rate_limit();
+  test_no_drift_figure_polls_at_the_floor();
+  test_fixed_poll_ignores_everything();
+  test_measured_drift_stretches_the_interval();
+  test_interval_tightens_as_the_threshold_nears();
+  test_a_slow_clock_still_gets_looked_at();
+  test_rate_limit_sets_the_horizon_when_it_is_further_off();
+  test_the_horizon_is_the_later_of_the_two();
+  test_the_ceiling_and_the_floor_both_hold();
+  test_the_schedule_converges_and_does_not_overshoot();
   return octotest::report("test_camsync");
 }

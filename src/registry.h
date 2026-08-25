@@ -46,6 +46,13 @@ struct Policy {
   // measurement. The Python daemon learned this the hard way.
   double min_drift_span = 900.0;
   int min_drift_samples = 30;
+
+  // A camera advertises every second or so while it is idle, and not at all
+  // while something holds a connection to it. This has to be longer than a
+  // sync cycle's connection (connect, read, write, verify: about twenty
+  // seconds) or every correction would look like the camera being switched
+  // off and back on again.
+  double camera_gone_after = 90.0;
 };
 
 struct Sample {
@@ -92,6 +99,32 @@ struct DeviceSnapshot {
   double alert_since_wall = 0.0;
 };
 
+// Whether the camera is on the air, which is all an advertisement can say
+// about it -- see Sighting in scanner.h.
+//
+// `sessions` is the interesting field. It counts absent -> present
+// transitions, so a consumer that remembers the number it saw last time can
+// tell "the camera has been on all along" from "the camera was power-cycled
+// while you were not looking", which matters because a power cycle resets the
+// camera's clock and invalidates every drift figure measured against it.
+struct CameraSnapshot {
+  // Whether the daemon said anything about cameras at all. A daemon built
+  // before it could watch for one says nothing, and that is a different fact
+  // from "the camera is off" -- the first means find out the expensive way,
+  // the second means there is nothing to find out.
+  bool reported = false;
+  bool seen = false;      // heard from at least once since the daemon started
+  bool present = false;   // heard from recently enough to believe
+  std::string id;
+  std::string name;
+  int rssi = 0;
+  double age = 0.0;         // since the last advertisement
+  double since = 0.0;       // how long it has been in the present state
+  uint64_t sessions = 0;    // absent -> present transitions, including the first
+  uint64_t adverts = 0;
+  double up_wall = 0.0;     // when the current session began
+};
+
 struct Snapshot {
   double wall = 0.0;
   double uptime = 0.0;
@@ -109,6 +142,8 @@ struct Snapshot {
 
   double alert_threshold = 60.0;
 
+  CameraSnapshot camera;
+
   std::vector<DeviceSnapshot> device;
 };
 
@@ -123,6 +158,11 @@ class Registry {
   // One advertisement. `data` is the raw FDAC service-data payload.
   void observe(const std::string& id, const std::string& name, int rssi,
                const uint8_t* data, size_t len, double mono, double wall);
+
+  // One advertisement from something carrying the camera-control service.
+  // Nothing is decoded: this only records that it was heard.
+  void observe_camera(const std::string& id, const std::string& name, int rssi,
+                      double mono, double wall);
 
   void set_radio(const std::string& state);
 
@@ -154,12 +194,30 @@ class Registry {
     double last_notified_mono = 0.0;
   };
 
+  struct Camera {
+    std::string id;
+    std::string name;
+    int rssi = 0;
+    uint64_t adverts = 0;
+    uint64_t sessions = 0;
+    bool seen = false;
+    bool present = false;
+    double last_seen_mono = 0.0;
+    double state_since_mono = 0.0;
+    double up_wall = 0.0;
+  };
+
   void trim(Device* dev, double mono);
   void update_alert(Device* dev, double mono, double wall);
+  // Age the camera out of the present state. Called from snapshot() as well as
+  // from observe_camera(), because a camera that has been switched off sends
+  // nothing at all -- there is no event to notice, only a silence to time.
+  void age_camera(double mono) const;
 
   mutable std::mutex mu_;
   Policy policy_;
   std::map<std::string, Device> devices_;
+  mutable Camera camera_;
   std::string radio_ = "unknown";
   double started_mono_ = 0.0;
   uint64_t adverts_total_ = 0;

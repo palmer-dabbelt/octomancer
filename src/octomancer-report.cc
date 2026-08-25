@@ -15,8 +15,6 @@
 // measured only across free-running stretches between writes, only across
 // stretches long enough to mean anything, and is refused rather than
 // estimated when the answer would be below the quantisation floor.
-#include "config.h"
-
 #include <getopt.h>
 
 #include <algorithm>
@@ -115,7 +113,7 @@ int main(int argc, char** argv) {
     switch (c) {
       case kSegments: opt.segments = true; break;
       case kMinSegment: opt.min_segment = std::atof(optarg); break;
-      case kVersion: std::printf("octomancer-report %s\n", PACKAGE_VERSION); return 0;
+      case kVersion: std::printf("octomancer-report %s\n", OCTO_VERSION); return 0;
       case kHelp: usage(stdout); return 0;
       default: usage(stderr); return 2;
     }

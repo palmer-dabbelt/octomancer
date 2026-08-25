@@ -10,6 +10,7 @@
 #include <string>
 #include <vector>
 
+#include "bmd.h"
 #include "scanner.h"
 #include "tentacle.h"
 #include "timeutil.h"
@@ -26,8 +27,10 @@ std::string to_std(NSString* s) {
 
 @interface OctoScannerDelegate : NSObject <CBCentralManagerDelegate>
 @property(nonatomic, assign) octo::Scanner::AdvertHandler* onAdvert;
+@property(nonatomic, assign) octo::Scanner::SightingHandler* onCamera;
 @property(nonatomic, assign) octo::Scanner::StateHandler* onState;
 @property(nonatomic, strong) CBUUID* fdac;
+@property(nonatomic, strong) CBUUID* camera;
 @end
 
 @implementation OctoScannerDelegate
@@ -64,6 +67,36 @@ std::string to_std(NSString* s) {
         advertisementData:(NSDictionary<NSString*, id>*)advertisementData
                      RSSI:(NSNumber*)RSSI {
   (void)central;
+  // A camera is recognised by the service it advertises, not by its name.
+  // Tentacle boxes are named after the camera they ride on -- there is one on
+  // this bench called "BMPCC" -- so a name match would hand the sync daemon a
+  // box to connect to and it would spend the night failing to find a control
+  // characteristic on it.
+  if (self.onCamera && *self.onCamera) {
+    NSArray<CBUUID*>* uuids = advertisementData[CBAdvertisementDataServiceUUIDsKey];
+    bool is_camera = false;
+    if ([uuids isKindOfClass:[NSArray class]]) {
+      // Spelled out rather than -containsObject:, to match the comparison in
+      // camera_mac.mm exactly. That one is known to identify this bench's body
+      // correctly, and two ways of asking the same question is one way too
+      // many for something whose failure mode is a camera that never syncs.
+      for (CBUUID* u in uuids) {
+        if ([u isEqual:self.camera]) { is_camera = true; break; }
+      }
+    }
+    if (is_camera) {
+      octo::Sighting seen;
+      seen.id = to_std(peripheral.identifier.UUIDString);
+      NSString* camName = advertisementData[CBAdvertisementDataLocalNameKey];
+      seen.name =
+          to_std([camName isKindOfClass:[NSString class]] ? camName : peripheral.name);
+      seen.rssi = RSSI ? RSSI.intValue : 0;
+      seen.mono = octo::mono_now();
+      seen.wall = octo::wall_now();
+      (*self.onCamera)(seen);
+    }
+  }
+
   NSDictionary<CBUUID*, NSData*>* serviceData =
       advertisementData[CBAdvertisementDataServiceDataKey];
   if (![serviceData isKindOfClass:[NSDictionary class]]) return;
@@ -103,8 +136,11 @@ namespace {
 
 class MacScanner : public Scanner {
  public:
-  MacScanner(AdvertHandler on_advert, StateHandler on_state)
-      : on_advert_(std::move(on_advert)), on_state_(std::move(on_state)) {}
+  MacScanner(AdvertHandler on_advert, SightingHandler on_camera,
+             StateHandler on_state)
+      : on_advert_(std::move(on_advert)),
+        on_camera_(std::move(on_camera)),
+        on_state_(std::move(on_state)) {}
 
   ~MacScanner() override { stop(); }
 
@@ -114,8 +150,10 @@ class MacScanner : public Scanner {
                                      DISPATCH_QUEUE_SERIAL);
       delegate_ = [[OctoScannerDelegate alloc] init];
       delegate_.onAdvert = &on_advert_;
+      delegate_.onCamera = on_camera_ ? &on_camera_ : nullptr;
       delegate_.onState = &on_state_;
       delegate_.fdac = [CBUUID UUIDWithString:@"FDAC"];
+      delegate_.camera = [CBUUID UUIDWithString:@(octo::bmd::kServiceCamera)];
 
       // No power alert: this runs unattended under launchd, where a modal
       // asking about Bluetooth has nobody to answer it.
@@ -140,6 +178,7 @@ class MacScanner : public Scanner {
       }
       if (delegate_ != nil) {
         delegate_.onAdvert = nullptr;
+        delegate_.onCamera = nullptr;
         delegate_.onState = nullptr;
         delegate_ = nil;
       }
@@ -149,6 +188,7 @@ class MacScanner : public Scanner {
 
  private:
   AdvertHandler on_advert_;
+  SightingHandler on_camera_;
   StateHandler on_state_;
   CBCentralManager* central_ = nil;
   OctoScannerDelegate* delegate_ = nil;
@@ -158,9 +198,10 @@ class MacScanner : public Scanner {
 }  // namespace
 
 std::unique_ptr<Scanner> make_ble_scanner(Scanner::AdvertHandler on_advert,
+                                          Scanner::SightingHandler on_camera,
                                           Scanner::StateHandler on_state) {
-  return std::unique_ptr<Scanner>(
-      new MacScanner(std::move(on_advert), std::move(on_state)));
+  return std::unique_ptr<Scanner>(new MacScanner(
+      std::move(on_advert), std::move(on_camera), std::move(on_state)));
 }
 
 }  // namespace octo

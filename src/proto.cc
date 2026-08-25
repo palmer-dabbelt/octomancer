@@ -134,6 +134,25 @@ std::string render_text(const Snapshot& s) {
   }
   out += "\n";
 
+  // Always emitted, even before a camera has ever been heard. A reader has to
+  // be able to tell "this daemon is watching and there is no camera" from
+  // "this daemon is too old to be watching", and the difference between those
+  // two is a twenty-second scan every cycle.
+  if (s.camera.reported) {
+    out += "camera";
+    put(&out, "seen", static_cast<long long>(s.camera.seen ? 1 : 0));
+    put(&out, "id", s.camera.id);
+    put(&out, "name", s.camera.name);
+    put(&out, "present", static_cast<long long>(s.camera.present ? 1 : 0));
+    put(&out, "rssi", static_cast<long long>(s.camera.rssi));
+    put(&out, "age", s.camera.age, 2);
+    put(&out, "since", s.camera.since, 2);
+    put(&out, "sessions", static_cast<long long>(s.camera.sessions));
+    put(&out, "adverts", static_cast<long long>(s.camera.adverts));
+    put(&out, "up_wall", s.camera.up_wall, 3);
+    out += "\n";
+  }
+
   for (const DeviceSnapshot& d : s.device) {
     out += "device";
     put(&out, "id", d.id);
@@ -187,6 +206,22 @@ std::string render_json(const Snapshot& s) {
     out += ",\"bench_spread\":" + json_number(s.bench_spread);
   } else {
     out += ",\"bench_offset\":null,\"bench_spread\":null";
+  }
+  if (s.camera.reported) {
+    out += ",\"camera\":{";
+    out += "\"seen\":" + std::string(s.camera.seen ? "true" : "false");
+    out += ",\"id\":" + json_string(s.camera.id);
+    out += ",\"name\":" + json_string(s.camera.name);
+    out += ",\"present\":" + std::string(s.camera.present ? "true" : "false");
+    out += ",\"rssi\":" + std::to_string(s.camera.rssi);
+    out += ",\"age\":" + json_number(s.camera.age, 2);
+    out += ",\"since\":" + json_number(s.camera.since, 2);
+    out += ",\"sessions\":" + std::to_string(s.camera.sessions);
+    out += ",\"adverts\":" + std::to_string(s.camera.adverts);
+    out += ",\"up_wall\":" + json_number(s.camera.up_wall, 3);
+    out += "}";
+  } else {
+    out += ",\"camera\":null";
   }
   out += ",\"box\":[";
   bool first = true;
@@ -297,6 +332,29 @@ bool parse_text(const std::string& text, Snapshot* out, std::string* err) {
         else if (key == "has_bench") out->has_bench = to_int(value) != 0;
         else if (key == "bench_offset") out->bench_offset = to_double(value);
         else if (key == "bench_spread") out->bench_spread = to_double(value);
+      }
+      continue;
+    }
+
+    if (verb == "camera") {
+      out->camera.reported = true;
+      // A daemon that emits the line but not the field is one from the brief
+      // window where the line only appeared once a camera had been heard;
+      // treating that as "seen" is what it meant.
+      out->camera.seen = true;
+      std::string token, key, value;
+      while (fields >> token) {
+        if (!split_kv(token, &key, &value)) continue;
+        if (key == "seen") out->camera.seen = to_int(value) != 0;
+        else if (key == "id") out->camera.id = value;
+        else if (key == "name") out->camera.name = value;
+        else if (key == "present") out->camera.present = to_int(value) != 0;
+        else if (key == "rssi") out->camera.rssi = static_cast<int>(to_int(value));
+        else if (key == "age") out->camera.age = to_double(value);
+        else if (key == "since") out->camera.since = to_double(value);
+        else if (key == "sessions") out->camera.sessions = to_int(value);
+        else if (key == "adverts") out->camera.adverts = to_int(value);
+        else if (key == "up_wall") out->camera.up_wall = to_double(value);
       }
       continue;
     }

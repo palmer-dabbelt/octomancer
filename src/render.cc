@@ -77,6 +77,23 @@ std::string render_human(const Snapshot& s, bool color) {
     out += fmt("%sno box heard from recently -- nothing current to compare%s\n",
                st.dim, st.off);
   }
+  if (s.camera.reported && !s.camera.seen) {
+    out += fmt("%sno Blackmagic camera heard yet -- switch it on, or enable"
+               " Bluetooth in its setup menu%s\n", st.dim, st.off);
+  } else if (s.camera.seen) {
+    // The camera is not a Tentacle and gets no row in the table below: nothing
+    // about its clock is visible from an advertisement. All that is known is
+    // whether it is on the air, which is exactly what decides whether
+    // octomancer-sync has anything to do.
+    const char* cam_colour = s.camera.present ? st.green : st.dim;
+    out += fmt("camera %s%s%s%s%s  %s for %s,  %lld session%s\n", cam_colour,
+               s.camera.present ? "on the air" : "off the air", st.off,
+               s.camera.name.empty() ? "" : " -- ", s.camera.name.c_str(),
+               s.camera.present ? "up" : "quiet",
+               format_age(s.camera.since).c_str(),
+               static_cast<long long>(s.camera.sessions),
+               s.camera.sessions == 1 ? "" : "s");
+  }
   if (s.clock_steps > 0) {
     out += fmt("%sthis Mac's clock stepped %lld time%s since start; drift"
                " history was reset each time%s\n",

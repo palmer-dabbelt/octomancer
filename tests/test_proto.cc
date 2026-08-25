@@ -170,6 +170,76 @@ void test_json_is_wellformed_enough() {
   CHECK(!in_string);
 }
 
+
+// The camera line has to survive the round trip, and -- more importantly --
+// its absence has to be distinguishable from a camera that is switched off.
+// Getting that wrong costs a twenty-second scan every cycle, or a night of
+// never looking.
+void test_camera_round_trip() {
+  octo::Snapshot in;
+  in.camera.reported = true;
+  in.camera.seen = true;
+  in.camera.present = true;
+  in.camera.id = "B80D95C9-7D0B-140A-0351-2F4D55A1114E";
+  in.camera.name = "Pocket Cinema Camera 6K Pro";
+  in.camera.rssi = -62;
+  in.camera.age = 1.25;
+  in.camera.since = 4210.5;
+  in.camera.sessions = 3;
+  in.camera.adverts = 51234;
+  in.camera.up_wall = 1787562773.5;
+
+  octo::Snapshot out;
+  std::string err;
+  CHECK(octo::parse_text(octo::render_text(in), &out, &err));
+  CHECK(out.camera.reported);
+  CHECK(out.camera.seen);
+  CHECK(out.camera.present);
+  CHECK_STR(out.camera.id, in.camera.id);
+  CHECK_STR(out.camera.name, in.camera.name);
+  CHECK_EQ(out.camera.rssi, -62);
+  CHECK_NEAR(out.camera.since, 4210.5, 0.01);
+  CHECK_EQ(out.camera.sessions, 3u);
+  CHECK_EQ(out.camera.adverts, 51234u);
+  CHECK_NEAR(out.camera.up_wall, 1787562773.5, 0.01);
+}
+
+// A daemon that is watching and has heard nothing still says so. "No camera"
+// and "no idea" are different answers and the reader acts differently on them.
+void test_camera_absent_is_not_camera_unknown() {
+  octo::Snapshot watching;
+  watching.camera.reported = true;   // as every live daemon reports
+  watching.camera.seen = false;
+
+  octo::Snapshot out;
+  std::string err;
+  CHECK(octo::parse_text(octo::render_text(watching), &out, &err));
+  CHECK(out.camera.reported);
+  CHECK(!out.camera.seen);
+  CHECK(!out.camera.present);
+
+  // An older daemon emits no camera line at all, and that must not be read as
+  // "there is no camera".
+  octo::Snapshot old;
+  std::string text = octo::render_text(old);
+  CHECK(text.find("\ncamera ") == std::string::npos);
+  CHECK(octo::parse_text(text, &out, &err));
+  CHECK(!out.camera.reported);
+}
+
+// The camera's name comes off the air and is user-set, so it goes through the
+// same escaping as a box name.
+void test_hostile_camera_name() {
+  octo::Snapshot in;
+  in.camera.reported = true;
+  in.camera.seen = true;
+  in.camera.name = "cam era=\"one\" \\ two";
+
+  octo::Snapshot out;
+  std::string err;
+  CHECK(octo::parse_text(octo::render_text(in), &out, &err));
+  CHECK_STR(out.camera.name, in.camera.name);
+}
 }  // namespace
 
 int main() {
@@ -178,5 +248,8 @@ int main() {
   test_rejects_junk();
   test_ignores_unknown_keys();
   test_json_is_wellformed_enough();
+  test_camera_round_trip();
+  test_camera_absent_is_not_camera_unknown();
+  test_hostile_camera_name();
   return octotest::report("test_proto");
 }

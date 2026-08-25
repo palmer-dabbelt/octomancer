@@ -9,8 +9,6 @@
 // whether a box has drifted is made once, from the full history, by the process
 // that has the full history. A UI is then free to display it, and a headless
 // install can hand it to --notify-command instead.
-#include "config.h"
-
 #include <getopt.h>
 #include <errno.h>
 #include <time.h>
@@ -50,11 +48,13 @@ void on_signal(int) {
 struct Options {
   std::string socket_path = octo::default_socket_path();
   std::string log_path;
+  std::string console_path;
   std::string notify_command;
   double log_interval = 60.0;
   double probe_seconds = 0.0;
   bool foreground = false;
   bool quiet = false;
+  octo::Rotation rotation;
   octo::Policy policy;
 };
 
@@ -67,6 +67,12 @@ void usage(FILE* out) {
       "  --socket PATH         control socket (default %s)\n"
       "  --log PATH            append JSONL observations here\n"
       "  --log-interval SEC    how often to log a summary (default 60)\n"
+      "  --console PATH        send stdout and stderr here, and rotate them.\n"
+      "                        A file the program does not own cannot be\n"
+      "                        rotated safely, so redirecting from the shell\n"
+      "                        or from launchd leaves it to grow.\n"
+      "  --log-max-bytes N     rotate past this size, 0 to never (default 16M)\n"
+      "  --log-keep N          generations to keep beside it (default 5)\n"
       "  --probe SEC           listen for SEC seconds, print a report, exit\n"
       "  --foreground          stay attached; the launchd agent uses this\n"
       "  --quiet               no chatter on stderr\n"
@@ -92,14 +98,18 @@ void usage(FILE* out) {
 
 bool parse_args(int argc, char** argv, Options* opt) {
   enum {
-    kSocket = 1000, kLog, kLogInterval, kProbe, kForeground, kQuiet,
+    kSocket = 1000, kLog, kLogInterval, kConsole, kLogMax, kLogKeep,
+    kProbe, kForeground, kQuiet,
     kThreshold, kClear, kConfirm, kRenotify, kNotify,
-    kWindow, kStale, kDriftSpan, kVersion, kHelp,
+    kWindow, kStale, kDriftSpan, kCameraGone, kVersion, kHelp,
   };
   static const struct option longs[] = {
       {"socket", required_argument, nullptr, kSocket},
       {"log", required_argument, nullptr, kLog},
       {"log-interval", required_argument, nullptr, kLogInterval},
+      {"console", required_argument, nullptr, kConsole},
+      {"log-max-bytes", required_argument, nullptr, kLogMax},
+      {"log-keep", required_argument, nullptr, kLogKeep},
       {"probe", required_argument, nullptr, kProbe},
       {"foreground", no_argument, nullptr, kForeground},
       {"quiet", no_argument, nullptr, kQuiet},
@@ -111,6 +121,7 @@ bool parse_args(int argc, char** argv, Options* opt) {
       {"window", required_argument, nullptr, kWindow},
       {"stale-after", required_argument, nullptr, kStale},
       {"min-drift-span", required_argument, nullptr, kDriftSpan},
+      {"camera-gone-after", required_argument, nullptr, kCameraGone},
       {"version", no_argument, nullptr, kVersion},
       {"help", no_argument, nullptr, kHelp},
       {nullptr, 0, nullptr, 0},
@@ -123,6 +134,9 @@ bool parse_args(int argc, char** argv, Options* opt) {
       case kSocket: opt->socket_path = optarg; break;
       case kLog: opt->log_path = optarg; break;
       case kLogInterval: opt->log_interval = std::atof(optarg); break;
+      case kConsole: opt->console_path = optarg; break;
+      case kLogMax: opt->rotation.max_bytes = std::atof(optarg); break;
+      case kLogKeep: opt->rotation.keep = std::atoi(optarg); break;
       case kProbe: opt->probe_seconds = std::atof(optarg); break;
       case kForeground: opt->foreground = true; break;
       case kQuiet: opt->quiet = true; break;
@@ -134,8 +148,9 @@ bool parse_args(int argc, char** argv, Options* opt) {
       case kWindow: opt->policy.window = std::atof(optarg); break;
       case kStale: opt->policy.stale_after = std::atof(optarg); break;
       case kDriftSpan: opt->policy.min_drift_span = std::atof(optarg); break;
+      case kCameraGone: opt->policy.camera_gone_after = std::atof(optarg); break;
       case kVersion:
-        std::printf("octomancerd %s\n", PACKAGE_VERSION);
+        std::printf("octomancerd %s\n", OCTO_VERSION);
         std::exit(0);
       case kHelp:
         usage(stdout);
@@ -235,6 +250,16 @@ void log_snapshot(octo::JsonLog* log, const octo::Snapshot& s) {
     fields += "}";
   }
   fields += "}";
+  if (s.camera.seen) {
+    std::snprintf(buf, sizeof buf,
+                  ",\"camera\":{\"present\":%s,\"name\":\"%s\",\"rssi\":%d,"
+                  "\"age_s\":%.1f,\"since_s\":%.1f,\"sessions\":%lld}",
+                  s.camera.present ? "true" : "false",
+                  json_escape(s.camera.name).c_str(), s.camera.rssi,
+                  s.camera.age, s.camera.since,
+                  static_cast<long long>(s.camera.sessions));
+    fields += buf;
+  }
   log->record("bench", fields);
 }
 
@@ -256,8 +281,18 @@ int main(int argc, char** argv) {
   ::signal(SIGTERM, on_signal);
 
   octo::Registry registry(opt.policy);
-  octo::JsonLog log;
   std::string err;
+
+  // Before anything is printed, so the first line of a run lands in the same
+  // file as the rest of it.
+  octo::ConsoleLog console;
+  if (!console.open(opt.console_path, opt.rotation, &err)) {
+    std::fprintf(stderr, "octomancerd: %s\n", err.c_str());
+    return 1;
+  }
+
+  octo::JsonLog log;
+  log.set_rotation(opt.rotation);
   if (!log.open(opt.log_path, &err)) {
     std::fprintf(stderr, "octomancerd: %s\n", err.c_str());
     return 1;
@@ -267,6 +302,14 @@ int main(int argc, char** argv) {
       [&registry](const octo::Advert& a) {
         registry.observe(a.id, a.name, a.rssi, a.data.data(), a.data.size(),
                          a.mono, a.wall);
+      },
+      // A camera in range is worth knowing about even though this program will
+      // never touch one: it is the cheap half of the question octomancer-sync
+      // would otherwise answer with a twenty-second scan every minute. The
+      // radio is already listening, so noticing costs nothing.
+      [&registry](const octo::Sighting& seen) {
+        registry.observe_camera(seen.id, seen.name, seen.rssi, seen.mono,
+                                seen.wall);
       },
       [&registry, &log, &opt](const std::string& state) {
         registry.set_radio(state);
@@ -314,7 +357,7 @@ int main(int argc, char** argv) {
     return 1;
   }
   if (!opt.quiet) {
-    std::fprintf(stderr, "octomancerd %s listening on %s\n", PACKAGE_VERSION,
+    std::fprintf(stderr, "octomancerd %s listening on %s\n", OCTO_VERSION,
                  server.path().c_str());
   }
 
@@ -328,9 +371,45 @@ int main(int argc, char** argv) {
     log.record("start", buf);
   }
 
+  // A camera coming up is the one thing here worth reporting the instant it
+  // happens rather than at the next summary: it is what octomancer-sync waits
+  // for, and it is when a power cycle -- and so a reset clock -- would have
+  // happened.
+  bool camera_was_present = false;
+  uint64_t camera_sessions_seen = 0;
+
   double next_log = octo::mono_now() + opt.log_interval;
   while (!g_stop) {
     server.serve(200);
+    console.maybe_rotate();
+
+    {
+      const octo::Snapshot now = registry.snapshot();
+      if (now.camera.seen &&
+          (now.camera.present != camera_was_present ||
+           now.camera.sessions != camera_sessions_seen)) {
+        const bool up = now.camera.present;
+        camera_was_present = up;
+        camera_sessions_seen = now.camera.sessions;
+        if (log.enabled()) {
+          char buf[512];
+          std::snprintf(buf, sizeof buf,
+                        "\"state\":\"%s\",\"id\":\"%s\",\"name\":\"%s\","
+                        "\"rssi\":%d,\"sessions\":%lld",
+                        up ? "up" : "down", json_escape(now.camera.id).c_str(),
+                        json_escape(now.camera.name).c_str(), now.camera.rssi,
+                        static_cast<long long>(now.camera.sessions));
+          log.record("camera", buf);
+        }
+        if (!opt.quiet) {
+          std::fprintf(stderr, "octomancerd: camera %s%s%s (session %lld)\n",
+                       up ? "up" : "down",
+                       now.camera.name.empty() ? "" : " -- ",
+                       now.camera.name.c_str(),
+                       static_cast<long long>(now.camera.sessions));
+        }
+      }
+    }
 
     for (const octo::AlertEvent& event : registry.take_events()) {
       if (log.enabled()) log_alert(&log, event);

@@ -6,7 +6,6 @@ AC_INIT([octomancer], [0.1.0], [palmer@dabbelt.com])
 AC_CONFIG_SRCDIR([src/tentacle.cc])
 AC_CONFIG_AUX_DIR([build-aux])
 AC_CONFIG_MACRO_DIR([m4])
-AC_CONFIG_HEADERS([config.h])
 AM_INIT_AUTOMAKE([1.16 foreign subdir-objects -Wall])
 AM_SILENT_RULES([yes])
 
@@ -56,6 +55,38 @@ AC_ARG_ENABLE([ui],
 if test "x$octo_darwin" != xyes; then octo_ui=no; fi
 AM_CONDITIONAL([BUILD_UI], [test "x$octo_ui" = xyes])
 
+# Sanitizers, for development. Off by default: they roughly halve the speed and
+# an unattended agent should not be paying for them.
+#
+# Leak detection is deliberately not in the default set. LeakSanitizer is not
+# implemented on macOS, so asking for it here would produce a configure that
+# succeeds and a binary that silently never checks; `make check` under
+# `leaks --atExit --` is the way to look for leaks on this host.
+AC_ARG_ENABLE([sanitizers],
+  [AS_HELP_STRING([--enable-sanitizers@<:@=LIST@:>@],
+                  [build with -fsanitize=LIST @<:@address,undefined@:>@])],
+  [octo_san=$enableval], [octo_san=no])
+if test "x$octo_san" = xyes; then octo_san=address,undefined; fi
+if test "x$octo_san" != xno; then
+  octo_san_flags="-fsanitize=$octo_san -fno-omit-frame-pointer -fno-sanitize-recover=all -g"
+  AC_MSG_CHECKING([whether $CXX accepts $octo_san_flags])
+  octo_saved_cxxflags=$CXXFLAGS
+  octo_saved_ldflags=$LDFLAGS
+  CXXFLAGS="$CXXFLAGS $octo_san_flags"
+  LDFLAGS="$LDFLAGS $octo_san_flags"
+  AC_LINK_IFELSE([AC_LANG_PROGRAM([[]], [[]])],
+    [AC_MSG_RESULT([yes])
+     # The sanitizer has to be in every dialect's flags and in the link, or
+     # the .mm files are instrumented differently from the .cc files they are
+     # linked against and the runtime reports nonsense.
+     OBJCXXFLAGS="$OBJCXXFLAGS $octo_san_flags"],
+    [CXXFLAGS=$octo_saved_cxxflags
+     LDFLAGS=$octo_saved_ldflags
+     octo_san=no
+     AC_MSG_RESULT([no])
+     AC_MSG_ERROR([this compiler cannot build with -fsanitize=$octo_san])])
+fi
+
 AC_ARG_ENABLE([werror],
   [AS_HELP_STRING([--enable-werror], [treat compiler warnings as errors])],
   [octo_werror=$enableval], [octo_werror=no])
@@ -100,5 +131,6 @@ AC_MSG_NOTICE([
     host          $host
     daemon        $octo_darwin
     status-bar UI $octo_ui
+    sanitizers    $octo_san
     CXX           $CXX $CXXFLAGS
 ])

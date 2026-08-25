@@ -13,10 +13,35 @@ connects to a device and never writes to one**, which is what makes it safe to
 leave running: it cannot disturb the Tentacle app, cannot interfere with a
 camera holding a connection, and cannot touch a recording in progress.
 
-It does not set anyone's clock. Correcting the camera is the Python daemon's
-job and stays there for now; conflating "observe" with "act" in a service that
-runs unattended is how an unattended service ends up doing something surprising
-at three in the morning.
+It does not set anyone's clock. Correcting the camera is `octomancer-sync`'s
+job and stays there; conflating "observe" with "act" in a service that runs
+unattended is how an unattended service ends up doing something surprising at
+three in the morning.
+
+It does watch for the camera, which is the one thing here that is not about
+Tentacles, and it is worth being precise about how little that means. A camera
+advertises the Blackmagic camera-control service UUID and nothing else useful
+-- no clock, no transport state. So the only fact available from a distance is
+*it is on the air*, and that is all the registry records.
+
+That fact is worth a great deal anyway, because the alternative way of learning
+it costs a twenty-second scan. `octomancer-sync` used to pay that every minute
+whether or not there was anything to find; now it reads this over a socket
+every five seconds instead, and gets a faster answer for a fraction of the
+cost. The radio here is already scanning unfiltered for Tentacles, so noticing
+a camera in the same callback costs nothing at all.
+
+Two things to keep in mind about it:
+
+* **Absence means "not advertising", not "switched off".** A camera stops
+  advertising while something holds a connection to it, and `octomancer-sync`
+  holds one for about twenty seconds every cycle it acts. `camera_gone_after`
+  is 90 s for that reason. Set it below a cycle's connection and every
+  correction would read as the camera being power-cycled.
+* **A second camera is ignored.** The first one heard wins and the rest are
+  dropped, because alternating between two would flap the presence flag and the
+  session counter on every advertisement. Choosing between cameras is
+  `octomancer-sync --camera`'s job, where there is a connection to choose with.
 
 ## Layout
 
@@ -28,7 +53,7 @@ src/proto.{h,cc}       the wire format, both directions
 src/server.{h,cc}      the control socket
 src/client.{h,cc}      the other end of it, shared by the CLI and the app
 src/render.{h,cc}      snapshot -> text a human reads
-src/jsonlog.{h,cc}     append-only JSONL
+src/jsonlog.{h,cc}     append-only JSONL, and log rotation
 src/scanner_mac.mm     CoreBluetooth. The only file that knows about Apple.
 src/octomancerd.cc     the service
 src/octomancerctl.cc   the control tool
@@ -76,6 +101,19 @@ escaped, and box names arrive over the air from devices we do not control, so
 they are escaped as hostile input. A box called `Cam 1 = A` is entirely legal
 and walks straight through a naive tokenizer; `tests/test_proto.cc` uses
 exactly that name.
+
+There is a `camera` line too, and it is **always** emitted, even before a
+camera has ever been heard:
+
+```
+camera seen=0 id= name= present=0 rssi=0 age=0.00 since=0.00 sessions=0 ...
+```
+
+That looks redundant and is not. A reader has to distinguish "this daemon is
+watching and there is no camera" from "this daemon is too old to be watching",
+because the first means there is nothing to do and the second means find out
+the expensive way. Absence of the line is the second; `seen=0` is the first.
+`tests/test_proto.cc` pins both.
 
 Readers must ignore unknown keys, so the daemon can grow fields without
 breaking an older UI. A genuinely breaking change arrives as a new version
@@ -159,6 +197,35 @@ login session -- none of which a launchd agent has. For a headless install,
 the air, so it is passed in `$OCTOMANCER_BOX` and friends and never
 interpolated into the command string, which would let a device name off the air
 execute as a shell command.
+
+## Logs, and keeping them from eating the disk
+
+Both the JSONL and the human-readable output rotate: past `--log-max-bytes`
+(16M) the live file is renamed aside, `PATH.n` becomes `PATH.n+1`, and
+`PATH.<keep>` is deleted. That bounds the whole thing at `(keep + 1)` files.
+
+The subtle part is the console output, and it is why `--console PATH` exists at
+all rather than leaving people to redirect. **A file the program does not hold
+open cannot be rotated by it.** Rename a file that launchd opened as
+`StandardOutPath`, or that a shell opened with `>`, and the writer keeps
+appending to an inode with no name: the "rotated" file stops growing, the new
+file stays empty, and a night of output goes to a place nothing can read it.
+So the program opens the file itself, points both `stdout` and `stderr` at the
+same descriptor, and re-`freopen`s after the rename. The LaunchAgent plist uses
+`--console` for the same reason.
+
+Rotation is checked after a record is written and between cycles, never
+mid-line: a log whose last entry is half a JSON object is a log that breaks the
+reader that was the point of writing it.
+
+Reopening deliberately counts the bytes already in the file rather than
+starting from zero. A daemon restarted every few minutes -- which is exactly
+what happens while working on one -- would otherwise append forever and never
+reach its own threshold.
+
+`tests/test_jsonlog.cc` runs this against a real filesystem rather than a mock.
+The failure that matters is a rename that loses a generation, and a mock would
+happily agree it did not.
 
 ## Why a LaunchAgent and not a daemon
 

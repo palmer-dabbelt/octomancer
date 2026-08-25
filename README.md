@@ -64,6 +64,16 @@ threading, and why drift is refused rather than estimated from short samples.
 
 ## The research scripts
 
+The Tentacle side of this has moved to C++: `octomancerd --probe` replaces
+`tentacle_ref.py`, and `octomancerd --log` replaces `tentacle_capture.py`, so
+both are gone -- `git log` has them if they are ever wanted back.
+`tentacle_scan.py` stays, because `octomancer_sync.py` imports its decoder.
+
+**The camera side is still Python and has no C++ equivalent.** `octomancerd` is
+strictly a listener: there is no connect and no write anywhere in it, by
+design. Setting a clock is Python's job, and deleting these would delete the
+only thing that can actually sync the camera.
+
 ## Setup
 
 ```
@@ -107,12 +117,6 @@ happens.
 # read timecode from every Tentacle Sync box in range (passive, no pairing)
 .venv/bin/python scripts/tentacle_scan.py 45
 .venv/bin/python scripts/tentacle_scan.py 30 --raw
-
-# pick a Tentacle to sync against, and see how far this Mac is from it
-.venv/bin/python scripts/tentacle_ref.py 30
-
-# record raw adverts for offline analysis
-.venv/bin/python scripts/tentacle_capture.py 150 -o cap.jsonl
 ```
 
 ## Keeping the camera on Tentacle time
@@ -127,10 +131,24 @@ that is both needed and allowed:
 ```
 
 It will not touch the clock while the camera is **recording**, while the error
-is already inside `--tolerance` (default 1 s), or once it looks like an
-**external timecode source** owns the camera -- nothing in the protocol reports
+is already inside the trigger threshold (**half a frame** by default, scaled to
+the frame rate the camera reports), while it has **written within the last
+hour** (`--min-write-interval`), or once it looks like an **external timecode
+source** owns the camera -- nothing in the protocol reports
 that, so it is inferred from writes that do not take. The camera is polled once
 a minute by default, because connecting is slow and intrudes on the operator.
+
+Those last two work together. Half a frame is tight enough that nearly every
+cycle wants to write, which would be fine for accuracy and ruinous for
+measurement: every write ends a free-running stretch, and drift can only be
+computed across those stretches. So the threshold decides whether the clock is
+wrong and the interval decides whether it is worth acting on yet, leaving an
+hour of free-running drift between corrections.
+
+Note that "did this write land?" is judged against `--write-tolerance`
+(1 s) rather than the trigger threshold. Judging a write against half a frame
+would mark every good write a failure, and `--max-failures` of those in a row
+is what makes the daemon decide an external source owns the camera and stop.
 
 Every cycle is logged to `octomancer-sync.jsonl`, including the ones where
 nothing happened, so there is drift data to tune the tolerance and poll

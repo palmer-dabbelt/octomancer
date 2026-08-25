@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Embedded into the octomancer-sync binary with -sectcreate __TEXT __info_plist.
+
+  A bare command-line tool has no bundle, so macOS has nothing to name in the
+  Bluetooth permission prompt and no stable identity to remember the answer
+  against. Its own Info.plist section is what makes the approval stick across
+  rebuilds.
+
+  A separate bundle identifier from octomancerd on purpose: this is the binary
+  that connects to a camera and writes to it, and it should be possible to
+  grant or revoke that separately from the passive listener.
+-->
+<plist version="1.0">
+<dict>
+  <key>CFBundleName</key>       <string>octomancer-sync</string>
+  <key>CFBundleIdentifier</key> <string>dev.dabbelt.octomancer-sync</string>
+  <key>CFBundleShortVersionString</key> <string>@PACKAGE_VERSION@</string>
+  <key>CFBundleVersion</key>    <string>@PACKAGE_VERSION@</string>
+  <key>NSBluetoothAlwaysUsageDescription</key>
+  <string>Octomancer sets your Blackmagic camera's clock from the Tentacle Sync boxes, over Bluetooth.</string>
+</dict>
+</plist>

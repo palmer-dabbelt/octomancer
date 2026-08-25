@@ -1,0 +1,981 @@
+// octomancer-sync -- keep a Blackmagic camera's clock on Tentacle time.
+//
+// Runs until interrupted. Each cycle it works out how far this Mac is from the
+// Tentacle bench, connects to the camera, and corrects its clock if that is
+// both needed and allowed. The decisions are all in camsync.h, which has no
+// radio in it and is tested; this file is the plumbing around them.
+//
+// This is a separate binary from octomancerd on purpose. octomancerd is
+// strictly passive -- it never connects to a device and never writes to one --
+// so it can be left running under launchd without any chance of disturbing a
+// recording. Setting a clock is an action, and an action belongs in a program
+// somebody chose to run.
+//
+// The Tentacle offset comes from octomancerd when it is running, because it
+// already keeps an hour of history per box and takes proper medians across it.
+// Failing that, this listens for itself.
+#include "config.h"
+
+#include <getopt.h>
+#include <signal.h>
+#include <unistd.h>
+
+#include <algorithm>
+#include <chrono>
+#include <cmath>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <string>
+#include <thread>
+#include <vector>
+
+#include "bmd.h"
+#include "camera.h"
+#include "camsync.h"
+#include "client.h"
+#include "jsonlog.h"
+#include "registry.h"
+#include "scanner.h"
+#include "server.h"
+#include "timeutil.h"
+
+namespace {
+
+volatile sig_atomic_t g_stop = 0;
+
+void on_signal(int) { g_stop = 1; }
+
+enum class Mode { kSync, kScanOnly, kWatch, kPacket, kRtcTest };
+
+enum class Source { kTentacle, kMac };
+
+struct Options {
+  octo::SyncOptions sync;
+  Mode mode = Mode::kSync;
+  Source source = Source::kTentacle;
+  std::string camera;  // name hint or BLE identifier
+  std::string socket_path = octo::default_socket_path();
+  std::string log_path = "octomancer-sync.jsonl";
+  double watch_seconds = 20.0;
+  bool once = false;
+  bool show_all = false;
+  bool use_daemon = true;
+};
+
+// ------------------------------------------------------------------ output
+
+void say(const char* f, ...) __attribute__((format(printf, 1, 2)));
+
+void say(const char* f, ...) {
+  char buf[1024];
+  va_list ap;
+  va_start(ap, f);
+  std::vsnprintf(buf, sizeof buf, f, ap);
+  va_end(ap);
+
+  const double wall = octo::wall_now();
+  const time_t secs = static_cast<time_t>(wall);
+  struct tm tm_local;
+  ::localtime_r(&secs, &tm_local);
+  char stamp[16];
+  std::strftime(stamp, sizeof stamp, "%H:%M:%S", &tm_local);
+  std::printf("%s  %s\n", stamp, buf);
+  std::fflush(stdout);
+}
+
+std::string fmt(const char* f, ...) __attribute__((format(printf, 1, 2)));
+
+std::string fmt(const char* f, ...) {
+  char buf[1024];
+  va_list ap;
+  va_start(ap, f);
+  std::vsnprintf(buf, sizeof buf, f, ap);
+  va_end(ap);
+  return buf;
+}
+
+// Box names are user-set and arrive from the air, so they are assumed hostile:
+// a name with a quote or a backslash in it must not be able to produce a log
+// line that parses as something else.
+std::string json_escape(const std::string& in) {
+  std::string out;
+  out.reserve(in.size() + 8);
+  for (unsigned char c : in) {
+    switch (c) {
+      case '"': out += "\\\""; break;
+      case '\\': out += "\\\\"; break;
+      case '\n': out += "\\n"; break;
+      case '\r': out += "\\r"; break;
+      case '\t': out += "\\t"; break;
+      default:
+        if (c < 0x20) {
+          char buf[8];
+          std::snprintf(buf, sizeof buf, "\\u%04x", c);
+          out += buf;
+        } else {
+          out.push_back(static_cast<char>(c));
+        }
+    }
+  }
+  return out;
+}
+
+// A JSONL record built up field by field, so a cycle that fails halfway still
+// logs everything it had learned before it failed.
+class Record {
+ public:
+  void add(const std::string& key, const std::string& json_value) {
+    if (!fields_.empty()) fields_ += ',';
+    fields_ += '"' + key + "\":" + json_value;
+  }
+  void str(const std::string& key, const std::string& value) {
+    add(key, '"' + json_escape(value) + '"');
+  }
+  void num(const std::string& key, double value, int digits = 4) {
+    add(key, fmt("%.*f", digits, value));
+  }
+  void integer(const std::string& key, long long value) {
+    add(key, fmt("%lld", value));
+  }
+  void boolean(const std::string& key, bool value) {
+    add(key, value ? "true" : "false");
+  }
+  bool has_action() const { return has_action_; }
+  void action(const std::string& value) {
+    if (has_action_) return;
+    has_action_ = true;
+    str("action", value);
+  }
+  const std::string& fields() const { return fields_; }
+
+ private:
+  std::string fields_;
+  bool has_action_ = false;
+};
+
+// ------------------------------------------------------------ Tentacle side
+
+struct Bench {
+  bool ok = false;
+  double offset = 0.0;
+  double spread = 0.0;
+  int boxes = 0;
+  std::string source;
+  std::string boxes_json;
+};
+
+std::string boxes_to_json(const std::vector<octo::DeviceSnapshot>& devices) {
+  std::string out = "{";
+  bool first = true;
+  for (const octo::DeviceSnapshot& d : devices) {
+    if (!d.live || !d.has_time) continue;
+    if (!first) out += ',';
+    first = false;
+    out += '"' + json_escape(d.name.empty() ? d.id : d.name) + "\":";
+    out += fmt("{\"offset_s\":%.4f,\"adverts\":%d,\"rssi\":%d,"
+               "\"resolution\":\"%s\"}",
+               d.median_offset, d.samples, d.rssi,
+               json_escape(d.resolution).c_str());
+  }
+  out += '}';
+  return out;
+}
+
+// Listen for ourselves, when octomancerd is not running. This is the same
+// decoder and the same median arithmetic the daemon uses -- it is just given a
+// few seconds of history instead of an hour, which is why the daemon is
+// preferred when it is there.
+Bench listen_for_bench(const Options& opt) {
+  Bench bench;
+  octo::Policy policy;
+  policy.window = std::max(opt.sync.listen * 2.0, 30.0);
+  octo::Registry registry(policy, octo::mono_now());
+
+  auto scanner = octo::make_ble_scanner(
+      [&registry](const octo::Advert& a) {
+        registry.observe(a.id, a.name, a.rssi, a.data.data(), a.data.size(),
+                         a.mono, a.wall);
+      },
+      [&registry](const std::string& state) { registry.set_radio(state); });
+  if (!scanner) return bench;
+
+  std::string err;
+  if (!scanner->start(&err)) return bench;
+  std::this_thread::sleep_for(std::chrono::duration<double>(opt.sync.listen));
+  scanner->stop();
+
+  const octo::Snapshot snap = registry.snapshot(octo::mono_now(), octo::wall_now());
+  if (!snap.has_bench) return bench;
+  bench.ok = true;
+  bench.offset = snap.bench_offset;
+  bench.spread = snap.bench_spread;
+  bench.boxes = snap.live;
+  bench.source = "scan";
+  bench.boxes_json = boxes_to_json(snap.device);
+  return bench;
+}
+
+Bench read_bench(const Options& opt) {
+  if (opt.use_daemon) {
+    octo::Snapshot snap;
+    std::string err;
+    if (octo::fetch(opt.socket_path, &snap, &err) && snap.has_bench) {
+      Bench bench;
+      bench.ok = true;
+      bench.offset = snap.bench_offset;
+      bench.spread = snap.bench_spread;
+      bench.boxes = snap.live;
+      bench.source = "octomancerd";
+      bench.boxes_json = boxes_to_json(snap.device);
+      return bench;
+    }
+  }
+  return listen_for_bench(opt);
+}
+
+// ------------------------------------------------------------ camera side
+
+// Connect, scanning only when we have to. Once the identifier is known,
+// CoreBluetooth can usually connect straight to it; scanning for 20 seconds
+// every cycle would otherwise dominate the poll interval and keep the radio
+// busy for no reason.
+bool connect_camera(octo::CameraLink* link, octo::SyncState* state,
+                    const Options& opt) {
+  if (!state->camera_id.empty()) {
+    std::string err;
+    if (link->connect(state->camera_id, opt.sync.connect_timeout, &err)) {
+      return true;
+    }
+    say("direct connect to %s failed (%s) -- rescanning",
+        state->camera_id.substr(0, 8).c_str(), err.c_str());
+  }
+
+  say("scanning %.0fs for Blackmagic cameras...", opt.sync.scan_timeout);
+  const octo::ScanResult found =
+      link->scan(opt.sync.scan_timeout, opt.camera, false);
+
+  const octo::CameraDevice* pick = nullptr;
+  for (const octo::CameraDevice& dev : found.cameras) {
+    if (opt.camera.empty()) {
+      pick = &dev;
+      break;
+    }
+    std::string name = dev.name, hint = opt.camera;
+    std::transform(name.begin(), name.end(), name.begin(), ::tolower);
+    std::transform(hint.begin(), hint.end(), hint.begin(), ::tolower);
+    std::string id = dev.id;
+    std::transform(id.begin(), id.end(), id.begin(), ::tolower);
+    if (name.find(hint) != std::string::npos || id == hint) {
+      pick = &dev;
+      break;
+    }
+  }
+
+  if (pick == nullptr) {
+    std::printf("  no Blackmagic cameras found.\n");
+    if (found.total == 0) {
+      std::printf("  * no LE devices at all -- Bluetooth may still be blocked"
+                  " for this process\n");
+    } else {
+      std::printf("  * saw %d other LE devices, so the radio and permissions"
+                  " are fine\n", found.total);
+    }
+    std::printf("  * enable Bluetooth in the camera's setup menu\n");
+    std::printf("  * a camera already connected to another app won't"
+                " advertise\n");
+    std::printf("  * an already-bonded camera may need to be un-paired from"
+                " macOS first\n");
+    std::fflush(stdout);
+    return false;
+  }
+
+  std::printf("  %-38s %-22s rssi=%-5d (%s)\n", pick->id.c_str(),
+              pick->name.empty() ? "(no name)" : pick->name.c_str(), pick->rssi,
+              pick->by_service_uuid ? "service uuid" : "name guess");
+  std::fflush(stdout);
+
+  const std::string id = pick->id;
+  std::string err;
+  if (!link->connect(id, opt.sync.connect_timeout, &err)) {
+    say("connect failed: %s", err.c_str());
+    return false;
+  }
+  state->camera_id = id;
+  return true;
+}
+
+// Write the RTC so the value lands on a second boundary. Returns the latency
+// of the GATT write itself, which is the part that cannot be compensated for.
+bool aligned_write(octo::CameraLink* link, const Options& opt, double offset,
+                   int bias, octo::bmd::Civil* wrote, double* latency,
+                   std::string* err) {
+  const double wait =
+      octo::aligned_wait(octo::wall_now(), offset, bias, opt.sync.lead);
+  if (wait > 0.0) {
+    std::this_thread::sleep_for(std::chrono::duration<double>(wait));
+  }
+
+  const double send_at = octo::wall_now();
+  const octo::bmd::Civil when = octo::aligned_value(send_at, offset, bias);
+  const std::vector<uint8_t> packet = octo::bmd::rtc_packet(when, 0);
+
+  const double t0 = octo::mono_now();
+  const bool ok = link->write_control(packet, 10.0, err);
+  *latency = octo::mono_now() - t0;
+  *wrote = when;
+  return ok;
+}
+
+// ------------------------------------------------------------------ a cycle
+
+void run_cycle(octo::CameraLink* link, octo::SyncState* state,
+               const Options& opt, octo::JsonLog* log) {
+  Record rec;
+
+  const Bench bench = read_bench(opt);
+  const double offset = (opt.source == Source::kMac) ? 0.0 : bench.offset;
+
+  if (opt.source == Source::kTentacle) {
+    if (!bench.ok) {
+      say("no Tentacle boxes heard -- nothing to sync to");
+      rec.action("skip:no-tentacle");
+      rec.integer("tentacles", 0);
+      log->record("cycle", rec.fields());
+      return;
+    }
+    rec.integer("tentacles", bench.boxes);
+    rec.num("tentacle_offset_s", bench.offset);
+    rec.num("tentacle_spread_s", bench.spread);
+    rec.str("bench_source", bench.source);
+    if (!bench.boxes_json.empty() && bench.boxes_json != "{}") {
+      rec.add("boxes", bench.boxes_json);
+    }
+    if (bench.spread > opt.sync.bench_spread) {
+      say("WARNING: Tentacle boxes disagree by %.3fs -- not all jammed to the"
+          " same source", bench.spread);
+      rec.boolean("bench_disagreement", true);
+    }
+  } else {
+    rec.str("bench_source", "this Mac");
+  }
+
+  if (!connect_camera(link, state, opt)) {
+    if (opt.source == Source::kTentacle) {
+      say("Tentacles at %+.3fs, but no camera found", offset);
+    } else {
+      say("no camera found");
+    }
+    rec.action("skip:no-camera");
+    log->record("cycle", rec.fields());
+    return;
+  }
+  rec.str("camera_id", state->camera_id);
+
+  std::string err;
+  if (!link->subscribe(opt.sync.camera_wait, &err)) {
+    say("connected, but %s", err.c_str());
+    rec.action("skip:no-characteristics");
+    link->disconnect();
+    log->record("cycle", rec.fields());
+    return;
+  }
+
+  octo::CameraView view = link->await_state(opt.sync.camera_wait);
+  const int fps = view.has_fps ? view.fps : opt.sync.fps;
+  rec.integer("camera_fps", fps);
+  if (view.has_transport) rec.integer("camera_transport", view.transport);
+
+  if (!view.has_timecode) {
+    say("camera connected but sent no timecode");
+    rec.action("skip:no-timecode");
+    link->disconnect();
+    log->record("cycle", rec.fields());
+    return;
+  }
+
+  const double cam = octo::bmd::timecode_sod(view.timecode, fps);
+  const double want = octo::local_seconds_of_day(octo::wall_now()) + offset;
+  const double error = octo::wrap_delta(cam - want);
+  const double now_mono = octo::mono_now();
+
+  rec.str("camera_tc", octo::bmd::format_timecode(view.timecode));
+  rec.num("camera_sod", cam);
+  rec.num("target_sod", want);
+  rec.num("error_s", error);
+
+  const octo::Drift drift = octo::observe(opt.sync, state, error, now_mono);
+  if (drift.has_step) {
+    rec.num("drift_ppm", drift.step_ppm, 2);
+    rec.num("drift_dt_s", drift.step_dt, 1);
+    rec.boolean("drift_shown", drift.step_shown);
+  }
+  if (drift.has_anchor) {
+    rec.num("anchor_span_s", drift.anchor_span, 1);
+    rec.num("anchor_drift_ppm", drift.anchor_ppm, 2);
+    rec.boolean("anchor_drift_shown", drift.anchor_shown);
+  }
+
+  const bool recording =
+      view.has_transport && view.transport == octo::bmd::kTransportRecord;
+  rec.boolean("recording", recording);
+
+  std::string drift_note;
+  if (drift.anchor_shown) {
+    drift_note = fmt("  drift %+.1f ppm over %s", drift.anchor_ppm,
+                     octo::format_span(drift.anchor_span).c_str());
+  } else if (drift.step_shown) {
+    drift_note = fmt("  drift %+.1f ppm", drift.step_ppm);
+  }
+
+  if (opt.source == Source::kTentacle) {
+    say("tentacles %+.3fs (%d boxes, spread %.3fs) | camera %s err %+.3fs%s",
+        offset, bench.boxes, bench.spread,
+        octo::bmd::format_timecode(view.timecode).c_str(), error,
+        drift_note.c_str());
+  } else {
+    say("this Mac | camera %s err %+.3fs%s",
+        octo::bmd::format_timecode(view.timecode).c_str(), error,
+        drift_note.c_str());
+  }
+
+  const octo::Decision decision =
+      octo::decide(opt.sync, *state, error, fps, recording, now_mono);
+  rec.num("tolerance_s", decision.tolerance, 6);
+  if (decision.since_write > 0.0) {
+    rec.num("since_write_s", decision.since_write, 1);
+  }
+
+  if (decision.action != octo::Action::kWrite) {
+    say("%s", decision.message.c_str());
+    rec.action(octo::action_name(decision.action));
+    link->disconnect();
+    log->record("cycle", rec.fields());
+    return;
+  }
+
+  const int bias = state->rtc_bias;
+  octo::bmd::Civil wrote;
+  double latency = 0.0;
+  if (!aligned_write(link, opt, offset, bias, &wrote, &latency, &err)) {
+    say("  write rejected: %s", err.c_str());
+    rec.action("write:rejected");
+    rec.str("error", err);
+    state->failures += 1;
+    link->disconnect();
+    log->record("cycle", rec.fields());
+    return;
+  }
+
+  state->has_last_write = true;
+  state->last_write_mono = octo::mono_now();
+  rec.str("write_utc", fmt("%02d:%02d:%02d", wrote.hour, wrote.minute,
+                           wrote.second));
+  rec.num("write_latency_s", latency);
+  rec.integer("rtc_bias", bias);
+  say("  wrote RTC %02d:%02d:%02d UTC (bias %+ds, %.0fms latency)", wrote.hour,
+      wrote.minute, wrote.second, bias, latency * 1000.0);
+
+  // A GATT ack proves the characteristic took the bytes and nothing more, so
+  // verify against the camera's own clock. The notifications never stopped, so
+  // just drop the stale reading and let a fresh one arrive.
+  link->forget_timecode();
+  std::this_thread::sleep_for(
+      std::chrono::duration<double>(opt.sync.verify_wait));
+  view = link->await_state(opt.sync.camera_wait);
+  if (!view.has_timecode) {
+    say("  could not verify: no timecode after the write");
+    rec.action("write:unverified");
+    state->failures += 1;
+    link->disconnect();
+    log->record("cycle", rec.fields());
+    return;
+  }
+
+  const double cam2 = octo::bmd::timecode_sod(view.timecode, fps);
+  const double err2 =
+      octo::wrap_delta(cam2 - (octo::local_seconds_of_day(octo::wall_now()) + offset));
+  rec.num("error_after_s", err2);
+  rec.str("camera_tc_after", octo::bmd::format_timecode(view.timecode));
+
+  const octo::WriteOutcome outcome =
+      octo::judge_write(opt.sync, state, error, err2, octo::mono_now());
+  rec.boolean("verified", outcome.verified);
+  say("%s", outcome.message.c_str());
+
+  switch (outcome.verdict) {
+    case octo::Verdict::kOk:
+      rec.action("write:ok");
+      if (outcome.bias_changed) {
+        rec.integer("rtc_bias_next", outcome.bias_after);
+        say("  learned: RTC bias %+ds -> %+ds", outcome.bias_before,
+            outcome.bias_after);
+      }
+      break;
+    case octo::Verdict::kAdapting:
+      rec.action("write:adapting");
+      rec.integer("rtc_bias_next", outcome.bias_after);
+      break;
+    case octo::Verdict::kNoEffect:
+      rec.action("write:no-effect");
+      say("  something else may be driving this camera's timecode");
+      break;
+  }
+
+  link->disconnect();
+  log->record("cycle", rec.fields());
+}
+
+// ------------------------------------------------------------ probe modes
+
+int mode_scan_only(octo::CameraLink* link, const Options& opt) {
+  std::printf("scanning %.0fs...\n", opt.sync.scan_timeout);
+  std::fflush(stdout);
+  const octo::ScanResult found =
+      link->scan(opt.sync.scan_timeout, opt.camera, opt.show_all);
+
+  if (opt.show_all) {
+    std::printf("  -- every LE device seen (%d) --\n", found.total);
+    for (const octo::CameraDevice& d : found.all) {
+      std::printf("     %-38s %-28s rssi=%d\n", d.id.c_str(),
+                  d.name.empty() ? "(no name)" : d.name.substr(0, 28).c_str(),
+                  d.rssi);
+    }
+    std::printf("  -- end --\n");
+  }
+
+  for (const octo::CameraDevice& d : found.cameras) {
+    std::printf("  %-38s %-22s rssi=%-5d (%s)\n", d.id.c_str(),
+                d.name.empty() ? "(no name)" : d.name.c_str(), d.rssi,
+                d.by_service_uuid ? "service uuid" : "name guess");
+  }
+  if (found.cameras.empty()) {
+    std::printf("  no Blackmagic cameras found (%d LE devices seen, %d of them"
+                " Tentacles).\n", found.total, found.tentacles);
+  }
+  return found.cameras.empty() ? 1 : 0;
+}
+
+// Connect and watch, without writing anything. This is how you check that a
+// camera is reachable and that its timecode is actually running before
+// blaming the daemon for not correcting it.
+int mode_watch(octo::CameraLink* link, octo::SyncState* state,
+               const Options& opt) {
+  if (!connect_camera(link, state, opt)) return 1;
+  std::string err;
+  if (!link->subscribe(opt.sync.camera_wait, &err)) {
+    std::fprintf(stderr, "octomancer-sync: %s\n", err.c_str());
+    link->disconnect();
+    return 1;
+  }
+
+  std::printf("connected. watching %.0fs -- nothing will be written.\n",
+              opt.watch_seconds);
+  const double deadline = octo::mono_now() + opt.watch_seconds;
+  octo::bmd::Timecode last;
+  bool have_last = false;
+  while (octo::mono_now() < deadline && !g_stop) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    const octo::CameraView view = link->view();
+    if (!view.has_timecode) continue;
+    if (have_last && view.timecode.seconds == last.seconds &&
+        view.timecode.frames == last.frames) {
+      continue;
+    }
+    last = view.timecode;
+    have_last = true;
+
+    const int fps = view.has_fps ? view.fps : opt.sync.fps;
+    const double cam = octo::bmd::timecode_sod(last, fps);
+    const double mac = octo::local_seconds_of_day(octo::wall_now());
+    say("%s   this Mac %s   diff %+.3fs   %dfps%s",
+        octo::bmd::format_timecode(last).c_str(),
+        octo::format_sod(mac).c_str(), octo::wrap_delta(cam - mac), fps,
+        (view.has_transport && view.transport == octo::bmd::kTransportRecord)
+            ? "   RECORDING"
+            : "");
+  }
+
+  const octo::CameraView view = link->view();
+  if (!view.state.empty()) {
+    std::printf("\nwhat the camera volunteered:\n");
+    for (const auto& entry : view.state) {
+      const octo::bmd::Value& v = entry.second;
+      std::string vals;
+      for (size_t i = 0; i < v.ints.size(); ++i) {
+        vals += fmt("%s%lld", i ? ", " : "", static_cast<long long>(v.ints[i]));
+      }
+      for (size_t i = 0; i < v.reals.size(); ++i) {
+        vals += fmt("%s%.4f", i ? ", " : "", v.reals[i]);
+      }
+      if (!v.text.empty()) vals += v.text;
+      std::printf("  %d.%-3d %s\n", entry.first.first, entry.first.second,
+                  vals.c_str());
+    }
+  }
+  link->disconnect();
+  return have_last ? 0 : 4;
+}
+
+// Prove the RTC write lands, by writing a deliberately wrong clock.
+//
+// The first version of this test wrote the *correct* time, and concluded from
+// the timecode not moving that group 7.0 was unimplemented. It was not: the
+// camera was already there. A test whose pass and fail states look identical
+// is not a test, so this one aims somewhere the camera demonstrably is not.
+int mode_rtc_test(octo::CameraLink* link, octo::SyncState* state,
+                  const Options& opt) {
+  if (!connect_camera(link, state, opt)) return 1;
+  std::string err;
+  if (!link->subscribe(opt.sync.camera_wait, &err)) {
+    std::fprintf(stderr, "octomancer-sync: %s\n", err.c_str());
+    link->disconnect();
+    return 1;
+  }
+  octo::CameraView view = link->await_state(opt.sync.camera_wait);
+  if (!view.has_timecode) {
+    std::fprintf(stderr,
+                 "octomancer-sync: no timecode in %.0fs. This needs the camera"
+                 " set to Time of Day;\nin Record Run the timecode does not"
+                 " follow the clock and there is nothing to see.\n",
+                 opt.sync.camera_wait);
+    link->disconnect();
+    return 4;
+  }
+
+  const std::string before = octo::bmd::format_timecode(view.timecode);
+  const double offset = -3600.0;  // an hour back: unmistakable, and reversible
+  const octo::bmd::Civil when = octo::bmd::utc_civil(octo::wall_now() + offset);
+  const std::vector<uint8_t> packet = octo::bmd::rtc_packet(when, 0);
+  std::printf("timecode now %s\n", before.c_str());
+  std::printf("writing RTC = %04d-%02d-%02d %02d:%02d:%02d UTC"
+              " (deliberately an hour slow)\n",
+              when.year, when.month, when.day, when.hour, when.minute,
+              when.second);
+  std::printf("  bytes: %s\n", octo::bmd::to_hex(packet).c_str());
+  std::fflush(stdout);
+
+  if (!link->write_control(packet, 10.0, &err)) {
+    std::printf("\nthe write was REJECTED: %s\n", err.c_str());
+    link->disconnect();
+    return 5;
+  }
+
+  link->forget_timecode();
+  std::this_thread::sleep_for(std::chrono::seconds(3));
+  view = link->await_state(opt.sync.camera_wait);
+  const std::string after = view.has_timecode
+                                ? octo::bmd::format_timecode(view.timecode)
+                                : std::string("(none)");
+  std::printf("\ntimecode %s -> %s\n", before.c_str(), after.c_str());
+
+  int rc = 5;
+  if (view.has_timecode) {
+    const double moved = octo::wrap_delta(
+        octo::bmd::timecode_sod(view.timecode, opt.sync.fps) -
+        octo::local_seconds_of_day(octo::wall_now()));
+    if (moved < -1800.0) {
+      std::printf("The clock followed the write. RTC (7.0) is implemented and"
+                  " the timecode\nfollows it, which is the whole basis for"
+                  " syncing this camera over BLE.\n");
+      rc = 0;
+    } else {
+      std::printf("The write was accepted but the clock did not move. Either"
+                  " the camera is not\nin Time of Day mode, or something else"
+                  " is driving its timecode.\n");
+    }
+  }
+  std::printf("\nPut it back with:  octomancer-sync --once\n");
+  link->disconnect();
+  return rc;
+}
+
+// ------------------------------------------------------------ command line
+
+void usage(FILE* out) {
+  std::fprintf(out,
+      "usage: octomancer-sync [options]\n"
+      "\n"
+      "Keep a Blackmagic camera's clock on Tentacle time. Runs until"
+      " interrupted.\n"
+      "\n"
+      "  --camera NAME|ID      which camera (default: the first one found)\n"
+      "  --source tentacle|mac what to sync to (default tentacle)\n"
+      "  --poll SEC            how often to touch the camera (default 60)\n"
+      "  --listen SEC          how long to listen for Tentacles when"
+      " octomancerd\n"
+      "                        is not running (default 8)\n"
+      "  --socket PATH         octomancerd's socket (default %s)\n"
+      "  --no-daemon           always listen directly, never ask octomancerd\n"
+      "  --log PATH            JSONL log ('' to disable, default"
+      " octomancer-sync.jsonl)\n"
+      "  --once                run a single cycle and exit\n"
+      "  --dry-run             decide and log, but never write\n"
+      "\n"
+      "thresholds\n"
+      "  --tolerance-frames N  leave the clock alone within this many frames,\n"
+      "                        at whatever rate the camera reports (default"
+      " 0.5)\n"
+      "  --tolerance SEC       the same threshold in seconds; overrides"
+      " --tolerance-frames\n"
+      "  --write-tolerance SEC how close a write must land to count as having\n"
+      "                        taken (default 1). Looser than --tolerance on\n"
+      "                        purpose: judging a write against half a frame"
+      " would\n"
+      "                        mark every good write a failure, and"
+      " --max-failures\n"
+      "                        of those in a row stops the daemon writing at"
+      " all.\n"
+      "  --min-write-interval SEC   never write more often than this (default"
+      " 3600),\n"
+      "                        so there are long free-running stretches to\n"
+      "                        measure drift across\n"
+      "  --max-failures N      failed writes before assuming an external"
+      " timecode\n"
+      "                        source owns the camera (default 3)\n"
+      "  --bench-spread SEC    warn if the Tentacle boxes disagree by more"
+      " than this\n"
+      "\n"
+      "the camera's own RTC offset\n"
+      "  --rtc-bias SEC        starting guess (default 0; it is learned)\n"
+      "  --no-adapt-bias       do not learn it from what writes land on\n"
+      "  --max-bias-step SEC   largest single correction (default 120)\n"
+      "  --max-adapts N        corrections to try before calling a write"
+      " failed\n"
+      "\n"
+      "timing\n"
+      "  --lead SEC            how early to send, to cover BLE latency"
+      " (default 0.05)\n"
+      "  --verify-wait SEC     settle time before checking a write (default"
+      " 3)\n"
+      "  --camera-wait SEC     how long to wait for camera state (default 6)\n"
+      "  --scan-timeout SEC    BLE scan duration (default 20)\n"
+      "  --connect-timeout SEC camera connect timeout (default 15)\n"
+      "  --min-drift-interval SEC   shortest gap whose drift is worth printing\n"
+      "                        (default 1800; shorter is quantisation, and is\n"
+      "                        logged but not shown)\n"
+      "  --fps N               fallback frame rate if the camera reports none\n"
+      "\n"
+      "instead of syncing\n"
+      "  --scan-only [--all]   list what is in range and exit\n"
+      "  --watch SEC           connect and watch the timecode, writing nothing\n"
+      "  --rtc-test            write a deliberately wrong clock, to prove the\n"
+      "                        write lands\n"
+      "  --packet              print the RTC packet for now and exit, no"
+      " Bluetooth\n"
+      "  --version, --help\n",
+      octo::default_socket_path().c_str());
+}
+
+bool parse_args(int argc, char** argv, Options* opt) {
+  enum {
+    kCamera = 1000, kSource, kPoll, kListen, kSocket, kNoDaemon, kLog, kOnce,
+    kDryRun, kToleranceFrames, kTolerance, kWriteTolerance, kMinWriteInterval,
+    kMaxFailures, kBenchSpread, kRtcBias, kNoAdaptBias, kMaxBiasStep,
+    kMaxAdapts, kLead, kVerifyWait, kCameraWait, kScanTimeout, kConnectTimeout,
+    kMinDriftInterval, kFps, kScanOnly, kAll, kWatch, kRtcTest, kPacket,
+    kVersion, kHelp,
+  };
+  static const struct option longs[] = {
+      {"camera", required_argument, nullptr, kCamera},
+      {"source", required_argument, nullptr, kSource},
+      {"poll", required_argument, nullptr, kPoll},
+      {"listen", required_argument, nullptr, kListen},
+      {"socket", required_argument, nullptr, kSocket},
+      {"no-daemon", no_argument, nullptr, kNoDaemon},
+      {"log", required_argument, nullptr, kLog},
+      {"once", no_argument, nullptr, kOnce},
+      {"dry-run", no_argument, nullptr, kDryRun},
+      {"tolerance-frames", required_argument, nullptr, kToleranceFrames},
+      {"tolerance", required_argument, nullptr, kTolerance},
+      {"write-tolerance", required_argument, nullptr, kWriteTolerance},
+      {"min-write-interval", required_argument, nullptr, kMinWriteInterval},
+      {"max-failures", required_argument, nullptr, kMaxFailures},
+      {"bench-spread", required_argument, nullptr, kBenchSpread},
+      {"rtc-bias", required_argument, nullptr, kRtcBias},
+      {"no-adapt-bias", no_argument, nullptr, kNoAdaptBias},
+      {"max-bias-step", required_argument, nullptr, kMaxBiasStep},
+      {"max-adapts", required_argument, nullptr, kMaxAdapts},
+      {"lead", required_argument, nullptr, kLead},
+      {"verify-wait", required_argument, nullptr, kVerifyWait},
+      {"camera-wait", required_argument, nullptr, kCameraWait},
+      {"scan-timeout", required_argument, nullptr, kScanTimeout},
+      {"connect-timeout", required_argument, nullptr, kConnectTimeout},
+      {"min-drift-interval", required_argument, nullptr, kMinDriftInterval},
+      {"fps", required_argument, nullptr, kFps},
+      {"scan-only", no_argument, nullptr, kScanOnly},
+      {"all", no_argument, nullptr, kAll},
+      {"watch", required_argument, nullptr, kWatch},
+      {"rtc-test", no_argument, nullptr, kRtcTest},
+      {"packet", no_argument, nullptr, kPacket},
+      {"version", no_argument, nullptr, kVersion},
+      {"help", no_argument, nullptr, kHelp},
+      {nullptr, 0, nullptr, 0},
+  };
+
+  for (;;) {
+    const int c = getopt_long(argc, argv, "", longs, nullptr);
+    if (c == -1) break;
+    switch (c) {
+      case kCamera: opt->camera = optarg; break;
+      case kSource:
+        if (std::strcmp(optarg, "mac") == 0) {
+          opt->source = Source::kMac;
+        } else if (std::strcmp(optarg, "tentacle") == 0) {
+          opt->source = Source::kTentacle;
+        } else {
+          std::fprintf(stderr, "octomancer-sync: --source must be 'tentacle'"
+                               " or 'mac'\n");
+          return false;
+        }
+        break;
+      case kPoll: opt->sync.poll = std::atof(optarg); break;
+      case kListen: opt->sync.listen = std::atof(optarg); break;
+      case kSocket: opt->socket_path = optarg; break;
+      case kNoDaemon: opt->use_daemon = false; break;
+      case kLog: opt->log_path = optarg; break;
+      case kOnce: opt->once = true; break;
+      case kDryRun: opt->sync.dry_run = true; break;
+      case kToleranceFrames:
+        opt->sync.tolerance_frames = std::atof(optarg);
+        break;
+      case kTolerance:
+        opt->sync.tolerance = std::atof(optarg);
+        opt->sync.has_tolerance = true;
+        break;
+      case kWriteTolerance: opt->sync.write_tolerance = std::atof(optarg); break;
+      case kMinWriteInterval:
+        opt->sync.min_write_interval = std::atof(optarg);
+        break;
+      case kMaxFailures: opt->sync.max_failures = std::atoi(optarg); break;
+      case kBenchSpread: opt->sync.bench_spread = std::atof(optarg); break;
+      case kRtcBias: opt->sync.rtc_bias = std::atoi(optarg); break;
+      case kNoAdaptBias: opt->sync.adapt_bias = false; break;
+      case kMaxBiasStep: opt->sync.max_bias_step = std::atoi(optarg); break;
+      case kMaxAdapts: opt->sync.max_adapts = std::atoi(optarg); break;
+      case kLead: opt->sync.lead = std::atof(optarg); break;
+      case kVerifyWait: opt->sync.verify_wait = std::atof(optarg); break;
+      case kCameraWait: opt->sync.camera_wait = std::atof(optarg); break;
+      case kScanTimeout: opt->sync.scan_timeout = std::atof(optarg); break;
+      case kConnectTimeout:
+        opt->sync.connect_timeout = std::atof(optarg);
+        break;
+      case kMinDriftInterval:
+        opt->sync.min_drift_interval = std::atof(optarg);
+        break;
+      case kFps: opt->sync.fps = std::atoi(optarg); break;
+      case kScanOnly: opt->mode = Mode::kScanOnly; break;
+      case kAll: opt->show_all = true; break;
+      case kWatch:
+        opt->mode = Mode::kWatch;
+        opt->watch_seconds = std::atof(optarg);
+        break;
+      case kRtcTest: opt->mode = Mode::kRtcTest; break;
+      case kPacket: opt->mode = Mode::kPacket; break;
+      case kVersion:
+        std::printf("octomancer-sync %s\n", PACKAGE_VERSION);
+        std::exit(0);
+      case kHelp:
+        usage(stdout);
+        std::exit(0);
+      default:
+        usage(stderr);
+        return false;
+    }
+  }
+
+  if (opt->sync.max_failures < 1) {
+    std::fprintf(stderr, "octomancer-sync: --max-failures must be at least 1,"
+                         " or the daemon gives up before it has tried.\n");
+    return false;
+  }
+  if (opt->sync.tolerance_frames <= 0 && !opt->sync.has_tolerance) {
+    std::fprintf(stderr, "octomancer-sync: --tolerance-frames must be above"
+                         " zero; a zero threshold can never be met.\n");
+    return false;
+  }
+  return true;
+}
+
+}  // namespace
+
+int main(int argc, char** argv) {
+  Options opt;
+  if (!parse_args(argc, argv, &opt)) return 2;
+
+  if (opt.mode == Mode::kPacket) {
+    const octo::bmd::Civil when = octo::bmd::utc_civil(octo::wall_now());
+    std::printf("%04d-%02d-%02d %02d:%02d:%02d UTC\n  %s\n", when.year,
+                when.month, when.day, when.hour, when.minute, when.second,
+                octo::bmd::to_hex(octo::bmd::rtc_packet(when, 0)).c_str());
+    return 0;
+  }
+
+  ::signal(SIGINT, on_signal);
+  ::signal(SIGTERM, on_signal);
+  ::signal(SIGPIPE, SIG_IGN);
+
+  std::unique_ptr<octo::CameraLink> link = octo::make_camera_link();
+  if (!link) {
+    std::fprintf(stderr, "octomancer-sync: no CoreBluetooth on this host\n");
+    return 1;
+  }
+  std::string err;
+  if (!link->ready(10.0, &err)) {
+    std::fprintf(stderr, "octomancer-sync: %s\n", err.c_str());
+    return 1;
+  }
+
+  octo::SyncState state;
+  state.rtc_bias = opt.sync.rtc_bias;
+
+  if (opt.mode == Mode::kScanOnly) return mode_scan_only(link.get(), opt);
+  if (opt.mode == Mode::kWatch) return mode_watch(link.get(), &state, opt);
+  if (opt.mode == Mode::kRtcTest) return mode_rtc_test(link.get(), &state, opt);
+
+  octo::JsonLog log;
+  if (!log.open(opt.log_path, &err)) {
+    std::fprintf(stderr, "octomancer-sync: %s\n", err.c_str());
+    return 1;
+  }
+
+  const std::string tol_desc =
+      opt.sync.has_tolerance
+          ? fmt("%.3fs", opt.sync.tolerance)
+          : fmt("%g frame%s", opt.sync.tolerance_frames,
+                opt.sync.tolerance_frames == 1.0 ? "" : "s");
+  say("octomancer sync starting -- poll every %.0fs, tolerance %s, write at"
+      " most once per %s, %s",
+      opt.sync.poll, tol_desc.c_str(),
+      octo::format_span(opt.sync.min_write_interval).c_str(),
+      opt.sync.dry_run ? "DRY RUN" : "will write");
+
+  Record start;
+  start.num("poll_s", opt.sync.poll, 1);
+  if (opt.sync.has_tolerance) start.num("tolerance_s", opt.sync.tolerance, 6);
+  start.num("tolerance_frames", opt.sync.tolerance_frames, 3);
+  start.num("write_tolerance_s", opt.sync.write_tolerance, 3);
+  start.num("min_write_interval_s", opt.sync.min_write_interval, 1);
+  start.integer("rtc_bias_s", opt.sync.rtc_bias);
+  start.boolean("dry_run", opt.sync.dry_run);
+  start.str("source", opt.source == Source::kMac ? "mac" : "tentacle");
+  log.record("start", start.fields());
+
+  while (!g_stop) {
+    const double started = octo::mono_now();
+    run_cycle(link.get(), &state, opt, &log);
+    if (opt.once) break;
+
+    // Sleep in slices so a signal is noticed promptly rather than a minute
+    // later: an operator who hits Ctrl-C expects the radio released now.
+    const double remain = opt.sync.poll - (octo::mono_now() - started);
+    for (double slept = 0.0; slept < remain && !g_stop; slept += 0.25) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(250));
+    }
+  }
+
+  say("stopping");
+  log.record("stop", "");
+  log.close();
+  return 0;
+}

@@ -1,6 +1,3 @@
-.venv/
-__pycache__/
-*.pyc
 .claude/worktrees/
 octomancer-sync.jsonl
 *.jsonl
@@ -20,6 +17,7 @@ octomancer-sync.out
 /Makefile.in
 /stamp-h1
 /src/octomancerd-Info.plist
+/src/octomancer-sync-Info.plist
 /ui/Info.plist
 /launchd/com.dabbelt.octomancerd.plist
 
@@ -30,8 +28,13 @@ octomancer-sync.out
 .dirstamp
 /octomancerd
 /octomancerctl
+/octomancer-sync
+/octomancer-report
 /octomancer-ui
 /Octomancer.app/
+/tests/test_bmd
+/tests/test_camsync
+/tests/test_logscan
 /tests/test_proto
 /tests/test_registry
 /tests/test_tentacle

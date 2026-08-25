@@ -88,6 +88,7 @@ AC_SUBST([OCTO_LOGDIR])
 
 AC_CONFIG_FILES([Makefile
                  src/octomancerd-Info.plist
+                 src/octomancer-sync-Info.plist
                  ui/Info.plist
                  launchd/com.dabbelt.octomancerd.plist])
 AC_OUTPUT

@@ -350,6 +350,13 @@ async def cycle(state, args, log):
                 drift = (error - last[1]) / dt
                 rec["drift_s_per_s"] = round(drift, 8)
                 rec["drift_ppm"] = round(drift * 1e6, 2)
+                rec["drift_dt_s"] = round(dt, 1)
+                # Keep it in the log for later fitting, but only put it on
+                # screen once the interval is long enough to mean anything:
+                # the camera reports whole frames, so 42 ms of quantisation
+                # over a one-minute gap invents ~700 ppm of drift that reads
+                # as a real measurement.
+                rec["drift_shown"] = dt >= args.min_drift_interval
         state["last_obs"] = (now_mono, error)
         state["wrote_since_obs"] = False
 
@@ -357,7 +364,7 @@ async def cycle(state, args, log):
         rec["recording"] = recording
 
         drift_note = ("  drift %+.1f ppm" % rec["drift_ppm"]
-                      if "drift_ppm" in rec else "")
+                      if rec.get("drift_shown") else "")
         log.say("tentacles %+.3fs (%d boxes, spread %.3fs) | camera %s "
                 "err %+.3fs%s"
                 % (offset, len(boxes), spread, rec["camera_tc"], error,
@@ -540,6 +547,11 @@ def main():
                    help="largest single correction to the learned bias")
     p.add_argument("--max-adapts", type=int, default=4, metavar="N",
                    help="bias corrections to try before calling a write failed")
+    p.add_argument("--min-drift-interval", type=float, default=1800.0,
+                   metavar="SECONDS",
+                   help="shortest gap whose drift is worth printing (default "
+                        "1800; shorter gaps are frame quantisation, and are "
+                        "logged but not shown)")
     p.add_argument("--lead", type=float, default=0.05, metavar="SECONDS",
                    help="how early to send, to cover BLE latency (default 0.05)")
     p.add_argument("--verify-wait", type=float, default=3.0, metavar="SECONDS",

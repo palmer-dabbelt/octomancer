@@ -214,15 +214,44 @@ than just read them.
   from the host clock agreed to within **2 ms**, and in a later run to within
   **1 ms**.
 
-Five independently-clocked devices converging to a millisecond is also the
-strongest single piece of evidence that the decode is correct — a wrong layout
-would not produce agreement, only coincidence.
+That agreement is also the strongest single piece of evidence that the decode
+is correct: a wrong layout would not produce agreement, only coincidence.
+
+**The boxes synchronise each other, and that is why they broadcast
+constantly.** The continuous advertising is not there for the benefit of
+passive readers like this one — it is how the bench holds itself together.
+Which means the millisecond agreement above is *designed behaviour*, not five
+good crystals happening to line up, and an earlier draft of this document
+calling them "independently clocked" had it backwards.
+
+Two consequences follow, and both matter for anything built on top:
+
+* **The bench drifts as a group.** Its ensemble rate is free-running with
+  respect to any outside clock, including a Mac being disciplined by NTP. A
+  common-mode offset growing between the bench and the host is therefore
+  expected, and says nothing about either side being wrong.
+* **A common-mode drift cannot be attributed.** Measuring bench-against-host
+  gives their *relative* rate and only that. Deciding which one is moving needs
+  a third reference, and there isn't one here. Over one hour all five boxes
+  measured **−13.0 ppm ±0.2** against this Mac — about 1.1 s/day — and that
+  figure belongs to the comparison, not to the boxes and not to the Mac.
+
+The useful signal about an individual box is therefore its disagreement with
+*the rest of the bench*, not its offset from the host. A box drifting away from
+the group has fallen out of the sync mechanism; the whole group drifting away
+from the host is business as usual.
+
+The mechanism itself is unidentified — see section 11.
 
 **Jam state is not permanent, and this bit them.** Earlier in the same session
 the Track E sat **+76.8 s** away from the other four boxes: a real difference,
 far too large to be a sampling artefact, and measured at microsecond
 resolution. Some time later it was back in agreement at −6.23 s along with
 everything else. Nothing in the protocol announced either state.
+
+Given that the boxes synchronise each other, the likeliest reading is that the
+Track E had dropped out of the sync group and was later pulled back into it,
+rather than that it was re-jammed by hand. That is inference, not observation.
 
 So: **a box being precise says nothing about it being correct.** Any tool that
 picks a sync reference should check that the rest of the bench agrees with the
@@ -254,6 +283,11 @@ jammed elsewhere.
   and never changes. No hypothesis worth recording.
 * **Whether any box reports its own jam state.** Nothing observed distinguished
   the Track E's 76.8 s excursion from normal operation.
+* **How the boxes synchronise each other.** That they do is established; the
+  mechanism is not. Nothing in the decoded fields is an obvious candidate for
+  carrying it, so it is presumably in the parts still unidentified — byte 1's
+  flags, or the `0x42` payload. Worth attacking with two boxes and a Faraday
+  bag: isolate one, let it drift, and watch what changes when it rejoins.
 * **Behaviour at other frame rates.** Everything here was captured at 24 fps.
   Byte 2 should simply read a different value, and the sub-frame span should
   change to match, but that is a prediction, not an observation.
@@ -277,6 +311,12 @@ this will probably make the same ones.
   when in fact every box gives millisecond-grade time.
 * **"The Track E is 76.8 s out of sync."** True when measured, but it is a
   transient state and not a property of the device or the protocol.
+* **"Five independently clocked devices."** Wrong: the boxes synchronise each
+  other. Their agreement is the mechanism working, not evidence about crystal
+  quality.
+* **"The common-mode drift against this Mac is probably the Mac's clock."**
+  Unfounded. Two clocks give you their difference and nothing else; attributing
+  it needs a third.
 
 ## 13. Reproducing
 

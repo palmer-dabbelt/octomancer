@@ -107,6 +107,20 @@ over a box's samples, then median across boxes for the bench figure. One
 mangled advert should not be able to declare a box out of sync, and one strong
 box should not be able to outvote the bench.
 
+**Read the drift figure as belonging to the comparison, not to the box.** The
+Tentacles synchronise each other -- that is what the constant broadcasting is
+for -- so the bench moves as a group, free-running against any outside clock
+including an NTP-disciplined Mac. Measuring a box against the host gives the
+relative rate of two clocks and nothing more; saying which one is moving would
+need a third reference, and there is none here. In the first hour of running,
+all five boxes measured -13.0 ppm +/- 0.2 against this Mac, which is about
+1.1 s/day of separation and is unremarkable.
+
+The corollary is that the per-box drift figures will nearly always agree with
+each other, because they are mostly reporting the same common-mode term. What
+distinguishes one box is its disagreement with the *rest of the bench*, which
+is what `bench_spread` reports.
+
 ## Host clock steps
 
 If NTP corrects this Mac, or the timezone changes, every offset moves at once.
@@ -126,6 +140,12 @@ re-jamming in the Tentacle app. Three things keep that from becoming noise:
   sitting on the threshold cannot oscillate;
 * **confirmation** -- three consecutive observations before either transition
   is believed.
+
+Because the bench drifts as a group, this alert tends to fire for every box at
+once -- the bench and the host have separated, and re-jamming brings them back
+together. A *single* box alerting on its own means something different: that
+box has fallen out of the sync group the others are still holding. Both call
+for a re-jam, but only the second is a fault in a device.
 
 Policy lives in the daemon, not the UI: the decision is made once, from the
 full history, by the process that has the full history. The UI only displays

@@ -41,6 +41,7 @@ void on_signal(int) { g_stop = 1; }
 struct Options {
   std::string socket_path = octo::default_control_socket_path();
   std::vector<std::string> cameras;
+  bool all_cameras = false;
   std::string daemon = "all";
   double timeout = 180.0;
   bool json = false;
@@ -61,7 +62,7 @@ void usage(FILE* out) {
       "                        launchd rather than a socket, for the obvious\n"
       "                        reason. `start` installs the LaunchAgent if it\n"
       "                        is not there yet, so it also survives a reboot.\n"
-      "  writes [on|off]       whether octomancer may change this camera at\n"
+      "  writes [on|off]       whether octomancer may change a camera at\n"
       "                        all -- its clock and its timecode source. New\n"
       "                        cameras are off, so this is the first thing to\n"
       "                        run. With no argument, reports the file.\n"
@@ -73,6 +74,9 @@ void usage(FILE* out) {
       "                        synced) or `clip` (it parks at 00:00:00:00 and\n"
       "                        stops). 0 and 1 work too.\n"
       "\n"
+      "  --all                 every camera the daemon knows about. Only\n"
+      "                        writes takes it, and it is required there if\n"
+      "                        --camera is not given.\n"
       "  --camera ID|NAME      which camera, repeatable. Without it, sync and\n"
       "                        source act on whichever camera the daemon is\n"
       "                        following.\n"
@@ -433,11 +437,37 @@ int run_writes_command(const Options& opt, const std::string& argument,
     return 2;
   }
 
-  // Which cameras. Naming none is only unambiguous when the daemon knows about
-  // exactly one; otherwise "all of them" and "the one I mean" are too easy to
-  // confuse for something that grants permission to change hardware.
+  // Which cameras. Nothing is assumed: this grants permission to change
+  // hardware, and the one camera the daemon happens to know about today is not
+  // the one it will know about tomorrow. Say which, or say --all and mean it.
+  if (opt.cameras.empty() && !opt.all_cameras) {
+    std::fprintf(stderr,
+                 "octomancer: say which camera -- `--camera ID|NAME`, or"
+                 " `--all` for every camera the daemon knows about.\n"
+                 "  `octomancer list-cameras` shows them, and `octomancer"
+                 " writes` shows what is set now.\n");
+    return 2;
+  }
+  if (!opt.cameras.empty() && opt.all_cameras) {
+    std::fprintf(stderr,
+                 "octomancer: --all and --camera contradict each other.\n");
+    return 2;
+  }
+
   std::vector<std::pair<std::string, std::string>> targets;  // id, name
-  if (!opt.cameras.empty()) {
+  if (opt.all_cameras) {
+    octo::Status s;
+    if (!fetch_status_quiet(opt, &s) || s.cameras.empty()) {
+      std::fprintf(stderr,
+                   "octomancer: --all is every camera the daemon knows about,"
+                   " and it knows about none yet."
+                   " Name one with --camera instead.\n");
+      return 2;
+    }
+    for (const octo::CameraStatus& c : s.cameras) {
+      targets.emplace_back(c.id, c.name);
+    }
+  } else {
     octo::Status s;
     const bool have_status = fetch_status_quiet(opt, &s);
     for (const std::string& want : opt.cameras) {
@@ -453,22 +483,6 @@ int run_writes_command(const Options& opt, const std::string& argument,
       }
       targets.emplace_back(id, name);
     }
-  } else {
-    octo::Status s;
-    if (!fetch_status_quiet(opt, &s) || s.cameras.empty()) {
-      std::fprintf(stderr,
-                   "octomancer: name a camera with --camera. Without a running"
-                   " daemon there is nothing to look one up in.\n");
-      return 2;
-    }
-    if (s.cameras.size() > 1) {
-      std::fprintf(stderr,
-                   "octomancer: %zu cameras are known, so --camera is required."
-                   " `octomancer list-cameras` shows them.\n",
-                   s.cameras.size());
-      return 2;
-    }
-    targets.emplace_back(s.cameras[0].id, s.cameras[0].name);
   }
 
   for (const auto& target : targets) {
@@ -520,11 +534,12 @@ int main(int argc, char** argv) {
   opt.color = isatty(1);
 
   enum {
-    kCamera = 1000, kSocket, kTimeout, kJson, kNoColor, kNoWait, kDaemon,
-    kVersion, kHelp,
+    kCamera = 1000, kAllCameras, kSocket, kTimeout, kJson, kNoColor, kNoWait,
+    kDaemon, kVersion, kHelp,
   };
   static const struct option longs[] = {
       {"camera", required_argument, nullptr, kCamera},
+      {"all", no_argument, nullptr, kAllCameras},
       {"daemon", required_argument, nullptr, kDaemon},
       {"socket", required_argument, nullptr, kSocket},
       {"timeout", required_argument, nullptr, kTimeout},
@@ -540,6 +555,7 @@ int main(int argc, char** argv) {
     if (c == -1) break;
     switch (c) {
       case kCamera: opt.cameras.push_back(optarg); break;
+      case kAllCameras: opt.all_cameras = true; break;
       case kDaemon: opt.daemon = optarg; break;
       case kSocket: opt.socket_path = optarg; break;
       case kTimeout: opt.timeout = std::atof(optarg); break;

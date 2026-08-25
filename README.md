@@ -176,7 +176,9 @@ octomancer sync                     # correct the clock now, even if it looks fi
 octomancer sync --camera A:1EAE18A7 # ...that one. Repeat --camera for several.
 octomancer source                   # what is the timecode following?
 octomancer source time-of-day       # make it follow the camera's clock
-octomancer writes on|off            # may octomancer change this camera at all?
+octomancer writes                   # what may be changed, and what may not
+octomancer writes on --camera ID    # may octomancer change that camera at all?
+octomancer writes off --all         # ...or every camera it knows about
 octomancer reload                   # re-read the configuration after editing it
 octomancer status --json | jq .     # for everything that isn't this program
 ```

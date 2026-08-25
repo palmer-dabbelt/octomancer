@@ -206,12 +206,72 @@ being *set* rather than a clock walking, which catches the case where the
 camera went away and came back between two looks. Either way the drift
 estimate, the drift anchor and the failure counters are cleared — including the
 "an external source owns this camera" back-off, because a camera that has just
-been switched on deserves to be asked again. The learned RTC bias survives,
-being the one thing here that costs hours to reacquire.
+been switched on deserves to be asked again.
+
+The learned RTC bias and the measured send lead both survive, and now survive a
+daemon restart too. Neither is a statement about what the clock currently
+reads — the bias is which second the camera lands on, the lead is how long a
+write takes to get there — and switching the camera off and on again changes
+neither. They are also the two things here that cost hours to reacquire.
 
 Switching the camera on is noticed within seconds rather than at the next poll:
 `--presence-poll` (5 s) is a read of `octomancerd`'s socket, not a scan.
 Without a daemon to ask, it falls back to scanning each cycle as before.
+
+### Landing on the second, not near it
+
+The RTC field is whole seconds, so the write is timed to land on a second
+boundary: wait until the target instant is `--lead` away, then send. That only
+works if `--lead` is actually how long the camera takes to act on the packet,
+and the original 50 ms was a guess at BLE latency rather than a measurement.
+
+The bench says the guess was low. Writes verified but landed consistently
+behind — −0.118 s once and −0.099 s another time, against a trigger threshold
+of half a frame (20.8 ms at 24 fps). A write that is sent `lead` early and still
+lands `e` behind took `lead − e` to arrive, so those two are a camera taking
+168 ms and 149 ms to act, not 50.
+
+So the lead is now measured. After each verified write the residual gives one
+observation, and the lead becomes the median of the last `--lead-window` (9) of
+them, clamped by `--max-lead` (0.5 s). A median rather than a mean because the
+camera reports whole frames: a single observation carries ±21 ms it cannot
+resolve, and one write that landed during a mode change should not drag the
+next nine. Nothing is used until `min_lead_samples` (3) have accumulated —
+`--no-adapt-lead` keeps the configured value.
+
+Only writes whose residual is a *fair* measurement count. A write that missed by
+more than half a second missed because the whole-second RTC bias was wrong, and
+that says nothing about timing; feeding it in would have the lead chasing a
+whole second it can never reach.
+
+### What is remembered about each body
+
+Two learned figures are properties of the camera rather than of its current
+clock reading: the whole-second RTC bias, and the sub-second apply delay above.
+Neither is invalidated by a power cycle — switching a camera off and on changes
+what its clock says, not how long a write takes to arrive — but both used to die
+with the process, so every restart re-learned them at the cost of one rationed
+write per attempt.
+
+They now live in `~/.octomancer/per_camera.json`, keyed by the camera's BLE
+identifier, alongside a bounded history of the writes they were derived from
+(`--db-max-samples`, 1000 per body — about six weeks at one write an hour).
+`--camera-db PATH` moves it; `--no-camera-db` turns it off. A database that
+will not open is reported and then ignored: an unsyncable camera is a worse
+outcome than a forgotten setting.
+
+It is JSON Lines rather than a single document, with `camera`, `write` and
+`compact` records, so recording an observation costs one appended line instead
+of a full rewrite on a path that runs while the camera is connected. Reading it
+back needs `jq -s` or a line at a time.
+
+The file is kept from growing by compaction rather than by generational
+rotation: when it passes twice what the retained data would occupy, it is
+rewritten with each body's learned parameters first and then only the samples
+still worth keeping, via a temporary file and a rename so a crash halfway
+through leaves the old file intact. The threshold is a *ratio* rather than a
+fixed size on purpose — with a fixed one, a database whose live set already sits
+near the limit rewrites itself on almost every append.
 
 ### Logs
 

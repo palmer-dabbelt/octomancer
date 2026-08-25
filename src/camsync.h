@@ -25,6 +25,7 @@
 #define OCTO_CAMSYNC_H
 
 #include <string>
+#include <vector>
 
 #include "bmd.h"
 
@@ -77,7 +78,29 @@ struct SyncOptions {
   double restart_step = 1.0;
 
   double min_drift_interval = 1800.0;
+
+  // --- how early to send -------------------------------------------------
+  //
+  // `lead` is the starting guess at how long it takes a written RTC value to
+  // actually reach the camera's clock. It was set to a plausible BLE latency
+  // and left there, and the bench says that guess is low: writes verify but
+  // land ~100ms behind, every time, which is exactly what an under-estimated
+  // lead looks like. So it is now a floor to start from rather than a
+  // constant, and the real figure is measured. See estimate_lead().
   double lead = 0.05;
+  bool adapt_lead = true;
+  // How many recent writes the estimate is taken over. A median needs enough
+  // to see through a frame of quantisation -- at 24fps a single observation
+  // carries +/-21ms it cannot resolve -- and few enough to follow a camera
+  // whose behaviour changes after a firmware update.
+  int lead_window = 9;
+  // Below this many, keep using the configured lead. Two samples have no
+  // median worth the name.
+  int min_lead_samples = 3;
+  // A clamp, because this is derived from a measurement that a wedged camera
+  // can make arbitrarily large, and the value is used to decide how long to
+  // sleep before transmitting.
+  double max_lead = 0.5;
   double verify_wait = 3.0;
   double camera_wait = 6.0;
   double scan_timeout = 20.0;
@@ -96,6 +119,17 @@ struct DriftEstimate {
   double ppm = 0.0;
   double span = 0.0;   // the lever arm it was measured over
   int samples = 0;     // how many stretches have contributed
+};
+
+// The apply delay, learned from writes that landed.
+//
+// Unlike DriftEstimate this is not a property of the camera's clock but of the
+// path a write takes to reach it, so a power cycle does not invalidate it and
+// forget_drift() leaves it alone.
+struct LeadEstimate {
+  bool has = false;
+  double lead_s = 0.0;
+  int samples = 0;
 };
 
 // Everything carried between cycles. Kept in one struct so a test can put the
@@ -121,6 +155,7 @@ struct SyncState {
   double anchor_error = 0.0;
 
   DriftEstimate drift;
+  LeadEstimate lead;
 
   std::string camera_id;
 };
@@ -131,6 +166,11 @@ struct SyncState {
 // is measuring the step, not the clock. It also clears the failure counters:
 // if the daemon had decided an external source owned this camera, a camera
 // that has just been switched on deserves to be asked again.
+//
+// The learned RTC bias and the learned lead deliberately survive. Neither is
+// a statement about what the clock currently reads: the bias is which second
+// the camera lands on, the lead is how long a write takes to arrive, and
+// switching the camera off and on again changes neither.
 //
 // The learned RTC bias deliberately survives. It is the only thing here that
 // took hours to acquire -- a bias adjustment costs a write, and writes are
@@ -199,6 +239,11 @@ enum class Verdict {
 struct WriteOutcome {
   Verdict verdict = Verdict::kOk;
   bool verified = false;
+  // Whether the residual is a fair measurement of the apply delay. A write
+  // that missed by more than half a second missed because the whole-second
+  // bias was wrong, and feeding that into a sub-second lead would have it
+  // chasing a whole second it can never reach.
+  bool timing_usable = false;
   int bias_before = 0;
   int bias_after = 0;
   bool bias_changed = false;
@@ -236,6 +281,32 @@ double aligned_wait(double now_unix, double offset, double bias, double lead);
 // truncating throws away a whole second and lands the camera ~1 s slow every
 // single time.
 bmd::Civil aligned_value(double send_unix, double offset, double bias);
+
+// --- learning how early to send --------------------------------------------
+
+// What one write says about the apply delay, in seconds.
+//
+// The value is sent `lead` before the boundary being aimed at, so a camera
+// that acted instantly would leave no error at all. Whatever error is left is
+// the part of the delay the lead failed to cover:
+//
+//     error_after = lead - apply_delay   =>   apply_delay = lead - error_after
+//
+// A camera that lands late reads as a negative error, which makes the delay
+// larger than the lead -- which is the case this bench actually shows.
+double observed_apply_delay(double lead_used_s, double error_after_s);
+
+// The lead to use, as the median of recent apply delays.
+//
+// A median rather than a mean: the camera reports whole frames, so individual
+// observations are quantised to +/-half a frame, and one write that landed
+// during a mode change should not drag the figure for the next nine.
+LeadEstimate estimate_lead(const std::vector<double>& delays,
+                           const SyncOptions& opt);
+
+// The lead to actually send with: the learned figure once there is one, and
+// the configured one until then.
+double effective_lead(const SyncOptions& opt, const SyncState& state);
 
 // --- how long to wait before looking again ---------------------------------
 

@@ -10,8 +10,6 @@
 
 namespace octo {
 
-namespace {
-
 void make_parents(const std::string& path) {
   size_t at = path.find('/', 1);
   while (at != std::string::npos) {
@@ -19,6 +17,31 @@ void make_parents(const std::string& path) {
     at = path.find('/', at + 1);
   }
 }
+
+std::string json_escape(const std::string& in) {
+  std::string out;
+  out.reserve(in.size() + 8);
+  for (unsigned char c : in) {
+    switch (c) {
+      case '"': out += "\\\""; break;
+      case '\\': out += "\\\\"; break;
+      case '\n': out += "\\n"; break;
+      case '\r': out += "\\r"; break;
+      case '\t': out += "\\t"; break;
+      default:
+        if (c < 0x20) {
+          char buf[8];
+          std::snprintf(buf, sizeof buf, "\\u%04x", c);
+          out += buf;
+        } else {
+          out.push_back(static_cast<char>(c));
+        }
+    }
+  }
+  return out;
+}
+
+namespace {
 
 std::string generation(const std::string& path, int n) {
   return path + "." + std::to_string(n);

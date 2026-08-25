@@ -28,6 +28,18 @@ struct Rotation {
   bool enabled() const { return max_bytes > 0.0 && keep > 0; }
 };
 
+// Make a string safe to sit between quotes in a JSON document.
+//
+// Device names are user-set and arrive from the air, so they are assumed
+// hostile: a name with a quote or a backslash in it must not be able to
+// produce a line that parses as something other than what was meant.
+std::string json_escape(const std::string& in);
+
+// mkdir -p for everything above `path`, best-effort and mode 0700. Shared so
+// that anything writing a file under a directory the user may not have
+// created yet does it the same way.
+void make_parents(const std::string& path);
+
 // PATH.keep is removed, PATH.n becomes PATH.n+1, and PATH becomes PATH.1.
 //
 // Exposed because the caller has to be the one holding the file: renaming a

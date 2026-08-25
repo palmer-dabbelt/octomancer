@@ -30,6 +30,7 @@
 
 #include "bmd.h"
 #include "camera.h"
+#include "camdb.h"
 #include "camsync.h"
 #include "client.h"
 #include "jsonlog.h"
@@ -63,6 +64,13 @@ struct Options {
   // poll.
   double presence_poll = 5.0;
   double watch_seconds = 20.0;
+  // Where the per-camera database lives. Empty disables it.
+  std::string camdb_path = octo::default_camera_db_path();
+  octo::CamDbOptions camdb;
+  // Whether --rtc-bias was given. An explicit bias on the command line beats a
+  // learned one, or a user debugging a body could never override what the
+  // database had convinced itself of.
+  bool has_rtc_bias = false;
   bool once = false;
   bool show_all = false;
   bool use_daemon = true;
@@ -102,29 +110,9 @@ std::string fmt(const char* f, ...) {
 
 // Box names are user-set and arrive from the air, so they are assumed hostile:
 // a name with a quote or a backslash in it must not be able to produce a log
-// line that parses as something else.
-std::string json_escape(const std::string& in) {
-  std::string out;
-  out.reserve(in.size() + 8);
-  for (unsigned char c : in) {
-    switch (c) {
-      case '"': out += "\\\""; break;
-      case '\\': out += "\\\\"; break;
-      case '\n': out += "\\n"; break;
-      case '\r': out += "\\r"; break;
-      case '\t': out += "\\t"; break;
-      default:
-        if (c < 0x20) {
-          char buf[8];
-          std::snprintf(buf, sizeof buf, "\\u%04x", c);
-          out += buf;
-        } else {
-          out.push_back(static_cast<char>(c));
-        }
-    }
-  }
-  return out;
-}
+// line that parses as something else. The escaping itself lives in jsonlog,
+// so the camera database and the JSONL cannot disagree about it.
+std::string json_escape(const std::string& in) { return octo::json_escape(in); }
 
 // A JSONL record built up field by field, so a cycle that fails halfway still
 // logs everything it had learned before it failed.
@@ -271,12 +259,50 @@ Presence read_presence(const Options& opt) {
 
 // ------------------------------------------------------------ camera side
 
+// Take up where the last run left off for this body.
+//
+// The two learned figures cost real time to acquire -- a bias adjustment costs
+// one of the rationed writes, and the lead needs several before its median
+// means anything -- so a daemon restart used to throw away a night's work. The
+// drift estimate is deliberately *not* seeded: it is a statement about a clock
+// that has since been switched off and on again.
+void seed_from_db(octo::CamDb* db, const Options& opt, octo::SyncState* state,
+                  const std::string& id, const std::string& name) {
+  if (db == nullptr || !db->enabled()) return;
+
+  std::string err;
+  const octo::CameraRecord* rec = db->find(id);
+  const bool known = rec != nullptr;
+  if (!db->note_seen(id, name, 0, !known, &err)) {
+    say("  camera database: %s", err.c_str());
+  }
+  if (!known) {
+    say("  first time seeing this body -- learning its RTC bias and send lead"
+        " from scratch");
+    return;
+  }
+
+  if (rec->has_bias && !opt.has_rtc_bias && rec->bias != state->rtc_bias) {
+    say("  recalled: RTC bias %+ds for this body (%llu writes on record)",
+        rec->bias, static_cast<unsigned long long>(rec->writes));
+    state->rtc_bias = rec->bias;
+  }
+  if (rec->has_lead && opt.sync.adapt_lead) {
+    state->lead.has = true;
+    state->lead.lead_s = rec->lead_s;
+    state->lead.samples =
+        static_cast<int>(rec->recent_apply_delays(opt.sync.lead_window).size());
+    say("  recalled: send lead %.0fms for this body (median of %d writes)",
+        rec->lead_s * 1000.0, state->lead.samples);
+  }
+}
+
 // Connect, scanning only when we have to. Once the identifier is known,
 // CoreBluetooth can usually connect straight to it; scanning for 20 seconds
 // every cycle would otherwise dominate the poll interval and keep the radio
 // busy for no reason.
 bool connect_camera(octo::CameraLink* link, octo::SyncState* state,
-                    const Options& opt) {
+                    const Options& opt, octo::CamDb* db) {
   if (!state->camera_id.empty()) {
     std::string err;
     if (link->connect(state->camera_id, opt.sync.connect_timeout, &err)) {
@@ -336,22 +362,24 @@ bool connect_camera(octo::CameraLink* link, octo::SyncState* state,
     say("connect failed: %s", err.c_str());
     return false;
   }
-  if (!state->camera_id.empty() && state->camera_id != id) {
+  const bool new_body = state->camera_id != id;
+  if (!state->camera_id.empty() && new_body) {
     // A different body. Nothing measured about the last one's clock says
     // anything about this one's.
     octo::forget_drift(state);
   }
   state->camera_id = id;
+  if (new_body) seed_from_db(db, opt, state, id, pick->name);
   return true;
 }
 
 // Write the RTC so the value lands on a second boundary. Returns the latency
 // of the GATT write itself, which is the part that cannot be compensated for.
 bool aligned_write(octo::CameraLink* link, const Options& opt, double offset,
-                   int bias, octo::bmd::Civil* wrote, double* latency,
-                   std::string* err) {
-  const double wait =
-      octo::aligned_wait(octo::wall_now(), offset, bias, opt.sync.lead);
+                   int bias, double lead, octo::bmd::Civil* wrote,
+                   double* latency, std::string* err) {
+  (void)opt;
+  const double wait = octo::aligned_wait(octo::wall_now(), offset, bias, lead);
   if (wait > 0.0) {
     std::this_thread::sleep_for(std::chrono::duration<double>(wait));
   }
@@ -370,7 +398,8 @@ bool aligned_write(octo::CameraLink* link, const Options& opt, double offset,
 // ------------------------------------------------------------------ a cycle
 
 void run_cycle(octo::CameraLink* link, octo::SyncState* state,
-               const Options& opt, octo::JsonLog* log, octo::PollPlan* plan) {
+               const Options& opt, octo::JsonLog* log, octo::CamDb* db,
+               octo::PollPlan* plan) {
   Record rec;
   // A cycle that never reaches the camera learns nothing about when to look
   // again, so the floor stands until one does.
@@ -404,7 +433,7 @@ void run_cycle(octo::CameraLink* link, octo::SyncState* state,
     rec.str("bench_source", "this Mac");
   }
 
-  if (!connect_camera(link, state, opt)) {
+  if (!connect_camera(link, state, opt, db)) {
     if (opt.source == Source::kTentacle) {
       say("Tentacles at %+.3fs, but no camera found", offset);
     } else {
@@ -523,9 +552,10 @@ void run_cycle(octo::CameraLink* link, octo::SyncState* state,
   }
 
   const int bias = state->rtc_bias;
+  const double lead = octo::effective_lead(opt.sync, *state);
   octo::bmd::Civil wrote;
   double latency = 0.0;
-  if (!aligned_write(link, opt, offset, bias, &wrote, &latency, &err)) {
+  if (!aligned_write(link, opt, offset, bias, lead, &wrote, &latency, &err)) {
     say("  write rejected: %s", err.c_str());
     rec.action("write:rejected");
     rec.str("error", err);
@@ -541,8 +571,10 @@ void run_cycle(octo::CameraLink* link, octo::SyncState* state,
                            wrote.second));
   rec.num("write_latency_s", latency);
   rec.integer("rtc_bias", bias);
-  say("  wrote RTC %02d:%02d:%02d UTC (bias %+ds, %.0fms latency)", wrote.hour,
-      wrote.minute, wrote.second, bias, latency * 1000.0);
+  rec.num("lead_s", lead, 6);
+  say("  wrote RTC %02d:%02d:%02d UTC (bias %+ds, %.0fms lead, %.0fms latency)",
+      wrote.hour, wrote.minute, wrote.second, bias, lead * 1000.0,
+      latency * 1000.0);
 
   // A GATT ack proves the characteristic took the bytes and nothing more, so
   // verify against the camera's own clock. The notifications never stopped, so
@@ -590,6 +622,55 @@ void run_cycle(octo::CameraLink* link, octo::SyncState* state,
       break;
   }
 
+  // What this write says about how long the camera takes to act.
+  //
+  // Re-derived from the body's whole recorded history rather than from this
+  // one observation: at 24fps a single residual carries +/-21ms of frame
+  // quantisation, so chasing each one individually would make the lead jitter
+  // by more than the tolerance it is trying to reach.
+  rec.num("apply_delay_s", octo::observed_apply_delay(lead, err2), 6);
+  if (db != nullptr && db->enabled() && !state->camera_id.empty()) {
+    octo::WriteSample sample;
+    sample.wall = octo::wall_now();
+    sample.error_before_s = error;
+    sample.error_after_s = err2;
+    sample.lead_used_s = lead;
+    sample.latency_s = latency;
+    sample.fps = fps;
+    sample.bias = bias;
+    sample.verified = outcome.verified;
+    sample.timing_ok = outcome.timing_usable;
+
+    std::string derr;
+    if (!db->record_write(state->camera_id, sample, &derr)) {
+      say("  camera database: %s", derr.c_str());
+    }
+
+    const octo::CameraRecord* known = db->find(state->camera_id);
+    if (known != nullptr && opt.sync.adapt_lead) {
+      const size_t window = static_cast<size_t>(
+          opt.sync.lead_window > 0 ? opt.sync.lead_window : 1);
+      const octo::LeadEstimate est =
+          octo::estimate_lead(known->recent_apply_delays(window), opt.sync);
+      if (est.has) {
+        const double before = octo::effective_lead(opt.sync, *state);
+        if (std::fabs(est.lead_s - before) > 1e-4) {
+          say("  learned: send lead %.0fms -> %.0fms (median of %d writes)",
+              before * 1000.0, est.lead_s * 1000.0, est.samples);
+        }
+        state->lead = est;
+      }
+    }
+
+    if (db->learn(state->camera_id, true, state->rtc_bias, state->lead.has,
+                  state->lead.lead_s, state->drift.has, state->drift.ppm,
+                  state->drift.span)) {
+      if (!db->record_params(state->camera_id, &derr)) {
+        say("  camera database: %s", derr.c_str());
+      }
+    }
+  }
+
   link->disconnect();
   plan_next(err2);
   log->record("cycle", rec.fields());
@@ -629,8 +710,8 @@ int mode_scan_only(octo::CameraLink* link, const Options& opt) {
 // camera is reachable and that its timecode is actually running before
 // blaming the daemon for not correcting it.
 int mode_watch(octo::CameraLink* link, octo::SyncState* state,
-               const Options& opt) {
-  if (!connect_camera(link, state, opt)) return 1;
+               const Options& opt, octo::CamDb* db) {
+  if (!connect_camera(link, state, opt, db)) return 1;
   std::string err;
   if (!link->subscribe(opt.sync.camera_wait, &err)) {
     std::fprintf(stderr, "octomancer-sync: %s\n", err.c_str());
@@ -693,8 +774,8 @@ int mode_watch(octo::CameraLink* link, octo::SyncState* state,
 // camera was already there. A test whose pass and fail states look identical
 // is not a test, so this one aims somewhere the camera demonstrably is not.
 int mode_rtc_test(octo::CameraLink* link, octo::SyncState* state,
-                  const Options& opt) {
-  if (!connect_camera(link, state, opt)) return 1;
+                  const Options& opt, octo::CamDb* db) {
+  if (!connect_camera(link, state, opt, db)) return 1;
   std::string err;
   if (!link->subscribe(opt.sync.camera_wait, &err)) {
     std::fprintf(stderr, "octomancer-sync: %s\n", err.c_str());
@@ -830,6 +911,14 @@ void usage(FILE* out) {
       " failed\n"
       "\n"
       "timing\n"
+      "  --camera-db PATH      per-camera settings (default"
+      " ~/.octomancer/per_camera.json)\n"
+      "  --no-camera-db        do not remember anything between runs\n"
+      "  --db-max-samples N    writes kept per camera (default 1000)\n"
+      "  --no-adapt-lead       keep --lead fixed instead of measuring it\n"
+      "  --lead-window N       writes the measured lead is a median of"
+      " (default 9)\n"
+      "  --max-lead SEC        clamp on the measured lead (default 0.5)\n"
       "  --lead SEC            how early to send, to cover BLE latency"
       " (default 0.05)\n"
       "  --verify-wait SEC     settle time before checking a write (default"
@@ -871,6 +960,7 @@ bool parse_args(int argc, char** argv, Options* opt) {
     kMinDriftInterval, kFps, kScanOnly, kAll, kWatch, kRtcTest, kPacket,
     kMaxPoll, kPollSlices, kFixedPoll, kPresencePoll, kConsole, kLogMax,
     kLogKeep, kMinPpm, kRestartStep,
+    kCameraDb, kNoCameraDb, kDbMaxSamples, kNoAdaptLead, kLeadWindow, kMaxLead,
     kVersion, kHelp,
   };
   static const struct option longs[] = {
@@ -886,6 +976,12 @@ bool parse_args(int argc, char** argv, Options* opt) {
       {"log-keep", required_argument, nullptr, kLogKeep},
       {"min-ppm", required_argument, nullptr, kMinPpm},
       {"restart-step", required_argument, nullptr, kRestartStep},
+      {"camera-db", required_argument, nullptr, kCameraDb},
+      {"no-camera-db", no_argument, nullptr, kNoCameraDb},
+      {"db-max-samples", required_argument, nullptr, kDbMaxSamples},
+      {"no-adapt-lead", no_argument, nullptr, kNoAdaptLead},
+      {"lead-window", required_argument, nullptr, kLeadWindow},
+      {"max-lead", required_argument, nullptr, kMaxLead},
       {"listen", required_argument, nullptr, kListen},
       {"socket", required_argument, nullptr, kSocket},
       {"no-daemon", no_argument, nullptr, kNoDaemon},
@@ -964,7 +1060,18 @@ bool parse_args(int argc, char** argv, Options* opt) {
         break;
       case kMaxFailures: opt->sync.max_failures = std::atoi(optarg); break;
       case kBenchSpread: opt->sync.bench_spread = std::atof(optarg); break;
-      case kRtcBias: opt->sync.rtc_bias = std::atoi(optarg); break;
+      case kRtcBias:
+        opt->sync.rtc_bias = std::atoi(optarg);
+        opt->has_rtc_bias = true;
+        break;
+      case kCameraDb: opt->camdb_path = optarg; break;
+      case kNoCameraDb: opt->camdb_path.clear(); break;
+      case kDbMaxSamples:
+        opt->camdb.max_samples = static_cast<size_t>(std::atol(optarg));
+        break;
+      case kNoAdaptLead: opt->sync.adapt_lead = false; break;
+      case kLeadWindow: opt->sync.lead_window = std::atoi(optarg); break;
+      case kMaxLead: opt->sync.max_lead = std::atof(optarg); break;
       case kNoAdaptBias: opt->sync.adapt_bias = false; break;
       case kMaxBiasStep: opt->sync.max_bias_step = std::atoi(optarg); break;
       case kMaxAdapts: opt->sync.max_adapts = std::atoi(optarg); break;
@@ -1055,9 +1162,21 @@ int main(int argc, char** argv) {
   octo::SyncState state;
   state.rtc_bias = opt.sync.rtc_bias;
 
+  // A database that will not open is not worth refusing to run over: the
+  // daemon still syncs, it just re-learns what it already knew. Say so and
+  // carry on, rather than leaving a camera unsynced over a permissions
+  // problem in a cache directory.
+  octo::CamDb db;
+  if (!db.open(opt.camdb_path, opt.camdb, &err)) {
+    std::fprintf(stderr, "octomancer-sync: %s -- continuing without it\n",
+                 err.c_str());
+  }
+
   if (opt.mode == Mode::kScanOnly) return mode_scan_only(link.get(), opt);
-  if (opt.mode == Mode::kWatch) return mode_watch(link.get(), &state, opt);
-  if (opt.mode == Mode::kRtcTest) return mode_rtc_test(link.get(), &state, opt);
+  if (opt.mode == Mode::kWatch) return mode_watch(link.get(), &state, opt, &db);
+  if (opt.mode == Mode::kRtcTest) {
+    return mode_rtc_test(link.get(), &state, opt, &db);
+  }
 
   octo::ConsoleLog console;
   if (!console.open(opt.console_path, opt.rotation, &err)) {
@@ -1088,7 +1207,17 @@ int main(int argc, char** argv) {
       octo::format_span(opt.sync.min_write_interval).c_str(),
       opt.sync.dry_run ? "DRY RUN" : "will write");
 
+  if (db.enabled()) {
+    say("remembering per-camera settings in %s (%zu %s on record)",
+        db.path().c_str(), db.cameras().size(),
+        db.cameras().size() == 1 ? "body" : "bodies");
+  } else if (!opt.camdb_path.empty()) {
+    say("not remembering per-camera settings -- %s could not be opened",
+        opt.camdb_path.c_str());
+  }
+
   Record start;
+  start.str("camera_db", opt.camdb_path);
   start.num("poll_s", opt.sync.poll, 1);
   start.num("max_poll_s", opt.sync.max_poll, 1);
   start.boolean("adaptive_poll", opt.sync.adaptive_poll);
@@ -1166,7 +1295,7 @@ int main(int argc, char** argv) {
         }
         next_blind_check = now + opt.sync.max_poll;
         octo::PollPlan plan;
-        run_cycle(link.get(), &state, opt, &log, &plan);
+        run_cycle(link.get(), &state, opt, &log, &db, &plan);
         if (opt.once) break;
         next_cycle = octo::mono_now() + plan.seconds;
       } else {

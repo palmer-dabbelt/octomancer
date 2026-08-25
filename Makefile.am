@@ -19,6 +19,8 @@ noinst_LIBRARIES = libocto.a
 libocto_a_SOURCES = \
 	src/bmd.cc \
 	src/bmd.h \
+	src/camdb.cc \
+	src/camdb.h \
 	src/camsync.cc \
 	src/camsync.h \
 	src/client.cc \
@@ -162,6 +164,7 @@ AM_OBJCXXFLAGS = -fobjc-arc -std=c++17
 
 check_PROGRAMS = \
 	tests/test_bmd \
+	tests/test_camdb \
 	tests/test_camsync \
 	tests/test_jsonlog \
 	tests/test_logscan \
@@ -188,6 +191,9 @@ tests_test_bmd_LDADD = libocto.a
 
 tests_test_camsync_SOURCES = tests/test_camsync.cc tests/harness.h
 tests_test_camsync_LDADD = libocto.a
+
+tests_test_camdb_SOURCES = tests/test_camdb.cc tests/harness.h
+tests_test_camdb_LDADD = libocto.a
 
 tests_test_jsonlog_SOURCES = tests/test_jsonlog.cc tests/harness.h
 tests_test_jsonlog_LDADD = libocto.a

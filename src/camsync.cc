@@ -1,5 +1,6 @@
 #include "camsync.h"
 
+#include <algorithm>
 #include <cmath>
 #include <cstdarg>
 #include <cstdio>
@@ -105,6 +106,8 @@ Decision decide(const SyncOptions& opt, const SyncState& state, double error,
 }
 
 void forget_drift(SyncState* state) {
+  // state->lead and state->rtc_bias are deliberately untouched; see the
+  // header. Everything below is a statement about the old clock's *value*.
   state->drift = DriftEstimate();
   state->has_last_obs = false;
   state->has_anchor = false;
@@ -170,6 +173,46 @@ Drift observe(const SyncOptions& opt, SyncState* state, double error,
     }
   }
   return drift;
+}
+
+double observed_apply_delay(double lead_used_s, double error_after_s) {
+  return lead_used_s - error_after_s;
+}
+
+LeadEstimate estimate_lead(const std::vector<double>& delays,
+                           const SyncOptions& opt) {
+  LeadEstimate out;
+  if (!opt.adapt_lead) return out;
+  const int want = opt.lead_window > 0 ? opt.lead_window : 1;
+  const int need = opt.min_lead_samples > 0 ? opt.min_lead_samples : 1;
+  if (static_cast<int>(delays.size()) < need) return out;
+
+  // The most recent `want`, which is what makes this follow a camera rather
+  // than average over its whole recorded life.
+  std::vector<double> recent;
+  const size_t from =
+      delays.size() > static_cast<size_t>(want) ? delays.size() - want : 0;
+  recent.assign(delays.begin() + static_cast<long>(from), delays.end());
+
+  std::sort(recent.begin(), recent.end());
+  const size_t n = recent.size();
+  double median = (n % 2 == 1) ? recent[n / 2]
+                               : 0.5 * (recent[n / 2 - 1] + recent[n / 2]);
+
+  // A negative delay would mean the camera acted before it was asked, which
+  // means the measurement is wrong rather than the camera being clairvoyant.
+  if (median < 0.0) median = 0.0;
+  if (median > opt.max_lead) median = opt.max_lead;
+
+  out.has = true;
+  out.lead_s = median;
+  out.samples = static_cast<int>(n);
+  return out;
+}
+
+double effective_lead(const SyncOptions& opt, const SyncState& state) {
+  if (opt.adapt_lead && state.lead.has) return state.lead.lead_s;
+  return opt.lead;
 }
 
 double drift_bound_ppm(const SyncOptions& opt, const DriftEstimate& est,
@@ -267,6 +310,9 @@ WriteOutcome judge_write(const SyncOptions& opt, SyncState* state,
     state->failures = 0;
     state->adapts = 0;
     out.verdict = Verdict::kOk;
+    // Half a second, because past that the whole-second bias is what is wrong
+    // and the sub-second lead cannot fix it.
+    out.timing_usable = std::fabs(error_after) < 0.5;
     out.message = fmt("  verified: error %+.3fs -> %+.3fs", error_before,
                       error_after);
 

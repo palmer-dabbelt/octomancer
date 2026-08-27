@@ -138,6 +138,37 @@ The naming is from the module's point of view: *Server TX* is the BTA-1
 talking, *Server RX* is the BTA-1 listening. A Mac pretending to be an
 UltraSync BLUE would subscribe to TX and write timecode into RX.
 
+**Those four are all of them.** The UUID array was read out of the image
+directly, at `0x54b3` in image C and `0x5a8b` in image B, and the two are
+byte-identical: one service, three characteristics, no second service, and no
+alternative UUID held in reserve. Anything scanning for this device has exactly
+one thing to match on.
+
+Worth correcting an earlier misreading in case it survives elsewhere: the six
+`0x2803` characteristic declarations near that array are **not** the custom
+service. They are a bog-standard Device Information Service — `0x2a29`
+Manufacturer, `0x2a24` Model, `0x2a25` Serial, `0x2a26`/`0x2a27`/`0x2a28`
+revisions, `0x2a23` System ID, `0x2a2a`, `0x2a50` PnP ID — whose values are the
+`ZOOM` / `F6` / `v_0.18` strings. The custom service has no static attribute
+table at all, because RivieraWaves builds 128-bit services at run time.
+
+### Image A, and a device name
+
+Image A has no attribute table and no Device Information Service. Instead
+`ZOOM D289` sits in the DA14580 **configuration header** near the start of the
+image, alongside the stack version banner and an all-`ff` BD address
+placeholder meaning "take the address from OTP":
+
+```
+0x1b6  09ff0060 52572d424c45 0000...    `RW-BLE
+0x1d6  5a4f4f4d20443238 3900...         ZOOM D289
+0x216  ...6432 ffffffffffff             BD address: use OTP
+```
+
+That is a **device name**, not a service, which makes control-app mode findable
+by name with no UUID involved — and that turns it into the diagnostic the
+timecode mode cannot provide. See section 6.
+
 ## 4. What is still unknown
 
 Everything that matters, namely **the byte stream itself**. The GATT layout
@@ -199,13 +230,31 @@ candidates, cheapest first:
 3. Range. Adverts from other rooms show up at −83 dBm here, so this would need
    the F6 to be much further away than "same desk".
 
-4. Something already holds a connection to the adapter. **A BLE peripheral
-   stops advertising while connected**, so a phone would make it invisible
-   without any fault anywhere. F6 firmware v2.0 added, in Zoom's own words, a
-   function that automatically connects to the F6 Control app when the F6 is
-   powered on — which is exactly such a phone. This is the most attractive
-   explanation on offer: it predicts silence in *every* mode, which is what we
-   see, where the other candidates predict silence only in one.
+4. ~~Something already holds a connection to the adapter.~~ **Ruled out.** A
+   connected peripheral stops advertising, and F6 v2.0 auto-connects to the F6
+   Control app at power-on, which made this attractive — it was the only theory
+   predicting silence in *every* mode. But the adapter was bought the same day
+   and has never been paired with the app at all, so nothing can be holding it.
+
+5. The boot-load into the adapter is failing. The F6 flashes the module over
+   UART every time the mode is entered; if that fails, the adapter can sit
+   there lit and completely silent. This now fits best, and it is consistent
+   with a brand-new adapter and an F6 that was a firmware revision behind.
+
+### The test that separates these
+
+Put the adapter in **control-app mode** and scan for the *name* `ZOOM D289`.
+That mode needs no UUID, no UltraSync, and no pairing window, so it isolates
+one question cleanly:
+
+* **`ZOOM D289` appears** — the adapter transmits, the radio path is fine, and
+  the fault is specific to the timecode mode (candidate 1 or 5).
+* **Nothing appears in either mode** — the adapter is not transmitting at all,
+  and this stops being a protocol problem. Not seated, not powered, dead unit,
+  or a boot-load that never completes.
+
+Everything in sections 2 and 3 stands either way: it was read out of Zoom's
+firmware, not inferred from the radio.
 
 A Mac advertising the real service UUID with all three characteristics drew no
 connection either, which rules out the mirror-image theory (that the adapter is

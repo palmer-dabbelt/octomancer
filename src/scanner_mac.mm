@@ -11,6 +11,7 @@
 #include <vector>
 
 #include "bmd.h"
+#include "radio.h"
 #include "scanner.h"
 #include "tentacle.h"
 #include "timeutil.h"
@@ -197,9 +198,11 @@ class MacScanner : public Scanner {
 
 }  // namespace
 
-std::unique_ptr<Scanner> make_ble_scanner(Scanner::AdvertHandler on_advert,
-                                          Scanner::SightingHandler on_camera,
-                                          Scanner::StateHandler on_state) {
+// Renamed from make_ble_scanner: that name now belongs to radio.cc, which
+// picks between this and the dongle. Nothing else about this file changed.
+std::unique_ptr<Scanner> make_corebluetooth_scanner(
+    Scanner::AdvertHandler on_advert, Scanner::SightingHandler on_camera,
+    Scanner::StateHandler on_state) {
   return std::unique_ptr<Scanner>(new MacScanner(
       std::move(on_advert), std::move(on_camera), std::move(on_state)));
 }

@@ -357,3 +357,52 @@ Information Service, neither of which is the advertisement.
 The three module images have been carved out of the firmware for disassembly
 (Cortex-M0): offsets `0x1e2f00`, `0x1ea380` and `0x1f0600`, lengths 29 824,
 25 216 and 29 696 bytes.
+
+## 9. The bench that answers it
+
+*Added 2026-08-27.* An nRF52840 dongle is on the way, and the code to drive it
+is written: `octomancer-zoom`, built on a raw-HCI host stack that lives in
+`src/hci.*`, `src/att.*` and `src/hcilink.*`. `doc/dongle-notes.md` has the
+details; what matters here is that every open question above now has a command
+that asks it.
+
+```
+octomancer-zoom --scan 30           # everything on the air, fully decoded
+octomancer-zoom --dump <address>    # the whole attribute table, in one command
+octomancer-zoom --serve             # advertise the profile and host it
+octomancer-zoom --sweep             # ...cycling the variants listed below
+```
+
+The default advertisement is the firmware's own template and nothing else —
+flags, then `11 07 aeab75f30c56b98601427dcd9415985e`. That is byte-for-byte
+the structure found inside `F6SYSTEM.BIN`, and `tests/test_hci.cc` pins it, so
+it cannot drift.
+
+`--sweep` cycles the things this document leaves genuinely open, twenty-five
+seconds each:
+
+1. the template alone, with no local name — which is also what section 8
+   predicts the real adapter looks like;
+2. plus a short name (`US`, `USB`, `UltraSy`). Note the arithmetic that
+   defeated macOS: `UltraSync BLUE` costs 16 bytes of AD structure and the
+   128-bit UUID costs 18, against a 31-byte budget. They cannot both be in the
+   primary advertisement, and the dongle refuses the combination outright
+   rather than silently demoting the UUID;
+3. the full name with the UUID dropped, in case the F6 matches on name;
+4. the name in the **scan response** — which CoreBluetooth gave no way to set
+   at all, and which is where a device that wants both normally puts it;
+5. manufacturer data carrying Atomos's company identifier, in case the F6
+   filters on it. macOS refuses to emit manufacturer data under any
+   circumstances, so this variant was not merely untried before — it was
+   unavailable.
+
+Crucially, `--trace` prints every HCI packet in both directions. The reason
+section 8 ends in a shrug is not that the answer was hard but that the
+instrument could not be read; that is now fixed.
+
+**Still unknown, and not addressed by any of this:** what bytes the F6 expects
+once it has connected. The GATT layout is only plumbing. So `--serve` logs
+every write verbatim rather than answering it, and `--tx HEX` sends whatever is
+asked for. If the F6 connects and then says nothing, the next move is a
+sniffer capture of a genuine UltraSync BLUE session — which the same dongle can
+take, with the nRF Sniffer firmware in place of `hci_usb`.

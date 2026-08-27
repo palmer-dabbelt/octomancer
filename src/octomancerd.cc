@@ -27,6 +27,7 @@
 #include "proclock.h"
 #include "registry.h"
 #include "render.h"
+#include "radio.h"
 #include "scanner.h"
 #include "server.h"
 #include "timeutil.h"
@@ -96,6 +97,10 @@ void usage(FILE* out) {
       "  --stale-after SEC     stop counting a silent box (default 30)\n"
       "  --min-drift-span SEC  shortest history worth fitting drift to\n"
       "                        (default 900)\n"
+      "\n"
+      "  --radio KIND        auto (default), corebluetooth, or dongle\n"
+      "  --dongle PORT       the dongle's serial port\n"
+      "  --hci-trace         log every HCI packet\n"
       "  --version, --help\n",
       octo::default_socket_path().c_str());
 }
@@ -105,7 +110,8 @@ bool parse_args(int argc, char** argv, Options* opt) {
     kSocket = 1000, kLog, kLogInterval, kConsole, kLogMax, kLogKeep,
     kProbe, kForeground, kQuiet, kLockFile,
     kThreshold, kClear, kConfirm, kRenotify, kNotify,
-    kWindow, kStale, kDriftSpan, kCameraGone, kVersion, kHelp,
+    kWindow, kStale, kDriftSpan, kCameraGone,
+    kRadio, kDongle, kHciTrace, kVersion, kHelp,
   };
   static const struct option longs[] = {
       {"socket", required_argument, nullptr, kSocket},
@@ -127,6 +133,9 @@ bool parse_args(int argc, char** argv, Options* opt) {
       {"stale-after", required_argument, nullptr, kStale},
       {"min-drift-span", required_argument, nullptr, kDriftSpan},
       {"camera-gone-after", required_argument, nullptr, kCameraGone},
+      {"radio", required_argument, nullptr, kRadio},
+      {"dongle", required_argument, nullptr, kDongle},
+      {"hci-trace", no_argument, nullptr, kHciTrace},
       {"version", no_argument, nullptr, kVersion},
       {"help", no_argument, nullptr, kHelp},
       {nullptr, 0, nullptr, 0},
@@ -155,6 +164,21 @@ bool parse_args(int argc, char** argv, Options* opt) {
       case kStale: opt->policy.stale_after = std::atof(optarg); break;
       case kDriftSpan: opt->policy.min_drift_span = std::atof(optarg); break;
       case kCameraGone: opt->policy.camera_gone_after = std::atof(optarg); break;
+      case kRadio:
+        if (!octo::parse_radio_kind(optarg, &octo::radio_options().kind)) {
+          std::fprintf(stderr,
+                       "%s: --radio must be auto, corebluetooth or dongle\n",
+                       "octomancerd");
+          return false;
+        }
+        break;
+      case kDongle:
+        octo::radio_options().device = optarg;
+        // Naming a port is asking for it. Falling back to CoreBluetooth when
+        // it turns out not to be there would hide a typo.
+        octo::radio_options().kind = octo::RadioKind::kDongle;
+        break;
+      case kHciTrace: octo::radio_options().trace = true; break;
       case kVersion:
         std::printf("octomancerd %s\n", OCTO_VERSION);
         std::exit(0);
@@ -273,6 +297,17 @@ void log_snapshot(octo::JsonLog* log, const octo::Snapshot& s) {
 
 int main(int argc, char** argv) {
   Options opt;
+  // The environment is read before the flags so a flag can override it. This
+  // matters because the agents are started by launchd, where there is no
+  // command line to edit -- OCTOMANCER_RADIO and OCTOMANCER_DONGLE are how an
+  // unattended agent is pointed at the dongle.
+  {
+    std::string env_err;
+    if (!octo::radio_options_from_env(&env_err)) {
+      std::fprintf(stderr, "octomancerd: %s\n", env_err.c_str());
+      return 2;
+    }
+  }
   if (!parse_args(argc, argv, &opt)) return 2;
 
   // A client that hangs up mid-reply must not take the daemon down with it,

@@ -469,6 +469,41 @@ Tentacle. `octomancer-sync` matches on the camera's service UUID, and treats
 FDAC service data as proof that a device is a Tentacle no matter what it calls
 itself.
 
+## Two radios
+
+There is a second radio now, and it is optional. Machines without one carry on
+exactly as before.
+
+CoreBluetooth is what every Mac already has and needs no hardware anyone has to
+remember to plug in. An **nRF52840 dongle**, driven over raw HCI, can do things
+CoreBluetooth will not: put exact bytes in an advertisement, say what it
+actually transmitted, and act as a peripheral on somebody else's terms. That
+last one is why it exists — see `doc/zoom-bta1-notes.md` for a week spent
+losing to `CBPeripheralManager`.
+
+The choice is made at run time and defaults to whichever radio is present:
+
+```
+octomancerd                        # dongle if one is plugged in, else CoreBluetooth
+octomancerd --radio corebluetooth  # or insist
+octomancer-sync --dongle /dev/cu.usbmodem1101
+```
+
+`OCTOMANCER_RADIO`, `OCTOMANCER_DONGLE` and `OCTOMANCER_HCI_TRACE` do the same
+from the environment, which is what the launchd agents need.
+
+Two differences are real and cannot be papered over:
+
+* **Device identifiers change.** CoreBluetooth gives an opaque per-host UUID;
+  HCI gives the real Bluetooth address. A bench learned over one radio is not
+  recognised over the other.
+* **The camera has to pair.** Over CoreBluetooth it was already bonded and
+  everything worked immediately. The dongle arrives as a stranger, so the
+  camera displays a six-digit passkey — pass it with `--passkey`.
+
+`doc/dongle-notes.md` covers flashing the dongle, what is tested without
+hardware and what is not, and `octomancer-zoom`, the Zoom BTA-1 bench.
+
 ## What we know so far
 
 Tested against a **Pocket Cinema Camera 6K Pro**:

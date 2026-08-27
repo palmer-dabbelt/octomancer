@@ -22,6 +22,7 @@
 
 #include "bmd.h"
 #include "camera.h"
+#include "radio.h"
 #include "tentacle.h"
 #include "timeutil.h"
 
@@ -671,7 +672,9 @@ CameraView MacCameraLink::await_state(double seconds) {
 
 }  // namespace
 
-std::unique_ptr<CameraLink> make_camera_link() {
+// Renamed from make_camera_link, which now lives in radio.cc and chooses
+// between this and the dongle.
+std::unique_ptr<CameraLink> make_corebluetooth_camera_link() {
   auto link = std::unique_ptr<MacCameraLink>(new MacCameraLink());
   std::string err;
   if (!link->start(&err)) return nullptr;

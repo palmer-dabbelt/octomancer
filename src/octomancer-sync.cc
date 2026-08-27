@@ -41,6 +41,7 @@
 #include "control.h"
 #include "jsonlog.h"
 #include "registry.h"
+#include "radio.h"
 #include "scanner.h"
 #include "server.h"
 #include "timeutil.h"
@@ -1330,6 +1331,13 @@ void usage(FILE* out) {
       "                        write lands\n"
       "  --packet              print the RTC packet for now and exit, no"
       " Bluetooth\n"
+      "\n"
+      "  --radio KIND          auto (default), corebluetooth, or dongle\n"
+      "  --dongle PORT         the dongle's serial port\n"
+      "  --passkey NNNNNN      the passkey the camera displays while pairing;\n"
+      "                        needed only over the dongle, which has no bond\n"
+      "                        of its own and no screen to prompt on\n"
+      "  --hci-trace           log every HCI packet\n"
       "  --version, --help\n",
       octo::default_socket_path().c_str());
 }
@@ -1347,6 +1355,7 @@ bool parse_args(int argc, char** argv, Options* opt) {
     kLogKeep, kMinPpm, kRestartStep,
     kCameraDb, kNoCameraDb, kDbMaxSamples, kNoAdaptLead, kLeadWindow, kMaxLead,
     kNoCentreFrames,
+    kRadio, kDongle, kHciTrace, kPasskey,
     kVersion, kHelp,
   };
   static const struct option longs[] = {
@@ -1403,6 +1412,10 @@ bool parse_args(int argc, char** argv, Options* opt) {
       {"packet", no_argument, nullptr, kPacket},
       {"poke", required_argument, nullptr, kPoke},
       {"poke-watch", required_argument, nullptr, kPokeWatch},
+      {"radio", required_argument, nullptr, kRadio},
+      {"dongle", required_argument, nullptr, kDongle},
+      {"hci-trace", no_argument, nullptr, kHciTrace},
+      {"passkey", required_argument, nullptr, kPasskey},
       {"version", no_argument, nullptr, kVersion},
       {"help", no_argument, nullptr, kHelp},
       {nullptr, 0, nullptr, 0},
@@ -1500,6 +1513,35 @@ bool parse_args(int argc, char** argv, Options* opt) {
         opt->pokes.push_back(optarg);
         break;
       case kPokeWatch: opt->poke_watch = std::atof(optarg); break;
+      case kRadio:
+        if (!octo::parse_radio_kind(optarg, &octo::radio_options().kind)) {
+          std::fprintf(stderr,
+                       "%s: --radio must be auto, corebluetooth or dongle\n",
+                       "octomancer-sync");
+          return false;
+        }
+        break;
+      case kDongle:
+        octo::radio_options().device = optarg;
+        // Naming a port is asking for it. Falling back to CoreBluetooth when
+        // it turns out not to be there would hide a typo.
+        octo::radio_options().kind = octo::RadioKind::kDongle;
+        break;
+      case kHciTrace: octo::radio_options().trace = true; break;
+      case kPasskey: {
+        // The six-digit number a camera displays while pairing. Only the
+        // dongle needs it: CoreBluetooth prompts on screen and keeps the bond
+        // afterwards, while over HCI this program pairs afresh each time.
+        char* end = nullptr;
+        long n = std::strtol(optarg, &end, 10);
+        if (end == optarg || *end != '\0' || n < 0 || n > 999999) {
+          std::fprintf(stderr,
+                       "octomancer-sync: --passkey must be six digits\n");
+          return false;
+        }
+        octo::radio_options().passkey = static_cast<int>(n);
+        break;
+      }
       case kVersion:
         std::printf("octomancer-sync %s\n", OCTO_VERSION);
         std::exit(0);
@@ -1540,6 +1582,17 @@ bool parse_args(int argc, char** argv, Options* opt) {
 
 int main(int argc, char** argv) {
   Options opt;
+  // The environment is read before the flags so a flag can override it. This
+  // matters because the agents are started by launchd, where there is no
+  // command line to edit -- OCTOMANCER_RADIO and OCTOMANCER_DONGLE are how an
+  // unattended agent is pointed at the dongle.
+  {
+    std::string env_err;
+    if (!octo::radio_options_from_env(&env_err)) {
+      std::fprintf(stderr, "octomancer-sync: %s\n", env_err.c_str());
+      return 2;
+    }
+  }
   if (!parse_args(argc, argv, &opt)) return 2;
 
   if (opt.mode == Mode::kPacket) {

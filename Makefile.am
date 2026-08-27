@@ -16,12 +16,15 @@ AM_CPPFLAGS = -I$(top_srcdir)/src -I$(top_builddir) \
 	-DOCTO_LOGDIR=\"$(OCTO_LOGDIR)\" \
 	-DOCTO_PKGDATADIR=\"$(EXPANDED_DATADIR)/$(PACKAGE)\"
 
-EXTRA_DIST = autogen.sh README.md tests/data/adverts.golden
+EXTRA_DIST = autogen.sh README.md tests/data/adverts.golden \
+	tools/flash-dongle.sh
 
 noinst_LIBRARIES = libocto.a
 libocto_a_SOURCES = \
 	src/agents.cc \
 	src/agents.h \
+	src/att.cc \
+	src/att.h \
 	src/bmd.cc \
 	src/bmd.h \
 	src/camconf.cc \
@@ -34,6 +37,14 @@ libocto_a_SOURCES = \
 	src/client.h \
 	src/control.cc \
 	src/control.h \
+	src/crypto.cc \
+	src/crypto.h \
+	src/hci.cc \
+	src/hci.h \
+	src/hcilink.cc \
+	src/hcilink.h \
+	src/hciport.h \
+	src/hciport_posix.cc \
 	src/jsonlog.cc \
 	src/jsonlog.h \
 	src/logscan.cc \
@@ -42,12 +53,17 @@ libocto_a_SOURCES = \
 	src/proclock.h \
 	src/proto.cc \
 	src/proto.h \
+	src/radio.cc \
+	src/radio.h \
+	src/radio_camera.cc \
 	src/registry.cc \
 	src/registry.h \
 	src/render.cc \
 	src/render.h \
 	src/server.cc \
 	src/server.h \
+	src/smp.cc \
+	src/smp.h \
 	src/tentacle.cc \
 	src/tentacle.h \
 	src/timeutil.cc \
@@ -58,8 +74,30 @@ libocto_a_SOURCES = \
 ## CoreBluetooth, and there is no second backend to fall back to.
 ##
 
+# The dongle backends are portable POSIX and go in the library with everything
+# else. They are only pulled into a binary that actually calls a radio factory,
+# which is why the tools with no radio in them do not grow a serial port.
+libocto_a_SOURCES += \
+	src/camera_hci.cc \
+	src/scanner_hci.cc
+
+# radio.cc has to know whether there is a second backend to choose from. The
+# version string is handed over on the command line for the reason AM_CPPFLAGS
+# explains above, and this is the same trade: one define beats a config header
+# that every translation unit depends on.
 if DARWIN
-bin_PROGRAMS = octomancerd octomancerctl octomancer-sync octomancer-report \
+AM_CPPFLAGS += -DOCTO_HAVE_COREBLUETOOTH
+endif
+
+# The Zoom bench. Not in the DARWIN group: it speaks to the dongle over a
+# serial port and needs nothing from CoreBluetooth, so it is the first program
+# here that would build on any POSIX host.
+bin_PROGRAMS = octomancer-zoom
+octomancer_zoom_SOURCES = src/octomancer-zoom.cc
+octomancer_zoom_LDADD = libocto.a
+
+if DARWIN
+bin_PROGRAMS += octomancerd octomancerctl octomancer-sync octomancer-report \
 	octomancer
 
 octomancerd_SOURCES = src/octomancerd.cc src/scanner_mac.mm src/scanner.h
@@ -205,16 +243,20 @@ AM_OBJCXXFLAGS = -fobjc-arc -std=c++17
 ##
 
 check_PROGRAMS = \
+	tests/test_att \
 	tests/test_bmd \
 	tests/test_camdb \
 	tests/test_camconf \
 	tests/test_camsync \
 	tests/test_control \
+	tests/test_crypto \
+	tests/test_hci \
 	tests/test_jsonlog \
 	tests/test_logscan \
 	tests/test_proclock \
 	tests/test_proto \
 	tests/test_registry \
+	tests/test_smp \
 	tests/test_tentacle \
 	tests/test_timeutil
 TESTS = $(check_PROGRAMS)
@@ -254,3 +296,18 @@ tests_test_jsonlog_LDADD = libocto.a
 
 tests_test_logscan_SOURCES = tests/test_logscan.cc tests/harness.h
 tests_test_logscan_LDADD = libocto.a
+
+# The dongle's codecs. All four run on a machine with no dongle in it, which is
+# the whole argument for having written them as portable C++ rather than as
+# firmware: the hard parts are the ones that can be checked here.
+tests_test_hci_SOURCES = tests/test_hci.cc tests/harness.h
+tests_test_hci_LDADD = libocto.a
+
+tests_test_att_SOURCES = tests/test_att.cc tests/harness.h
+tests_test_att_LDADD = libocto.a
+
+tests_test_crypto_SOURCES = tests/test_crypto.cc tests/harness.h
+tests_test_crypto_LDADD = libocto.a
+
+tests_test_smp_SOURCES = tests/test_smp.cc tests/harness.h
+tests_test_smp_LDADD = libocto.a

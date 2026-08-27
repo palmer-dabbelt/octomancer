@@ -11,9 +11,11 @@ never documented it, and no teardown of it appears to have been posted. Every
 claim below therefore says where it comes from, because two of them come from
 the radio and the rest come from a firmware image.
 
-**Status: nothing has been observed on the air yet.** The profile in section 3
-is read out of Zoom's own firmware and has not been confirmed against the
-hardware. Treat it as a strong lead, not as a fact.
+**Status: the profile is confirmed against the hardware.** Section 7 has the
+GATT dump from a live connection to the adapter, and every UUID, property and
+string predicted from the firmware in section 3 matched exactly. What is *not*
+solved is getting the F6 to accept the Mac as a timecode source; section 8 says
+why, and it looks like a macOS limitation rather than a protocol unknown.
 
 ## 1. What the radio said: nothing
 
@@ -68,16 +70,26 @@ The images are embedded in `F6SYSTEM.BIN` as ARM Cortex-M0 blobs, marked
 `DA14580-01` and carrying the RivieraWaves `RW-BLE` stack banner — so the BTA-1
 is Dialog DA14580 silicon. Three of them:
 
-| Image | Offset | Identity | Purpose |
+| Image | Offset | Identity | What it actually is |
 | --- | --- | --- | --- |
-| A | `0x1e3000` | `DA14580-01`, name `ZOOM D289` | the F6 Control app link |
-| B | `0x1ea380` | DIS strings `ZOOM` / `F6` / `v_0.18` | UltraSync BLUE, older |
-| C | `0x1f0600` | DIS strings `ZOOM` / `F6` / `v_0.21` | UltraSync BLUE, newer |
+| A | `0x1e3000` | `DA14580-01`, name `ZOOM D289` | config/patch blob, not an app |
+| B | `0x1ea380` | DIS strings `ZOOM` / `F6` / `v_0.18` | module firmware, older |
+| C | `0x1f0600` | DIS strings `ZOOM` / `F6` / `v_0.21` | module firmware, newer |
 
-B and C are the same firmware at two revisions; both report the same BLE stack
-version `v_3.0.9.504` and **both advertise the same service UUID**, so this
-does not depend on which F6 firmware is installed. (Checked in v2.20; the unit
-here is on v2.00.)
+B and C are the same firmware at two revisions, both reporting BLE stack
+version `v_3.0.9.504`. Image A carries no attribute table and no application —
+past its header it is a table of address/value pairs, i.e. a DA14580 ROM patch
+set, with `ZOOM D289` sitting in the configuration header rather than in any
+advertisement.
+
+**An earlier draft of this file labelled B and C "the UltraSync images". That
+was wrong.** The adapter, read live over GATT, reports `v_0.21` while in *F6
+Control* mode — so image C is what runs the control-app link, and the service
+below is the **F6 Control service**. The correction matters less than it might:
+these four UUIDs are the only custom ones in the entire 16 MB firmware, the
+stock Dialog DSPS base appears nowhere, and no separate UltraSync UUID exists
+anywhere in the image. Zoom uses this one profile whichever direction the
+adapter is facing.
 
 ## 3. The profile
 
@@ -129,10 +141,10 @@ Two consequences:
   devices in range… when it detects your recording device, it will pair with
   it" — as does Zoom's, whose pairing step 4 is "on the UltraSync BLUE, select
   the F6 as the device to connect".
-* **So the Mac plays the central**, which is the role this project already
-  plays for the Blackmagic bodies. No advertising impersonation is needed, and
-  macOS's restrictions on custom advertising payloads — it will not emit
-  manufacturer data at all — do not bite.
+* **So the Mac plays the central** — the role this project already plays for
+  the Blackmagic bodies. That is true, and confirmed working, *in F6 Control
+  mode only*. In timecode mode the roles invert and the Mac must advertise
+  instead, which is where this gets hard; see section 8.
 
 The naming is from the module's point of view: *Server TX* is the BTA-1
 talking, *Server RX* is the BTA-1 listening. A Mac pretending to be an
@@ -255,6 +267,81 @@ one question cleanly:
 
 Everything in sections 2 and 3 stands either way: it was read out of Zoom's
 firmware, not inferred from the radio.
+
+**Outcome: the adapter transmits, and always did.** It showed up within minutes
+of being put in F6 Control mode. Nothing was ever broken — the model of which
+side connects was.
+
+## 7. Confirmed on hardware
+
+With the F6 in **F6 Control** mode the adapter appears immediately, nameless,
+advertising the service exactly as section 3 predicted:
+
+```
+6352D71F-...  (no name)  rssi=-65  services=5E981594-CD7D-4201-86B9-560CF375ABAE
+```
+
+Connecting to it yields the whole profile:
+
+```
+connected: F6
+service 5E981594-CD7D-4201-86B9-560CF375ABAE
+  char 4076B47F-130B-407C-A2F4-D52945CB84B5  [notify]                 Server TX Data
+  char CBEB8809-028A-4195-B4A5-762FF6E500A9  [write-nr]               Server RX Data
+  char F0262F5F-3EBA-4719-A265-31F126A9C66C  [read,write-nr,notify]   Flow Control
+service 180A
+  2A29 = ZOOM          2A24 = F6
+  2A26 = v_3.0.9.504   2A28 = v_0.21
+```
+
+Every prediction held: the service, all three characteristics with their exact
+properties, the *absence* of a local name, and the Device Information strings
+down to the `v_0.21` revision matching the carved image. Flow Control reads
+back `01`. The GAP device name is `F6`.
+
+So the firmware read in sections 2 and 3 is sound, and the method — go to the
+vendor's own firmware when the radio says nothing — is what solved this.
+
+## 8. Timecode mode, and where it is stuck
+
+In timecode mode the F6 **advertises nothing at all**. Scanned while it sat on
+`Searching ...` with the adapter known-good and known-working: seventeen
+advertisers in range, none of them it. Combined with section 7, the roles
+invert between modes:
+
+| Mode | F6 + BTA-1 is | The Mac must be |
+| --- | --- | --- |
+| F6 Control | peripheral / GATT server | central — works today |
+| Timecode | **central, scanning** | **peripheral, advertising** |
+
+This contradicts both manuals, which say the UltraSync BLUE scans and the
+recorder is selected on it. The observation wins: `Searching ...` means the F6
+is literally searching, and there is nothing for us to find.
+
+That inverts the good news from section 3. The Mac now has to be the
+*advertiser*, and that is the one BLE role macOS is bad at:
+
+* `CBPeripheralManager` **cannot advertise manufacturer data at all**. If the
+  F6 filters on a Timecode Systems company ID — plausible for a licensed
+  protocol — nothing done from a Mac will ever match.
+* It gives no control over the scan response.
+* When advertising data overflows 31 bytes, CoreBluetooth moves 128-bit service
+  UUIDs into an Apple-proprietary *overflow area* that only Apple devices can
+  read. A DA14580 would be blind to it.
+
+Attempts made, all negative: advertising the real service with all three
+characteristics hosted, with the local name dropped entirely so the UUID had
+the best chance of staying in the primary advertisement, then swept across
+eight local names (`""`, `UltraSyn`, `UltraSync`, `US-0001`, `USB`,
+`UltraSync BLUE`, `TCS`, `0001`) at 25 seconds each. The F6 connected to none
+of them.
+
+There is no way to inspect what bytes macOS actually emitted, which is
+precisely the problem. **Next step is a radio with full advertising control** —
+an nRF52840 dongle, an ESP32, or Linux with raw HCI — which also buys a
+sniffer, so a real UltraSync↔F6 session could be captured outright rather than
+inferred. A phone running nRF Connect would at least settle the overflow
+question by showing what the Mac puts on the air.
 
 A Mac advertising the real service UUID with all three characteristics drew no
 connection either, which rules out the mirror-image theory (that the adapter is

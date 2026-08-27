@@ -181,10 +181,12 @@ stating plainly rather than papering over:
 * The firmware says the BTA-1 in UltraSync mode is a GATT server that puts
   `5e981594-…` in its advertisement. Section 3 gives the evidence, and it is
   strong — an attribute database and an advertising template are not ambiguous.
-* The radio says nothing is there. Six scans, including a five-minute scan
-  filtered on that exact UUID, taken while the F6 displayed `Searching ...`.
-  The adapter has never been seen in *any* mode: the control-app image
-  advertises as `ZOOM D289`, and that has never appeared either.
+* The radio says nothing is there. Eight scans totalling over an hour,
+  including a **thirty-minute scan filtered on that exact UUID**, several taken
+  while the F6 displayed `Searching ...`. The adapter has never been seen in
+  *any* mode. Everything the long scans did turn up was a rotating-address
+  beacon — Google `FE50`/`FE2C`, Tuya, and a handful of tags cycling their
+  identities — and none of them carried the service.
 
 Both cannot be true of the same moment, so at least one premise is wrong. The
 candidates, cheapest first:

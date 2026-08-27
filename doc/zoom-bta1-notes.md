@@ -197,6 +197,25 @@ candidates, cheapest first:
 3. Range. Adverts from other rooms show up at −83 dBm here, so this would need
    the F6 to be much further away than "same desk".
 
+4. Something already holds a connection to the adapter. **A BLE peripheral
+   stops advertising while connected**, so a phone would make it invisible
+   without any fault anywhere. F6 firmware v2.0 added, in Zoom's own words, a
+   function that automatically connects to the F6 Control app when the F6 is
+   powered on — which is exactly such a phone. This is the most attractive
+   explanation on offer: it predicts silence in *every* mode, which is what we
+   see, where the other candidates predict silence only in one.
+
 A Mac advertising the real service UUID with all three characteristics drew no
 connection either, which rules out the mirror-image theory (that the adapter is
 a client hunting for that UUID) about as well as a negative can.
+
+One detail for whoever looks next: the timecode-mode images contain **no local
+name** advertising structure — no `0x08`/`0x09` AD type anywhere in them. The
+adapter should therefore appear as a nameless device whose advertisement
+carries nothing but flags and the one 128-bit service UUID. Do not look for a
+device called `ZOOM` anything; that string exists in image A and in the Device
+Information Service, neither of which is the advertisement.
+
+The three module images have been carved out of the firmware for disassembly
+(Cortex-M0): offsets `0x1e2f00`, `0x1ea380` and `0x1f0600`, lengths 29 824,
+25 216 and 29 696 bytes.

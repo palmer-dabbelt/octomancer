@@ -504,6 +504,13 @@ Two differences are real and cannot be papered over:
 `doc/dongle-notes.md` covers flashing the dongle, what is tested without
 hardware and what is not, and `octomancer-zoom`, the Zoom BTA-1 bench.
 
+The nRF52840 is a whole computer, not just a radio, so there is a third thing
+it could be: the program itself, running with no Mac anywhere. `doc/standalone-notes.md`
+is the plan for that -- what crosses over unchanged (nearly all of the
+decision-making), what has to be built (bond storage, a control channel, and
+firmware update over USB and Bluetooth), and the one experiment that has to
+succeed before any of it is worth starting.
+
 ## What we know so far
 
 Tested against a **Pocket Cinema Camera 6K Pro**:

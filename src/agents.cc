@@ -16,6 +16,8 @@
 #include <cstdlib>
 #include <fstream>
 
+#include "timeutil.h"
+
 namespace octo {
 
 namespace {
@@ -275,6 +277,41 @@ AgentState agent_state(Agent a) {
     state.has_started = process_start_time(state.pid, &state.started_wall);
   }
   return state;
+}
+
+// No launchd in here and no socket either: everything this needs has already
+// been fetched by the caller. That is what lets both surfaces share it, and
+// what lets a test put a daemon into the awkward middle state without having
+// to arrange for one.
+AgentSituation agent_situation(const AgentState& state, bool answering,
+                               double now) {
+  AgentSituation out;
+  if (answering) {
+    out.mood = AgentMood::kFine;
+    out.said = "answering";
+    // launchd's uptime rather than the daemon's own, because launchd still has
+    // it for a process that has stopped answering -- and that is exactly the
+    // daemon somebody wants an uptime for. "Up for three seconds" and "up for
+    // three hours" are different bugs wearing the same face.
+    if (state.has_started) {
+      out.said += ", up " + format_age(now - state.started_wall);
+    }
+    return out;
+  }
+  if (state.running) {
+    // The unhappy middle, and worth its own colour: a process that is there
+    // and a socket that is not is a different problem from a daemon that never
+    // came up, and only one of the two is fixed by starting it.
+    out.mood = AgentMood::kBad;
+    out.said = "running as pid " + std::to_string(state.pid) +
+               ", but its socket does not answer";
+    return out;
+  }
+  out.mood = AgentMood::kWarn;
+  out.said = state.loaded || state.installed
+                 ? "not running -- `octomancer start` starts it"
+                 : "not installed -- `octomancer start` installs and starts it";
+  return out;
 }
 
 bool agent_install(Agent a, std::string* err) {

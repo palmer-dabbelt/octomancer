@@ -71,7 +71,10 @@ libocto_a_SOURCES = \
 	src/tentacle.cc \
 	src/tentacle.h \
 	src/timeutil.cc \
-	src/timeutil.h
+	src/timeutil.h \
+	src/tui.cc \
+	src/tui.h \
+	src/tui_term.cc
 
 ##
 ## The service and its control tool. Both are macOS-only: the radio is
@@ -264,7 +267,8 @@ check_PROGRAMS = \
 	tests/test_registry \
 	tests/test_smp \
 	tests/test_tentacle \
-	tests/test_timeutil
+	tests/test_timeutil \
+	tests/test_tui
 TESTS = $(check_PROGRAMS)
 
 tests_test_tentacle_SOURCES = tests/test_tentacle.cc tests/harness.h
@@ -272,6 +276,9 @@ tests_test_tentacle_LDADD = libocto.a
 
 tests_test_timeutil_SOURCES = tests/test_timeutil.cc tests/harness.h
 tests_test_timeutil_LDADD = libocto.a
+
+tests_test_tui_SOURCES = tests/test_tui.cc tests/harness.h
+tests_test_tui_LDADD = libocto.a
 
 tests_test_registry_SOURCES = tests/test_registry.cc tests/harness.h
 tests_test_registry_LDADD = libocto.a

@@ -55,6 +55,7 @@
 /tests/test_smp
 /tests/test_tentacle
 /tests/test_timeutil
+/tests/test_tui
 *.log
 *.trs
 *~

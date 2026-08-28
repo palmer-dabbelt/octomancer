@@ -70,6 +70,8 @@ src/logscan.{h,cc}     reading that JSONL back: strict, flat, not a parser
 src/camsync.{h,cc}     the write gates, drift, the poll schedule, the send lead
 src/camdb.{h,cc}       what each camera body has taught us, across restarts
 src/devices.{h,cc}     both daemons' answers merged into one list of devices
+src/tui.{h,cc}         what the full-screen page says, and what a key means
+src/tui_term.cc        ...and the terminal it says it on: raw mode, redraw, poll
 src/scanner_mac.mm     CoreBluetooth. The only file that knows about Apple.
 src/octomancerd.cc     the service
 src/octomancerctl.cc   the control tool
@@ -81,6 +83,13 @@ The seam that matters is `src/scanner.h`. Everything above it is portable C++
 with no Apple headers, which is what allows the decoder and the drift
 arithmetic to be tested at all; everything below it needs a real antenna. If
 that line ever blurs, the tests stop being able to run.
+
+`src/tui.cc` and `src/tui_term.cc` are the same seam drawn a second time, for a
+second kind of untestable thing. Composing the page and deciding what `q` means
+are arithmetic over a snapshot, so they sit in `tui.cc` where `tests/test_tui`
+reads them; putting a tty into raw mode and laying lines onto a screen cannot
+be checked without a terminal, so it sits alone in `tui_term.cc` with nothing
+in it worth a test.
 
 ## Threading
 

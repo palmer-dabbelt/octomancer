@@ -38,6 +38,7 @@
 #include "proto.h"
 #include "server.h"
 #include "timeutil.h"
+#include "tui.h"
 
 namespace {
 
@@ -70,6 +71,10 @@ void usage(FILE* out) {
       "  status                one line per device, plus what the two daemons\n"
       "                        are doing (the default). --verbose for the\n"
       "                        rest of what they know.\n"
+      "  tui                   the same page, on screen and staying there: it\n"
+      "                        redraws every second until you press q. For\n"
+      "                        watching a jam take hold rather than asking\n"
+      "                        whether it has.\n"
       "  list-cameras          one line per camera the daemon knows about\n"
       "  scan                  look for Blackmagic cameras on the air. With\n"
       "                        --all, every LE device seen, which is how you\n"
@@ -962,37 +967,18 @@ struct DaemonReport {
 };
 
 // launchd's view of one daemon and this program's view of it, on one line.
-//
-// The uptime is launchd's rather than the daemon's own, because launchd still
-// has it for a process that has stopped answering -- and that is exactly the
-// daemon somebody wants an uptime for. "Up for three seconds" and "up for
-// three hours" are different bugs wearing the same face.
+// The sentence itself is agents.h's, so that the terminal interface says the
+// same thing about the same daemon.
 void print_daemon_line(const DaemonReport& d, const Paint& p, bool verbose) {
   const double now = octo::wall_now();
   const octo::AgentState& state = d.state;
-  const char* colour = kGreen;
-  std::string said;
-  if (d.answering) {
-    said = "answering";
-    if (state.has_started) {
-      said += ", up " + octo::format_age(now - state.started_wall);
-    }
-  } else if (state.running) {
-    // The unhappy middle, and worth its own colour: a process that is there
-    // and a socket that is not is a different problem from a daemon that never
-    // came up, and only one of the two is fixed by starting it.
-    said = "running as pid " + std::to_string(state.pid) +
-           ", but its socket does not answer";
-    colour = kRed;
-  } else if (state.loaded || state.installed) {
-    said = "not running -- `octomancer start` starts it";
-    colour = kYellow;
-  } else {
-    said = "not installed -- `octomancer start` installs and starts it";
-    colour = kYellow;
-  }
+  const octo::AgentSituation sit =
+      octo::agent_situation(state, d.answering, now);
+  const char* colour = sit.mood == octo::AgentMood::kBad    ? kRed
+                       : sit.mood == octo::AgentMood::kWarn ? kYellow
+                                                           : kGreen;
   std::printf("  %-16s %s%s%s\n", octo::agent_program(d.agent), p(colour),
-              said.c_str(), p(kReset));
+              sit.said.c_str(), p(kReset));
 
   if (!verbose) return;
   std::string detail = state.installed ? "installed, starts at boot"
@@ -1230,6 +1216,15 @@ int main(int argc, char** argv) {
       return 0;
     }
     return run_status_command(opt, paint);
+  }
+
+  if (command == "tui") {
+    octo::TuiOptions tui;
+    tui.sync_socket_path = opt.socket_path;
+    tui.bench_socket_path = opt.bench_socket_path;
+    tui.camera_config_path = octo::default_camera_config_path();
+    tui.color = opt.color;
+    return octo::run_tui(tui);
   }
 
   if (command == "start" || command == "stop" || command == "restart") {

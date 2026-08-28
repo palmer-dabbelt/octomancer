@@ -277,6 +277,7 @@ be a second thing to approve, and a second thing to be quietly refused.
 ```
 octomancer                          # status: both daemons and every device
 octomancer status --verbose         # ...and the rest of what they know
+octomancer tui                      # the same page, staying put and redrawing
 octomancer list-cameras             # one line each
 octomancer scan                     # which Blackmagic cameras are on the air?
 octomancer scan --all               # ...and every other LE device, which is how
@@ -446,6 +447,55 @@ Because a correction takes tens of seconds — scan, connect, wait for a frame,
 write on a second boundary, verify — the daemon takes the request, hands back an
 id, and `octomancer` asks after it until it finishes. Interrupting the command
 does not interrupt the sync; `--no-wait` queues it and returns immediately.
+
+### Watching it, rather than asking it
+
+`octomancer tui` is that same page, on screen and staying there. It redraws
+once a second until you press `q`.
+
+```
+octomancer 0.1.0         09:17:06
+  octomancerd      answering, up 12h48m
+  octomancer-sync  answering, up 12h48m
+
+DEVICE            AGE     OFFSET LINK         RSSI
+BMPCC              0s     +8.8ms on the air    -52
+F55                1s     -1.2ms on the air    -80
+Krysta             1s     +0.0ms on the air    -72
+FS5             2m25s         -- off the air    -80
+FS7             2h47m         -- off the air    -83
+
+q to quit
+```
+
+The reason to have it is that a bench moves. A box drifts, a camera goes quiet,
+a sync lands — and `octomancer status` answers about the instant it was run and
+then scrolls away. Watching a jam take hold with `status` means running it over
+and over and reading a different set of lines each time, which is a slow way to
+watch a number stop changing.
+
+The version and the two daemon lines are on this page and not on the one-shot
+one, and that is not an inconsistency. `status` hides them because four lines
+of preamble in front of the table somebody ran the command for is how a status
+page stops being read; here nothing scrolls past, and after the first glance
+they cost a reader nothing. What they buy is that the two facts most likely to
+explain a table with half the room missing are already on screen at the moment
+it happens.
+
+The clock in the corner is the one thing on the page guaranteed to change every
+second. That is the whole reason it is there: a quiet bench and a wedged
+program look identical otherwise, and only one of them is worth knowing about.
+
+A window too short for the page keeps the footer and says what it dropped —
+`... 6 more lines than this window has room for`. The footer is the way out,
+and a person whose terminal has been taken over by a table needs the way out
+more than they need the last two devices; a table that quietly ended early
+would read as a bench with fewer boxes in it. `Ctrl-L` redraws, `Ctrl-C` and
+`Ctrl-D` leave in case the footer went unread, and every other key does
+nothing, because this page has one verb.
+
+It needs a terminal on both ends and says so if it does not have one. There is
+no piped mode: `octomancer status` is that mode, and it is already written.
 
 ### The app
 

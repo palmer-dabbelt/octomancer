@@ -60,6 +60,29 @@ struct AgentState {
 
 AgentState agent_state(Agent a);
 
+// What to tell a person about one agent, in a sentence, and how loudly to say
+// it. Two surfaces say this -- `octomancer status` prints it once and
+// `octomancer tui` redraws it every second -- and a daemon that is up in one
+// of them and down in the other is the kind of disagreement nobody would think
+// to suspect. So the sentence is decided here, once, with no I/O in it: the
+// caller has already been to launchd for the state and to the socket for
+// whether it answered.
+enum class AgentMood {
+  kFine,   // answering
+  kWarn,   // not running, which `octomancer start` fixes
+  kBad,    // running and not answering, which it does not
+};
+
+struct AgentSituation {
+  std::string said;
+  AgentMood mood = AgentMood::kFine;
+};
+
+// `now` is a wall clock, for the uptime; pass octo::wall_now() unless you are
+// a test.
+AgentSituation agent_situation(const AgentState& state, bool answering,
+                               double now);
+
 // Where the shipped plists are looked for, in order: whatever was handed to
 // set_agent_plist_dir(), then $OCTOMANCER_AGENT_DIR, then the installed data
 // directory, then a `launchd` directory beside the running executable so that

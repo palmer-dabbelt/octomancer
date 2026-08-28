@@ -150,7 +150,7 @@ DeviceView build_device_view(const DeviceSources& from) {
       r.kind = DeviceKind::kTentacle;
       r.id = d.id;
       r.name = d.name.empty() ? d.id : d.name;
-      // Nothing ever connects to a Tentacle: the timecode is in the
+      // Nothing ever connects to a timecode box: the timecode is in the
       // advertisement, so a box is either being heard or it is not, and there
       // is no third state for a link that does not exist.
       r.link = d.live ? LinkState::kOnTheAir : LinkState::kOffTheAir;
@@ -267,7 +267,7 @@ DeviceView build_device_view(const DeviceSources& from) {
     }
   }
 
-  // Tentacles first, then cameras; within each, what we are hearing before
+  // Timecode boxes first, then cameras; within each, what we hear before
   // what we are not. Stable so that everything else stays in the order the
   // daemon listed it, which does not jump about between polls.
   std::stable_sort(v.rows.begin(), v.rows.end(),
@@ -289,14 +289,14 @@ std::string render_devices(const DeviceView& v, bool verbose, bool color) {
   if (v.has_canonical) {
     const char* spread_colour = v.canonical_spread_s > 0.100 ? st.yellow : "";
     out += fmt("canonical time  %s vs this Mac,  spread %s%s%s across %d"
-               " box%s\n",
+               " timecode box%s\n",
                offset_text(v.canonical_offset_s).c_str(), spread_colour,
                offset_text(v.canonical_spread_s).c_str(),
                spread_colour[0] == '\0' ? "" : st.off, v.contributing,
                v.contributing == 1 ? "" : "es");
   } else {
-    out += fmt("%sno canonical time -- no enabled box is live, so there is"
-               " nothing to measure against%s\n", st.dim, st.off);
+    out += fmt("%sno canonical time -- no enabled timecode box is live, so"
+               " there is nothing to measure against%s\n", st.dim, st.off);
   }
   if (verbose) {
     out += fmt("%scanonical source: %s%s\n", st.dim,
@@ -318,7 +318,7 @@ std::string render_devices(const DeviceView& v, bool verbose, bool color) {
   // in one mode and not the other -- and the tests here compare the coloured
   // output against the plain one byte for byte.
   if (verbose) {
-    out += fmt("%s%-14s %6s %10s %-11s %5s %-12s %10s %9s %s%s\n", st.dim,
+    out += fmt("%s%-14s %6s %10s %-11s %5s %-15s %10s %9s %s%s\n", st.dim,
                "DEVICE", "AGE", "OFFSET", "LINK", "RSSI", "TIMECODE", "MEDIAN",
                "DRIFT", "RATE", st.off);
   } else {
@@ -353,7 +353,7 @@ std::string render_devices(const DeviceView& v, bool verbose, bool color) {
       const std::string drift =
           r.has_drift ? fmt("%+.1fppm", r.drift_ppm) : "--";
       const std::string rate = r.resolution.empty() ? "--" : r.resolution;
-      out += fmt(" %s%5s%s %s%-12.12s%s %s%10s%s %s%9s%s %s%.9s%s",
+      out += fmt(" %s%5s%s %s%-15.15s%s %s%10s%s %s%9s%s %s%.11s%s",
                  r.has_rssi ? "" : st.dim, rssi.c_str(), st.off,
                  r.timecode.empty() ? st.dim : "", tc.c_str(), st.off,
                  r.has_median ? "" : st.dim, med.c_str(), st.off,

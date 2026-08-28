@@ -594,6 +594,62 @@ void test_the_schedule_converges_and_does_not_overshoot() {
   CHECK(looks < 25);
 }
 
+// --- looking for a camera that is not there -------------------------------
+
+// The cadence a missing camera is looked for at, which used to be a flat
+// fifteen minutes whatever --poll said. A camera switched back on was then
+// invisible for a quarter of an hour, which is the complaint this answers.
+void test_the_first_look_is_at_the_ordinary_cadence() {
+  SyncOptions opt = defaults();
+  CHECK_NEAR(octo::reacquire_interval(opt, 0), opt.poll, 1e-9);
+  // A negative count is not a thing a caller should produce, but it must not
+  // produce a negative wait either.
+  CHECK_NEAR(octo::reacquire_interval(opt, -1), opt.poll, 1e-9);
+}
+
+void test_each_miss_doubles_the_wait() {
+  SyncOptions opt = defaults();
+  CHECK_NEAR(octo::reacquire_interval(opt, 1), opt.poll * 2.0, 1e-9);
+  CHECK_NEAR(octo::reacquire_interval(opt, 2), opt.poll * 4.0, 1e-9);
+  CHECK_NEAR(octo::reacquire_interval(opt, 3), opt.poll * 8.0, 1e-9);
+}
+
+void test_the_wait_stops_at_the_ceiling() {
+  SyncOptions opt = defaults();
+  // Sixty seconds doubling four times is 960, which is already past the
+  // fifteen-minute ceiling: the clamp has to bite before the arithmetic runs
+  // away, not after.
+  CHECK_NEAR(octo::reacquire_interval(opt, 4), opt.max_poll, 1e-9);
+  // And it stays there however long the camera has been gone. A weekend of
+  // misses is a plausible number to be handed.
+  for (int misses = 4; misses < 2000; misses += 37) {
+    const double wait = octo::reacquire_interval(opt, misses);
+    CHECK(wait <= opt.max_poll);
+    CHECK(wait >= opt.poll);
+  }
+}
+
+// Seeing the camera resets the count, so the next disappearance is looked for
+// at the ordinary cadence rather than inheriting the last one's patience.
+void test_seeing_the_camera_starts_the_backoff_again() {
+  SyncOptions opt = defaults();
+  int misses = 9;
+  CHECK_NEAR(octo::reacquire_interval(opt, misses), opt.max_poll, 1e-9);
+  misses = 0;  // what the daemon does the moment the camera is heard again
+  CHECK_NEAR(octo::reacquire_interval(opt, misses), opt.poll, 1e-9);
+}
+
+// A caller asking for a fixed cadence with --poll equal to --max-poll gets
+// exactly that, with no doubling anywhere in it.
+void test_a_flat_cadence_stays_flat() {
+  SyncOptions opt = defaults();
+  opt.poll = 300.0;
+  opt.max_poll = 300.0;
+  CHECK_NEAR(octo::reacquire_interval(opt, 0), 300.0, 1e-9);
+  CHECK_NEAR(octo::reacquire_interval(opt, 1), 300.0, 1e-9);
+  CHECK_NEAR(octo::reacquire_interval(opt, 50), 300.0, 1e-9);
+}
+
 }  // namespace
 
 
@@ -710,5 +766,10 @@ int main() {
   test_the_horizon_is_the_later_of_the_two();
   test_the_ceiling_and_the_floor_both_hold();
   test_the_schedule_converges_and_does_not_overshoot();
+  test_the_first_look_is_at_the_ordinary_cadence();
+  test_each_miss_doubles_the_wait();
+  test_the_wait_stops_at_the_ceiling();
+  test_seeing_the_camera_starts_the_backoff_again();
+  test_a_flat_cadence_stays_flat();
   return octotest::report("test_camsync");
 }

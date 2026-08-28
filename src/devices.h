@@ -2,7 +2,7 @@
 // about them.
 //
 // Nothing else reconciles those two. octomancerd listens passively and reports
-// Tentacle boxes in registry.h's Snapshot; octomancer-sync connects to cameras
+// timecode boxes in registry.h's Snapshot; octomancer-sync connects to cameras
 // and reports them in control.h's Status. A person looking at the bench does
 // not care which program heard what -- they want one line per device, and they
 // want the numbers on those lines to mean the same thing. Deciding what that
@@ -15,7 +15,7 @@
 // interesting one in the building -- it is the thing being compared with, not
 // the thing anybody is shooting against. So the number on each row is the
 // device's distance from the *canonical* time: the median across the live,
-// enabled Tentacle boxes. Because both terms of `d.median_offset -
+// enabled timecode boxes. Because both terms of `d.median_offset -
 // canonical_offset` are quoted against this Mac, the Mac cancels out entirely,
 // and what is left is box-versus-bench. That is the whole reason the column is
 // worth reading: two boxes half a second from a laptop that has not seen an
@@ -95,7 +95,7 @@ struct DeviceRow {
 };
 
 struct DeviceView {
-  // Tentacles first, then cameras; within each kind, the ones we are hearing
+  // Timecode boxes first, then cameras; within each kind, the ones we hear
   // from before the ones we are not. Order within those groups is the order
   // the daemons gave, which is stable across polls.
   std::vector<DeviceRow> rows;

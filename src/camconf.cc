@@ -32,10 +32,10 @@ const char kHeader[] =
     "# and its timecode source. Off means octomancer will read it and report\n"
     "# on it, and never touch it. New cameras are off until named here.\n"
     "#\n"
-    "# `enabled` says whether a Tentacle box is used at all. New boxes are\n"
+    "# `enabled` says whether a timecode box is used at all. New ones are\n"
     "# on: listening to one is passive and costs nothing, so unlike writing\n"
     "# to a camera it needs nobody's permission first. Turn one off here to\n"
-    "# stop seeing a box that is not part of this shoot.\n"
+    "# stop seeing a timecode box that is not part of this shoot.\n"
     "\n";
 
 std::string trim(const std::string& s) {

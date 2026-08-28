@@ -349,6 +349,22 @@ PollPlan next_poll(const SyncOptions& opt, const SyncState& state, double error,
   return plan;
 }
 
+double reacquire_interval(const SyncOptions& opt, int consecutive_misses) {
+  // A caller that asked for a zero or negative cadence gets a second rather
+  // than a busy loop; the doubling below has to start from something.
+  const double first = opt.poll > 0.0 ? opt.poll : 1.0;
+  const double ceiling = opt.max_poll > first ? opt.max_poll : first;
+  if (consecutive_misses <= 0) return first;
+
+  // Doubled a step at a time, stopping at the ceiling, rather than computed
+  // with a shift or a pow: a daemon left running over a long weekend can
+  // accumulate hundreds of misses, and 2^300 seconds is not a number to be
+  // clamping afterwards.
+  double wait = first;
+  for (int i = 0; i < consecutive_misses && wait < ceiling; ++i) wait *= 2.0;
+  return wait > ceiling ? ceiling : wait;
+}
+
 WriteOutcome judge_write(const SyncOptions& opt, SyncState* state,
                          double error_before, double error_after,
                          double now_mono) {

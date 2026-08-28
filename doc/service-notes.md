@@ -1,17 +1,17 @@
 # octomancerd -- design notes
 
-The C++ service that watches the Tentacle Sync bench, and the menu-bar app that
-displays it. This is the part that is meant to run all the time. The camera
-side -- the half that connects and writes -- is `octomancer-sync`, a separate
-binary for the reasons in "What it does, and deliberately does not do" below.
+The C++ service that watches the Tentacle Sync bench, and the app that displays
+it. This is the part that is meant to run all the time. The camera side -- the
+half that connects and writes -- is `octomancer-sync`, a separate binary for
+the reasons in "What it does, and deliberately does not do" below.
 
 ## What it does, and deliberately does not do
 
 `octomancerd` listens passively to BLE advertisements, decodes any Tentacle
-payload it hears, and keeps a picture of every box in range. It **never
-connects to a device and never writes to one**, which is what makes it safe to
-leave running: it cannot disturb the Tentacle app, cannot interfere with a
-camera holding a connection, and cannot touch a recording in progress.
+payload it hears, and keeps a picture of every timecode box in range. It
+**never connects to a device and never writes to one**, which is what makes it
+safe to leave running: it cannot disturb the Tentacle app, cannot interfere
+with a camera holding a connection, and cannot touch a recording in progress.
 
 It does not set anyone's clock. Correcting the camera is `octomancer-sync`'s
 job and stays there; conflating "observe" with "act" in a service that runs
@@ -19,17 +19,17 @@ unattended is how an unattended service ends up doing something surprising at
 three in the morning.
 
 It does watch for the camera, which is the one thing here that is not about
-Tentacles, and it is worth being precise about how little that means. A camera
-advertises the Blackmagic camera-control service UUID and nothing else useful
--- no clock, no transport state. So the only fact available from a distance is
-*it is on the air*, and that is all the registry records.
+timecode boxes, and it is worth being precise about how little that means. A
+camera advertises the Blackmagic camera-control service UUID and nothing else
+useful -- no clock, no transport state. So the only fact available from a
+distance is *it is on the air*, and that is all the registry records.
 
 That fact is worth a great deal anyway, because the alternative way of learning
 it costs a twenty-second scan. `octomancer-sync` used to pay that every minute
 whether or not there was anything to find; now it reads this over a socket
 every five seconds instead, and gets a faster answer for a fraction of the
-cost. The radio here is already scanning unfiltered for Tentacles, so noticing
-a camera in the same callback costs nothing at all.
+cost. The radio here is already scanning unfiltered for timecode boxes, so
+noticing a camera in the same callback costs nothing at all.
 
 Two things to keep in mind about it:
 
@@ -41,13 +41,15 @@ Two things to keep in mind about it:
 
   It now holds the connection *between* cycles as well, by default, so the
   presence signal for a working camera is false essentially all of the time.
-  That is not a fault to be fixed in this file -- `octomancer-sync` treats its
-  own live connection as presence, which is a better signal than an
-  advertisement because it is the thing the advertisement was evidence for.
-  What it does mean is that `octomancer status` will report a camera as not on
-  the air while it is being held, and that is correct rather than confusing
-  once you know the connection is the point. See `doc/pairing-notes.md` for why
-  letting go is expensive.
+  That is not a fault to be fixed in this file. The daemon holding the link is
+  the only process that knows it is holding one, and it says so: it publishes
+  `connected` over its own control socket, separately from the presence flag
+  this daemon supplies, and `octomancer status` renders the two together as
+  `held`, `on the air` or `off the air`. Absence of advertisements while a link
+  is held is success, and it now reads as success rather than as the same
+  `off the air` a switched-off camera gets. None of that has been watched
+  against a camera yet -- `doc/KNOWN_ISSUES.md` says what would settle it. See
+  `doc/pairing-notes.md` for why letting go is expensive.
 * **A second camera is ignored.** The first one heard wins and the rest are
   dropped, because alternating between two would flap the presence flag and the
   session counter on every advertisement. Choosing between cameras is
@@ -67,10 +69,12 @@ src/jsonlog.{h,cc}     append-only JSONL, log rotation, JSON escaping
 src/logscan.{h,cc}     reading that JSONL back: strict, flat, not a parser
 src/camsync.{h,cc}     the write gates, drift, the poll schedule, the send lead
 src/camdb.{h,cc}       what each camera body has taught us, across restarts
+src/devices.{h,cc}     both daemons' answers merged into one list of devices
 src/scanner_mac.mm     CoreBluetooth. The only file that knows about Apple.
 src/octomancerd.cc     the service
 src/octomancerctl.cc   the control tool
-ui/main.mm             the menu-bar app
+src/octomancer.cc      the front door: asks both daemons, draws the merged list
+ui/main.mm             the app
 ```
 
 The seam that matters is `src/scanner.h`. Everything above it is portable C++
@@ -86,7 +90,7 @@ CoreBluetooth delivers advertisements on its own serial dispatch queue.
 `Registry` takes a mutex on every entry point and hands back self-contained
 snapshots rather than pointers into live state, so the socket loop on the main
 thread never observes a half-updated device. Advertisement rates are a few
-hertz per box; there is no contention worth engineering around.
+hertz per timecode box; there is no contention worth engineering around.
 
 The main thread runs `poll()` over the listening socket and its clients, waking
 every 200 ms to drain alert events and write periodic log lines. Signals are
@@ -155,13 +159,13 @@ UI shows `~4m` in the drift column while it waits, with a tilde precisely so
 nobody reads it as a number.
 
 Per-box offsets are summarised by **median**, not mean, at both levels: median
-over a box's samples, then median across boxes for the bench figure. One
-mangled advert should not be able to declare a box out of sync, and one strong
-box should not be able to outvote the bench.
+over a timecode box's samples, then median across boxes for the bench figure.
+One mangled advert should not be able to declare a box out of sync, and one
+strong box should not be able to outvote the bench.
 
 **Read the drift figure as belonging to the comparison, not to the box.** The
-Tentacles synchronise each other -- that is what the constant broadcasting is
-for -- so the bench moves as a group, free-running against any outside clock
+timecode boxes synchronise each other -- that is what the constant broadcasting
+is for -- so the bench moves as a group, free-running against any outside clock
 including an NTP-disciplined Mac. Measuring a box against the host gives the
 relative rate of two clocks and nothing more; saying which one is moving would
 need a third reference, and there is none here. In the first hour of running,
@@ -184,7 +188,7 @@ so the gap in the data has a stated cause.
 
 ## Alerts
 
-A box more than `--alert-threshold` (default 60 s) from this Mac needs
+A timecode box more than `--alert-threshold` (default 60 s) from this Mac needs
 re-jamming in the Tentacle app. Three things keep that from becoming noise:
 
 * the judgement is made on the **median**, not the latest reading;
@@ -317,7 +321,7 @@ approval and appears to work; launched by launchd it would not.
 
 ## Tests
 
-`make check` runs nine binaries, none of which need a radio:
+`make check` runs eighteen binaries, none of which need a radio:
 
 * `test_tentacle` decodes **322 real advertisements** captured from the bench
   and compares every field against expectations generated by the Python
@@ -329,6 +333,14 @@ approval and appears to work; launched by launchd it would not.
   robustness, the drift refusal, alert hysteresis, the no-flapping band, clock
   steps, staleness.
 * `test_proto` round-trips a snapshot including a deliberately hostile box name.
+* `test_devices` builds the merged list from synthetic snapshots of both
+  daemons: which timecode boxes vote on the canonical time and which are left
+  out, that an offset is quoted against that canonical time rather than against
+  this Mac, and that a camera whose link is held reads as held rather than as
+  off the air. The rendering is pinned here as well, including that asking for
+  colour only ever adds escapes to the plain output: the columns are the part a
+  person actually reads, and an escape inside a width specifier lines up in one
+  mode and not the other.
 * `test_timeutil` covers the 24-hour wrap, which is the arithmetic that decides
   whether a box one second past midnight is one second fast or a day slow.
 * `test_camdb` covers the per-camera database against a real filesystem, not a

@@ -9,7 +9,7 @@ Two daemons, and the tools that talk to them. All C++, sharing one library:
 
 | | |
 |---|---|
-| `octomancerd` | watches the Tentacle Sync bench and says when a box has drifted. Passive: it never connects to anything. |
+| `octomancerd` | watches the Tentacle Sync bench and says when a timecode box has drifted. Passive: it never connects to anything. |
 | `octomancer-sync` | connects to the camera and sets its clock from the bench. The only part that acts. |
 | `octomancer` | the command everyone runs. Asks the daemons things and tells them to do things, over a socket. |
 | `Octomancer.app` | the same, with buttons. Also where notifications come from. |
@@ -84,8 +84,8 @@ Check it works before installing anything:
 which listens for fifteen seconds and prints what it heard:
 
 ```
-octomancer  5 boxes, 5 live  radio poweredOn  up 15s  60 adverts
-bench -6.205s vs this Mac,  spread +2.0ms across 5 live boxes
+octomancer  5 timecode boxes, 5 live  radio poweredOn  up 15s  60 adverts
+bench -6.205s vs this Mac,  spread +2.0ms across 5 live timecode boxes
 
 BOX               AGE  RSSI  TIMECODE             OFFSET     MEDIAN      DRIFT  RESOLUTION
 BMPCC              0s   -43  22:19:02:16.038     -6.208s    -6.205s        ~4m  frame+us
@@ -101,9 +101,9 @@ octomancerctl json | jq .  # for everything that isn't this program
 ```
 
 It also watches for the camera, which is the one thing it does that is not
-about Tentacles. Nothing is decoded and nothing is connected to — a camera puts
-no clock in its advertisement — so all it can report is whether the camera is
-on the air, and how many times it has come and gone:
+about timecode boxes. Nothing is decoded and nothing is connected to — a camera
+puts no clock in its advertisement — so all it can report is whether the camera
+is on the air, and how many times it has come and gone:
 
 ```
 camera on the air -- Pocket Cinema Camera 6K Pro  up for 2h14m,  3 sessions
@@ -118,9 +118,9 @@ the air" means "not advertising", not "switched off"; `--camera-gone-after`
 (90 s) is set well above the twenty seconds a sync cycle spends connected, so
 an ordinary correction is not mistaken for a power cycle.
 
-It notifies you when a box drifts more than a minute from this Mac, which is
-the signal to re-jam it in the Tentacle app. That judgement is made on a median
-rather than a single reading, with hysteresis and three-observation
+It notifies you when a timecode box drifts more than a minute from this Mac,
+which is the signal to re-jam it in the Tentacle app. That judgement is made on
+a median rather than a single reading, with hysteresis and three-observation
 confirmation, so a box parked near the threshold cannot spam you.
 
 `doc/service-notes.md` covers the architecture, the wire protocol, the
@@ -171,8 +171,33 @@ newer version added, so editing by hand is not a thing you get punished for:
 ```
 # octomancer camera configuration.
 default writes=off
+default enabled=on
 camera 09EE26AF-D630-DB5A-0CAC-ECB7B610DFBC writes=on name=A:1EAE18A7
+box    42723B20-45C0-272F-4313-973390EB1542 enabled=off name=FS7
 ```
+
+The same file describes the timecode boxes, because there is one question a
+person is answering — use this thing, ignore that one — and splitting it in two
+would only mean two places to look when a device does not show up. A box's
+setting is `enabled`, and it defaults to **on**, which is the opposite answer to
+the camera's and is deliberate. Listening to a box is passive: the timecode is
+in the advertisement, nothing is connected to and nothing is written, so hearing
+a box nobody asked about costs nothing and denies nobody anything. Writing to a
+camera is an action taken on someone's equipment. Permission is worth insisting
+on for the second and pointless for the first.
+
+```
+$ octomancer disable --box FS7
+FS7 disabled
+saved to ~/.octomancer/cameras.conf
+```
+
+That is for the timecode box in the next room that is not part of this shoot:
+it drops out of every list and stops voting on what the time is. `octomancer
+enable` with no `--box` reports what the file says, including the boxes it has
+never heard of — on a healthy bench the file holds only the exceptions, and a
+report that listed only those would look exactly like one where nothing is
+configured at all.
 
 After editing it by hand, `octomancer reload` makes the running daemon re-read
 it. That happens between cycles rather than mid-decision, so a cycle never acts
@@ -192,7 +217,8 @@ has a radio already. A second binary asking for its own Bluetooth grant would
 be a second thing to approve, and a second thing to be quietly refused.
 
 ```
-octomancer                          # status: the daemons, the bench, the cameras
+octomancer                          # status: both daemons and every device
+octomancer status --verbose         # ...and the rest of what they know
 octomancer list-cameras             # one line each
 octomancer scan                     # which Blackmagic cameras are on the air?
 octomancer scan --all               # ...and every other LE device, which is how
@@ -206,9 +232,85 @@ octomancer source time-of-day       # make it follow the camera's clock
 octomancer writes                   # what may be changed, and what may not
 octomancer writes on --camera ID    # may octomancer change that camera at all?
 octomancer writes off --all         # ...or every camera it knows about
+octomancer enable --box FS7         # listen to that timecode box
+octomancer disable --box FS7        # ...or ignore it, and stop counting its vote
 octomancer reload                   # re-read the configuration after editing it
 octomancer status --json | jq .     # for everything that isn't this program
 ```
+
+### What status shows
+
+`octomancer status` — which is what you get by typing `octomancer` with nothing
+after it — asks both daemons, because neither of them can see the whole room.
+`octomancerd` hears the timecode boxes and `octomancer-sync` connects to the
+cameras. What somebody standing at the bench wants is one list, with numbers
+that mean the same thing on every line:
+
+```
+octomancer 0.1.0
+  octomancerd      answering, up 1h01m
+  octomancer-sync  answering, up 1h01m
+
+canonical time  -1.773s vs this Mac,  spread +2.1ms across 4 timecode boxes
+
+DEVICE            AGE     OFFSET LINK
+BMPCC              1s     +1.3ms on the air
+F55                2s     -0.8ms on the air
+FS5                4s     +0.8ms on the air
+Krysta             1s     -0.8ms on the air
+FS7             3m02s     -0.5ms off the air
+A:1EAE18A7     56m32s     -4.7ms off the air
+```
+
+The offsets in that table are **not** against this Mac. Everything either
+daemon measures is quoted against the Mac's clock, and the Mac's clock is the
+least interesting one in the building — it is the thing being compared with,
+not the thing anybody is shooting against. So the Mac's error is stated once,
+in the header, and each row carries the device's distance from the *canonical*
+time: the median across the live, enabled timecode boxes. Four boxes nearly two
+seconds away from a laptop that has not seen an NTP server all week are still
+in millisecond agreement with each other, and this is the view that says so.
+
+The boxes come first and the cameras after, and within each the devices being
+heard come before the ones that are not: `FS7` above has not been heard for
+three minutes, so it sits below the boxes that are still talking. Everything
+else stays in the order the daemon listed it in, which does not rearrange
+itself between polls. A device somebody has switched off gets no row at all —
+it is counted under the header instead, as `1 device hidden: disabled in the
+configuration`, because a device missing on purpose and a device missing for a
+reason nobody has found yet should not look the same.
+
+`AGE` is how long ago the device was last heard from, which is the column that
+answers "is this thing still here" — more useful, day to day, than when it was
+last synced. A camera whose link is being held reads as `held` with an age of
+zero rather than ageing away: it stopped advertising *because* something is
+talking to it, and showing that the same way as a camera somebody switched off
+would have people power-cycling a body mid-write. Nobody has yet watched that
+column with a camera in the room, which is the only way to find out whether
+`held` means what it says; `doc/KNOWN_ISSUES.md` says what that would take.
+
+Either daemon may be down, and the half that answered still prints. Which one
+went quiet is usually the answer rather than an obstacle, so it is said in
+plain words at the top, and the exit status only goes non-zero when neither
+answered.
+
+`--verbose` adds the rest: signal strength, the timecode each device is
+reading, its median offset against this Mac before the canonical time is
+subtracted off it, drift, frame rate, which daemon the canonical time came
+from, and everything `octomancer-sync` knows about each camera. It also prints
+what launchd makes of the two daemons, which is the question the moment one of
+them stops answering.
+
+`--json` is not that table in another format. It hands back
+`octomancer-sync`'s own answer unchanged, because the merging happens here, in
+the process that asked both daemons; `octomancerd`'s half of the room is
+`octomancerctl json`.
+
+Two daemons means two sockets, and they are not interchangeable. `--socket` has
+always meant `octomancer-sync`'s control socket and still does; `octomancerd`'s
+is `--bench-socket`. Pointing one at the other fails somewhere deep inside a
+reply rather than at the flag, which reads like a corrupt daemon, so the two are
+kept apart.
 
 The daemons themselves are started and stopped through launchd rather than a
 socket, for the obvious reason:
@@ -233,16 +335,50 @@ does not interrupt the sync; `--no-wait` queues it and returns immediately.
 
 ### The app
 
-`Octomancer.app` is the same set of controls with a window: a camera picker, the
-live figures, a **Sync Now** button, a timecode-source picker, and a menu-bar
-item showing the bench at a glance.
+`Octomancer.app` is the same set of controls with a window. Two lines across the
+top say what the sync daemon is doing and how the bench looks, because those are
+the only things worth seeing without having chosen to look at them; under them
+are four tabs.
 
-It can notify you when:
+**Devices** is the merged list — a row per device, how long ago it was heard,
+how far it is from the canonical time, and what its link is doing. It is the
+same view `octomancer status` prints, out of the same code: `build_device_view()`
+in `src/devices.h` decides which devices are on the list and what the numbers on
+them mean, and the terminal and the window are each left drawing the result. Two
+programs answering that question separately would answer it differently
+eventually, and on the day they disagreed neither would be obviously the wrong
+one.
+
+**Camera** is the page about one body: a camera picker, the live figures, the
+permission checkbox, a timecode-source picker and a **Sync Now** button. The
+permission switch sits next to the controls it governs rather than in a
+preferences pane, because "why will this not sync?" and "let it sync" should be
+the same glance.
+
+**Configuration** lists every device this Mac knows of, whether or not anything
+is hearing it at the moment, each with a checkbox: `enabled` for a timecode box,
+`writes` for a camera. It is built from the two daemons *and* from
+`cameras.conf`, and the file is the half that matters here — a device somebody
+switched off has stopped appearing anywhere else, so the only way back is a
+checkbox with its name on it. Below the list are **Start**, **Stop** and
+**Restart** for the daemons, what launchd currently thinks of each and how long
+each has been up, and **Start at boot**.
+
+**Pair Camera...** on the same page opens a sheet that runs `octomancer-sync`'s
+own scan and pair, and shows what the tool says as it goes, verdict and all.
+The six digits are on the camera's screen and macOS asks for them; nothing in
+this window ever sees them. If the sync daemon is running the sheet says so
+before anything starts, with a button to stop it: a camera takes one connection
+at a time, and pairing alongside a daemon that connects on its own usually works
+and, when it does not, fails as "could not connect" — the least informative
+outcome there is, and the easiest to read as the wrong problem.
+
+**Notifications** is where the switches live. It can notify you when:
 
 * a sync fails,
 * a camera syncs for the first time,
 * a camera drops off the air,
-* the Tentacle boxes disagree with each other — the bench failing to be one
+* the timecode boxes disagree with each other — the bench failing to be one
   bench, which no amount of syncing against it can fix,
 * the bench drifts away from this Mac, in ppm, since the absolute offset between
   timecode-of-day and a wall clock is a constant with no meaning and only its
@@ -254,16 +390,14 @@ their behalf. The camera ones are events the daemon emits regardless and the app
 filters, so turning one off costs nothing and turning it back on loses nothing
 but the backlog.
 
-The menu-bar icon can be hidden — it is a shortcut to the window, not the
-program, and someone driving all this from the command line has no use for it.
-Hidden, the app keeps running and keeps notifying (posting a notification needs
-a bundled app, so this process is the only thing here that can); opening
-Octomancer.app again brings the window back. Quitting it stops notifications and
-nothing else: the daemons hold the clocks and do not care whether anybody is
-watching.
-
-There are **Start**, **Stop** and **Restart** buttons for the daemons, and the
-window shows what launchd currently thinks of each.
+The menu-bar icon can be hidden, and its switch is on that same page because it
+is the same question — how much of itself this process puts on screen. The icon
+is a shortcut to the window, not the program, and someone driving all this from
+the command line has no use for it. Hidden, the app keeps running and keeps
+notifying (posting a notification needs a bundled app, so this process is the
+only thing here that can); opening Octomancer.app again brings the window back.
+Quitting it stops notifications and nothing else: the daemons hold the clocks
+and do not care whether anybody is watching.
 
 **Start at boot** installs both daemons as LaunchAgents in your login session
 and starts them. Agents rather than system daemons, and deliberately:
@@ -283,9 +417,9 @@ octomancer-sync --once --source mac   # set the clock from this Mac instead
 Each cycle it works out how far this Mac is from the Tentacle bench, connects
 to the camera, and corrects its clock if that is both needed and allowed. If
 `octomancerd` is running it takes the bench figure from there — the service
-already keeps an hour of history per box and takes proper medians across it,
-which is a far better number than anything a few seconds of listening can
-produce. Failing that it listens for itself.
+already keeps an hour of history per timecode box and takes proper medians
+across it, which is a far better number than anything a few seconds of
+listening can produce. Failing that it listens for itself.
 
 The camera is the expensive half: connecting takes seconds, and every
 connection is a chance to disturb an operator mid-shot. So the Tentacle side is

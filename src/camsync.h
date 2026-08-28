@@ -435,6 +435,24 @@ struct PollPlan {
 PollPlan next_poll(const SyncOptions& opt, const SyncState& state, double error,
                    int fps, double now_mono);
 
+// How long to wait before looking for a camera that is not on the air, given
+// how many looks in a row have already found nothing.
+//
+// next_poll() above schedules against a camera we can see. This is the other
+// case: nothing is advertising, and the only way to find out whether that has
+// changed is to spend radio on looking. The interval starts at `poll` and
+// doubles with every consecutive miss, up to `max_poll`.
+//
+// Growing the interval with the evidence is the point. A camera that stopped
+// answering a minute ago is probably still in the room -- a battery swap, a
+// menu, somebody standing between it and the Mac -- and is worth looking for
+// at the ordinary cadence. One that has been missing for an hour is switched
+// off or packed away, and scanning for it every minute until morning costs
+// radio and finds nothing. Reset the count the moment the camera is seen
+// again, however it is seen: the next disappearance is fresh news and deserves
+// to be treated as such rather than inheriting the last one's patience.
+double reacquire_interval(const SyncOptions& opt, int consecutive_misses);
+
 // A duration a human reads at a glance: "38s", "2m", "1.0h".
 std::string format_span(double seconds);
 

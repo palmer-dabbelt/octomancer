@@ -51,7 +51,7 @@ std::string render_human(const Snapshot& s, bool color) {
   std::string out;
 
   const char* radio_colour = s.radio == "poweredOn" ? st.green : st.red;
-  out += fmt("%soctomancer%s  %d box%s, %d live  ", st.bold, st.off, s.devices,
+  out += fmt("%soctomancer%s  %d timecode box%s, %d live  ", st.bold, st.off, s.devices,
              s.devices == 1 ? "" : "es", s.live);
   out += fmt("radio %s%s%s  up %s  %lld adverts\n", radio_colour,
              s.radio.c_str(), st.off, format_age(s.uptime).c_str(),
@@ -69,12 +69,12 @@ std::string render_human(const Snapshot& s, bool color) {
     // Spread is the number that says whether the bench agrees with itself. If
     // the boxes disagree, the median they vote on is not a time at all.
     const char* spread_colour = s.bench_spread > 0.100 ? st.yellow : st.off;
-    out += fmt("bench %s vs this Mac,  spread %s%s%s across %d live box%s\n",
+    out += fmt("bench %s vs this Mac,  spread %s%s%s across %d live timecode box%s\n",
                offset_text(s.bench_offset).c_str(), spread_colour,
                offset_text(s.bench_spread).c_str(), st.off, s.live,
                s.live == 1 ? "" : "es");
   } else if (s.devices > 0) {
-    out += fmt("%sno box heard from recently -- nothing current to compare%s\n",
+    out += fmt("%sno timecode box heard from recently -- nothing to compare%s\n",
                st.dim, st.off);
   }
   if (s.camera.reported && !s.camera.seen) {
@@ -103,7 +103,7 @@ std::string render_human(const Snapshot& s, bool color) {
   out += "\n";
 
   if (s.device.empty()) {
-    out += fmt("%sno Tentacle boxes seen yet%s\n", st.dim, st.off);
+    out += fmt("%sno timecode boxes seen yet%s\n", st.dim, st.off);
     return out;
   }
 
@@ -147,7 +147,7 @@ std::string render_human(const Snapshot& s, bool color) {
   for (const DeviceSnapshot& d : s.device) any_drift = any_drift || d.has_drift;
   if (!any_drift && s.live > 0) {
     out += fmt("\n%sDrift is parts per million: measuring it needs a long lever"
-               " arm, not more\nsamples. The column fills in once a box has"
+               " arm, not more\nsamples. The column fills in once a timecode box has"
                " been watched long enough.%s\n",
                st.dim, st.off);
   }

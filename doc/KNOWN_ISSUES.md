@@ -10,31 +10,32 @@ Each entry says what would settle it, because "needs investigation" ages into
 
 ## The camera connection
 
-### Nothing reports whether the connection is being held
+### The link reporting has never been run against a camera
 
-This is the one to fix first, because it blocks judging the two below it.
+`octomancer-sync` now publishes what its own link is doing -- `connected` over
+the control socket, which `octomancer status` and the window both show in the
+LINK column as `held`, `on the air` or `off the air`. It logs the two
+transitions, samples the held link's cached timecode on every presence tick so
+a camera is watched even between writes, and spaces out its attempts to find a
+camera that has gone away, starting at `--poll` and doubling to `--max-poll`.
 
-`octomancer-sync` now holds the camera connection between cycles, and there is
-no way to see that from outside. `octomancer status` says `camera off the air`
-in two completely different situations: the link is held, so the camera has
-stopped advertising and octomancerd cannot see it -- which is success -- and
-the camera is genuinely gone, which is not. The log has the same problem:
-`camera came up -- syncing now` is driven by the presence signal, so it appears
-whenever the camera advertises, and a Blackmagic camera is not required to stop
-advertising while connected. Seeing that line does not prove the link dropped,
-and not seeing it does not prove the link held.
+All of that is glue over CoreBluetooth and none of it has been exercised with a
+camera in the room. The one part with a test is `reacquire_interval()` in
+`src/camsync.h`, which is arithmetic and knows nothing about radios: it says
+what the wait should be after n failed looks, and says nothing about whether
+the daemon counts those looks correctly or calls it at the right moments. The
+obvious way for the rest to be wrong is `link->connected()` staying true after
+the link has stopped carrying anything, which would publish `held` for a camera
+that is not there -- the exact confusion this was built to remove, wearing the
+opposite label.
 
-Observed on 2026-08-27: a daemon with holding compiled in and enabled logged
-`camera came up` at 20:29:41 and again at 20:32:45, three minutes apart, with
-successful writes either side. Whether that is the link dropping and being
-remade, or the camera advertising happily while still connected, cannot be
-determined from anything the program currently emits.
-
-**What would settle it:** have `octomancer-sync` report its own link state --
-it is the only process that knows -- over the control socket, and have
-`octomancer status` show "held" as distinct from "off the air". Log the
-transitions: held, dropped by the camera, reconnected. Until that exists,
-neither of the next two entries can be answered.
+**What would settle it:** switch the camera on within earshot with the daemon
+running and read the console for `camera link held`. Then carry the camera out
+of range and read for `camera link dropped`. Then bring it back, and check how
+long the daemon took to notice against the interval the log says it was
+waiting. The same three moments are in `octomancer-sync.jsonl` as `camera`
+records with a `state` of `held` or `dropped`, timestamped, which is the
+version worth keeping.
 
 ### Recovering from a dropped link, unattended, is unproven
 
@@ -44,17 +45,25 @@ range -- and the daemon having to come back with nobody present.
 
 The pessimistic version is that it cannot: if a reconnection needs pairing, it
 needs a person to read six digits off the camera, and an unattended daemon has
-nobody. But that is *not* established, and one observation points the other
-way. On 2026-08-27 a manual `octomancer sync` connected and wrote successfully
-after an earlier disconnect, without anything being re-paired, which suggests
-CoreBluetooth is keeping the bond across connections the way it kept the
-firmware updater's bond for days. `doc/dongle-notes.md` says there is no bond
-storage, and that is true of *our* SMP implementation for the dongle; it is not
-a statement about macOS, and it should not be read as one.
+nobody. Two observations point the other way. On 2026-08-27 a manual
+`octomancer sync` connected and wrote successfully after an earlier disconnect,
+without anything being re-paired. Later the same evening, with the link long
+gone, macOS's own `system_profiler` still listed the camera
+(0C:43:14:82:B5:CA) as a bonded device under "Not Connected" -- the bond
+outliving the connection, which is what the optimistic reading requires and is
+direct evidence for it. The bond is macOS's, not ours: `doc/dongle-notes.md`
+says there is no bond storage, and that is true of *our* SMP implementation for
+the dongle; it is not a statement about macOS and should not be read as one.
+
+None of that is proof that an unattended reconnection actually happens. A bond
+that survives is a necessary condition, not the event.
 
 **What would settle it:** power-cycle the camera with the daemon running and
-nobody touching anything, and see whether it comes back. Then leave it
-overnight and see whether it is still synced in the morning.
+nobody touching anything, and watch for `camera link dropped` followed by
+`camera link held` in the console and in `octomancer-sync.jsonl`, with the LINK
+column in `octomancer status` going from `off the air` back to `held` without
+anybody typing a passkey. Then leave it overnight and read the same three
+things in the morning.
 
 ### "connected but sent no timecode" still happens
 
@@ -67,22 +76,82 @@ The verdict logic in `src/pairing.h` reads timecode silence as "not paired",
 which was right when the cause was a missing bond and is misleading now that it
 plainly has other causes.
 
-**What would settle it:** log the notification state per characteristic when
-this fires -- which subscriptions were live, whether anything at all had
-arrived on them, how long since the connection came up. Then `src/pairing.h`
-can distinguish "no bond" from "bonded and quiet" instead of guessing.
+**What would settle it:** half of it is now answerable from the log. When the
+complaint next appears, look for a `camera link dropped` line near it and at
+what the LINK column in `octomancer status` said at the time: a link that went
+away and a link that stayed up and went quiet are different faults, and until
+the link state was published they were the same line of output. If the link was
+held throughout, what is still missing is the notification state per
+characteristic -- which subscriptions were live, whether anything at all had
+ever arrived on them, how long since the connection came up. With that,
+`src/pairing.h` can distinguish "no bond" from "bonded and quiet" instead of
+guessing.
 
 ### The camera goes off the air for long stretches
 
 Repeatedly, across 2026-08-27, the camera stopped advertising for many minutes
 and then returned with nothing having been done to it. Sometimes this was
 explained -- something was holding a connection to it -- and sometimes nothing
-was. Signal strength is not the answer: it read -76 to -79 dBm sitting next to
-the Mac, weaker than Tentacles two rooms away.
+was.
+
+One stretch was measured properly, on the evening of 2026-08-27, and it settles
+part of this. From about 20:34 the camera stopped advertising and did not come
+back for at least an hour. `octomancer-sync` looked with the radio at 20:47:48
+and again at 21:03:24; both times a direct connect to the camera's known
+CoreBluetooth identifier timed out after 15 s, and both times a full 20 s scan
+saw 35 to 37 other LE devices and no camera at all. A separately hand-run
+`octomancer-sync --scan-only --all` at 20:56 saw 35 devices down to -84 dBm and
+did not see the camera even in the unfiltered list -- that one matters most,
+because it bypasses our own filtering entirely, so the absence is not something
+we did to ourselves. And macOS's `system_profiler` listed the camera
+(0C:43:14:82:B5:CA) under "Not Connected", still bonded with no link held, so
+it was not a held link masquerading as absence either.
+
+Three independent looks agree, so that instance was the camera genuinely not
+reaching the Mac rather than a defect in the connection path. What made it
+unreachable was not determined. Distance, Bluetooth switched off in the
+camera's own setup menu, and another application holding the link are all
+consistent with what was seen -- a phone running Blackmagic Camera will make
+the camera stop advertising -- and none of the three was checked at the time.
+
+Underneath all of it is the signal strength, which is genuinely odd. The camera
+has never been heard stronger than -75 dBm in any log, including when it sat in
+the same room as the Mac, where the timecode boxes read -51 to -55. Roughly
+20 dB quieter than everything else in the rig means it is the first thing to
+vanish whenever anything about the room changes.
 
 **What would settle it:** log every advertisement from the camera with its
 timestamp and RSSI, and look at whether the gaps line up with anything -- the
-camera's own idle behaviour, its screen sleeping, our connections.
+camera's own idle behaviour, its screen sleeping, our connections. And the next
+time it happens, before anything is touched: look at the camera's Bluetooth
+setting, look for a phone that is connected to it, and carry it to the Mac.
+
+## The window
+
+### None of the new interface has been watched running
+
+The app has four tabs now -- Devices, Camera, Configuration, Notifications --
+with the Devices page drawing the same `build_device_view()` the terminal
+draws, the Configuration page listing every known device with an enable/disable
+checkbox alongside the daemon controls and their uptimes, and a sheet that
+drives `octomancer-sync --scan-only` and `--pair` through `NSTask`. It
+compiles, and it has been launched once far enough to see a window. Nothing
+past that has been watched.
+
+Three parts are reasoned about rather than observed. The tab layout is sized
+from what the pages add up to, and no page has been seen at a size somebody
+dragged it to. The Devices grid keeps its row views across a device
+disappearing and rebuilds only when the set of devices changes, so the case it
+exists for -- a camera going and coming back without the page flinching -- is
+the case nobody has watched. And the pairing sheet reads the tool's output as
+it arrives, parses the scan list out of it, and has to kill the child when the
+sheet closes.
+
+**What would settle it:** open the window with both daemons running, watch the
+Devices page for a few minutes while a timecode box is disabled and re-enabled
+in Configuration and a camera comes and goes, then open the pairing sheet,
+search, pair, and close the sheet mid-search -- and check with `ps` that no
+`octomancer-sync` was left behind.
 
 ## Errors that are still discarded
 
@@ -129,11 +198,12 @@ uses, so a failure has somewhere to arrive.
 
 Not yet a bug, and possibly an artifact, but it was strange enough to write
 down. On 2026-08-27, before the daemons were restarted, `octomancerd` reported
-drift of 4429, 7101 and 15355 ppm across three Tentacles, with a bench offset
-of -89.8s and a spread of 63.8s. Those drift figures are two to three orders of
-magnitude above anything a real clock does. The daemon had been running across
-what was probably a Mac sleep, and after a restart the same boxes read a -1.77s
-offset with 2ms of spread and no measurable drift, which is healthy.
+drift of 4429, 7101 and 15355 ppm across three timecode boxes, with a bench
+offset of -89.8s and a spread of 63.8s. Those drift figures are two to three
+orders of magnitude above anything a real clock does. The daemon had been
+running across what was probably a Mac sleep, and after a restart the same
+boxes read a -1.77s offset with 2ms of spread and no measurable drift, which is
+healthy.
 
 The likely explanation is that a sleeping host corrupts the lever arm the drift
 measurement is built on. If so, `forget_drift()` should probably be triggered

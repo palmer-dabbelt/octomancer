@@ -184,15 +184,24 @@ struct Bench {
   double offset = 0.0;
   double spread = 0.0;
   int boxes = 0;
+  // Boxes we heard and then ignored, because somebody switched them off. Kept
+  // as a number rather than dropped silently: "no boxes to sync to" and "the
+  // only box in the room is disabled" are different situations and a person
+  // reading the log should not have to guess which one they are in.
+  int skipped = 0;
   std::string source;
   std::string boxes_json;
 };
 
-std::string boxes_to_json(const std::vector<octo::DeviceSnapshot>& devices) {
+std::string boxes_to_json(const std::vector<octo::DeviceSnapshot>& devices,
+                          const octo::CamConf& conf) {
   std::string out = "{";
   bool first = true;
   for (const octo::DeviceSnapshot& d : devices) {
     if (!d.live || !d.has_time) continue;
+    // A disabled box did not vote, so it is not in the record of what was
+    // voted on. The log line has to be the arithmetic that actually happened.
+    if (!conf.box_enabled(d.id)) continue;
     if (!first) out += ',';
     first = false;
     out += '"' + json_escape(d.name.empty() ? d.id : d.name) + "\":";
@@ -205,11 +214,48 @@ std::string boxes_to_json(const std::vector<octo::DeviceSnapshot>& devices) {
   return out;
 }
 
+// Fold a snapshot's boxes into the bench this cycle will sync against,
+// leaving out the ones somebody has switched off.
+//
+// The median is recomputed here rather than taken from Snapshot::bench_offset,
+// which octomancerd computed across every live box it could hear. octomancerd
+// has never read cameras.conf and has no idea which boxes a person has
+// dismissed -- it is passive, and listening to a box costs nothing, so it
+// listens to all of them. Doing the arithmetic here is what makes the Devices
+// page and the clock written to the camera agree about which boxes are the
+// bench. If they disagree, the page is lying: the number it shows is not the
+// number anything acted on. devices.cc computes the same figure the same way
+// for the same reason.
+Bench bench_from(const octo::Snapshot& snap, const octo::CamConf& conf,
+                 const char* source) {
+  Bench bench;
+  std::vector<double> votes;
+  for (const octo::DeviceSnapshot& d : snap.device) {
+    if (!d.live || !d.has_time) continue;
+    if (!conf.box_enabled(d.id)) {
+      ++bench.skipped;
+      continue;
+    }
+    votes.push_back(d.median_offset);
+  }
+  if (votes.empty()) return bench;
+
+  bench.ok = true;
+  bench.offset = octo::median_offset(votes);
+  const auto lo = std::min_element(votes.begin(), votes.end());
+  const auto hi = std::max_element(votes.begin(), votes.end());
+  bench.spread = *hi - *lo;
+  bench.boxes = static_cast<int>(votes.size());
+  bench.source = source;
+  bench.boxes_json = boxes_to_json(snap.device, conf);
+  return bench;
+}
+
 // Listen for ourselves, when octomancerd is not running. This is the same
 // decoder and the same median arithmetic the daemon uses -- it is just given a
 // few seconds of history instead of an hour, which is why the daemon is
 // preferred when it is there.
-Bench listen_for_bench(const Options& opt) {
+Bench listen_for_bench(const Options& opt, const octo::CamConf& conf) {
   Bench bench;
   octo::Policy policy;
   policy.window = std::max(opt.sync.listen * 2.0, 30.0);
@@ -229,32 +275,21 @@ Bench listen_for_bench(const Options& opt) {
   scanner->stop();
 
   const octo::Snapshot snap = registry.snapshot(octo::mono_now(), octo::wall_now());
-  if (!snap.has_bench) return bench;
-  bench.ok = true;
-  bench.offset = snap.bench_offset;
-  bench.spread = snap.bench_spread;
-  bench.boxes = snap.live;
-  bench.source = "scan";
-  bench.boxes_json = boxes_to_json(snap.device);
-  return bench;
+  return bench_from(snap, conf, "scan");
 }
 
-Bench read_bench(const Options& opt) {
+Bench read_bench(const Options& opt, const octo::CamConf& conf) {
   if (opt.use_daemon) {
     octo::Snapshot snap;
     std::string err;
     if (octo::fetch(opt.socket_path, &snap, &err) && snap.has_bench) {
-      Bench bench;
-      bench.ok = true;
-      bench.offset = snap.bench_offset;
-      bench.spread = snap.bench_spread;
-      bench.boxes = snap.live;
-      bench.source = "octomancerd";
-      bench.boxes_json = boxes_to_json(snap.device);
-      return bench;
+      // Answered, even when every box it heard turns out to be switched off:
+      // listening for ourselves would hear the same boxes, apply the same
+      // configuration and reach the same conclusion eight seconds later.
+      return bench_from(snap, conf, "octomancerd");
     }
   }
-  return listen_for_bench(opt);
+  return listen_for_bench(opt, conf);
 }
 
 // What octomancerd can see of the camera without connecting to it.
@@ -267,6 +302,21 @@ struct Presence {
   bool present = false;
   uint64_t sessions = 0;
   double since = 0.0;
+
+  // When the camera was last heard advertising, as an absolute wall clock.
+  // The daemon reports an age; an age is only true at the instant it was
+  // measured, and by the time a client has polled us and drawn it, it is not
+  // that instant any more. Converting once, here, against the snapshot's own
+  // wall clock is the only place both halves of that subtraction are from the
+  // same moment.
+  bool has_last_seen = false;
+  double last_seen_wall = 0.0;
+
+  // Signal strength at that advertisement. A camera that is merely across the
+  // room and one that has been switched off are the same absence otherwise.
+  bool has_rssi = false;
+  int rssi = 0;
+
   std::string id;
   std::string name;
 };
@@ -284,7 +334,56 @@ Presence read_presence(const Options& opt) {
   p.since = snap.camera.since;
   p.id = snap.camera.id;
   p.name = snap.camera.name;
+  // `age` means nothing until the camera has been heard at least once: on a
+  // daemon that has never seen it, it is simply how long the daemon has been
+  // running, and publishing that as a last-seen time would invent a sighting
+  // that never happened.
+  if (snap.camera.seen) {
+    p.has_last_seen = true;
+    p.last_seen_wall = snap.wall - snap.camera.age;
+  }
+  // Zero is what the daemon reports when it has no reading, and no radio ever
+  // reports a genuine 0 dBm, so it is safe to read as "not said".
+  p.has_rssi = snap.camera.rssi != 0;
+  p.rssi = snap.camera.rssi;
   return p;
+}
+
+// Fold what octomancerd can see of a camera into what we are about to publish
+// about it.
+//
+// `heard_over_link` is the interesting argument: it says this program has
+// itself been in contact with the camera just now, either because a cycle has
+// been talking to it or because the link is still held. Connecting to a
+// Blackmagic camera stops it advertising, so octomancerd's idea of when it was
+// last heard freezes at the moment we connected and then ages forever -- which
+// on a screen reads as a camera that has walked out of the building, at
+// exactly the times we are in closest contact with it. A held link delivers
+// timecode several times a second, which is more contact than an
+// advertisement is, not less. So contact means last-seen-now, deliberately:
+// the field means "when did we last hear from this camera", and we are
+// hearing from it right now.
+void apply_presence(octo::CameraStatus* st, const Presence& seen,
+                    bool heard_over_link) {
+  if (heard_over_link) {
+    st->has_last_seen = true;
+    st->last_seen_wall = octo::wall_now();
+  }
+
+  // octomancerd watches one camera at a time. If that is a different body from
+  // the one this status is about, none of its numbers say anything about ours.
+  if (!seen.known) return;
+  if (!seen.id.empty() && !st->id.empty() && seen.id != st->id) return;
+
+  if (!heard_over_link && seen.has_last_seen) {
+    st->has_last_seen = true;
+    st->last_seen_wall = seen.last_seen_wall;
+  }
+  if (seen.has_rssi) {
+    st->has_rssi = true;
+    st->rssi = seen.rssi;
+  }
+  st->sessions = static_cast<int>(seen.sessions);
 }
 
 // ------------------------------------------------------------ camera side
@@ -489,6 +588,11 @@ struct Errand {
   // makes "the camera is here but the bench is not" visible to a client.
   octo::CameraStatus status;
   bool have_status = false;
+  // Whether this cycle actually went looking for the camera. A cycle that gave
+  // up before that -- no bench to sync to -- says nothing about whether the
+  // camera is in the room, and must not be counted as a look that failed: the
+  // reacquisition backoff is priced in failed looks.
+  bool looked = false;
   octo::BenchStatus bench;
 
   // Which camera this is for. Empty means whichever one the daemon was
@@ -514,7 +618,7 @@ void run_cycle(octo::CameraLink* link, octo::SyncState* state,
   *plan = octo::PollPlan();
   plan->seconds = opt.sync.poll;
 
-  const Bench bench = read_bench(opt);
+  const Bench bench = read_bench(opt, conf);
   const double offset = (opt.source == Source::kMac) ? 0.0 : bench.offset;
 
   errand->bench.has = true;
@@ -526,13 +630,23 @@ void run_cycle(octo::CameraLink* link, octo::SyncState* state,
 
   if (opt.source == Source::kTentacle) {
     if (!bench.ok) {
-      say("no Tentacle boxes heard -- nothing to sync to");
+      if (bench.skipped > 0) {
+        // Not the same complaint as silence, and worth separating: somebody
+        // switched these off, and the fix is in the configuration rather than
+        // in the room.
+        say("nothing to sync to -- every timecode box heard (%d) is switched"
+            " off in %s", bench.skipped, conf.path().c_str());
+      } else {
+        say("no timecode boxes heard -- nothing to sync to");
+      }
       rec.action("skip:no-tentacle");
       rec.integer("tentacles", 0);
+      if (bench.skipped > 0) rec.integer("boxes_disabled", bench.skipped);
       log->record("cycle", rec.fields());
       return;
     }
     rec.integer("tentacles", bench.boxes);
+    if (bench.skipped > 0) rec.integer("boxes_disabled", bench.skipped);
     rec.num("tentacle_offset_s", bench.offset);
     rec.num("tentacle_spread_s", bench.spread);
     rec.str("bench_source", bench.source);
@@ -540,7 +654,7 @@ void run_cycle(octo::CameraLink* link, octo::SyncState* state,
       rec.add("boxes", bench.boxes_json);
     }
     if (bench.spread > opt.sync.bench_spread) {
-      say("WARNING: Tentacle boxes disagree by %.3fs -- not all jammed to the"
+      say("WARNING: timecode boxes disagree by %.3fs -- not all jammed to the"
           " same source", bench.spread);
       rec.boolean("bench_disagreement", true);
     }
@@ -551,6 +665,7 @@ void run_cycle(octo::CameraLink* link, octo::SyncState* state,
   const std::string target_camera =
       errand->camera.empty() ? opt.camera : errand->camera;
   std::string picked_name;
+  errand->looked = true;
   if (!connect_camera(link, state, opt, db, target_camera, &picked_name)) {
     if (opt.source == Source::kTentacle) {
       say("Tentacles at %+.3fs, but no camera found", offset);
@@ -1409,7 +1524,7 @@ void usage(FILE* out) {
       "  --max-failures N      failed writes before assuming an external"
       " timecode\n"
       "                        source owns the camera (default 3)\n"
-      "  --bench-spread SEC    warn if the Tentacle boxes disagree by more"
+      "  --bench-spread SEC    warn if the timecode boxes disagree by more"
       " than this\n"
       "\n"
       "the camera's own RTC offset\n"
@@ -1950,11 +2065,40 @@ int main(int argc, char** argv) {
     }
   }
 
+  // The last thing said about the camera, kept here because Control cannot be
+  // read back and publish_camera replaces the whole record. Anything that
+  // wants to freshen one field between cycles -- the link went away, a new
+  // timecode arrived -- has to hand over everything else that was known, or a
+  // client reads the gaps as the daemon having stopped knowing them.
+  octo::CameraStatus published;
+  bool have_published = false;
+
+  // The bench offset the last cycle actually used, for the between-cycle watch
+  // below. Remembered rather than re-read, because re-reading it can mean
+  // eight seconds of scanning when octomancerd is not running, and the watch
+  // is not allowed to spend that. The bench is a median over an hour of
+  // adverts; it does not move enough between cycles to make a stale copy of it
+  // the wrong thing to compare against.
+  double watch_offset = 0.0;
+  bool have_watch_offset = false;
+
   // Publish whatever a cycle learned, and turn the interesting parts of it
   // into events. Everything a client can see about a camera comes through
   // here.
   auto publish = [&](Errand* errand, const Presence& seen) {
-    if (errand->bench.has) control.set_bench(errand->bench);
+    if (errand->bench.has) {
+      control.set_bench(errand->bench);
+      // Only when there was a bench to speak of. A cycle that heard no boxes
+      // reports an offset of zero, and watching against that would publish the
+      // camera's distance from this Mac's clock as though it were its distance
+      // from the bench -- which is the one comparison this program exists to
+      // avoid making.
+      if (opt.source == Source::kMac || errand->bench.boxes > 0) {
+        watch_offset =
+            opt.source == Source::kMac ? 0.0 : errand->bench.offset_s;
+        have_watch_offset = true;
+      }
+    }
     if (!errand->have_status) return;
     octo::CameraStatus st = errand->status;
     if (st.name.empty()) st.name = seen.name;
@@ -1966,7 +2110,93 @@ int main(int argc, char** argv) {
       st.has_drift = true;
       st.drift_ppm = state.drift.ppm;
     }
-    st.connected = false;  // the cycle has let go of the camera by now
+    // What the link says, rather than what the cycle assumed. This used to be
+    // a flat false, with a comment claiming the cycle had let go of the camera
+    // by now -- and under the default it has not: --hold is on, release() only
+    // disconnects when it is off, so the link is still open and every client
+    // was told otherwise. That is what made a held camera and a camera nobody
+    // can find look identical from outside, which is the first entry in
+    // doc/KNOWN_ISSUES.md.
+    st.connected = link->connected();
+    // Contact, whether or not the link survived the cycle: reaching this line
+    // means the cycle connected to the camera, and a camera that answered a
+    // connection a second ago was heard a second ago. Under --no-hold the link
+    // is already closed by now, and taking octomancerd's last-seen instead
+    // would report a sighting from before the connection that silenced it.
+    apply_presence(&st, seen, true);
+    published = st;
+    have_published = true;
+    control.publish_camera(st);
+  };
+
+  // Freshen what is published between cycles: the link state, what octomancerd
+  // can see, and -- while the link is held -- the timecode coming over it.
+  //
+  // This deliberately runs none of the write machinery. The gates, the drift
+  // baselines, the bias feedback and the rate limit all belong to a cycle and
+  // stay in run_cycle; nothing here decides anything or touches the camera's
+  // clock. It is watching, not deciding, which is why it is safe to do every
+  // few seconds. doc/TODO.md asked for exactly this: watch the timecode even
+  // when we are not writing it.
+  //
+  // The radio cost is nil. link->connected() is a bool, and link->view() is a
+  // copy of the notifications the link has already been handed -- the camera
+  // is pushing timecode over the held connection several times a second
+  // whether anybody looks or not.
+  auto refresh = [&](const Presence& seen) {
+    if (!have_published) return;
+    octo::CameraStatus st = published;
+    const bool held = link->connected();
+    st.connected = held;
+    // Presence and connectedness are separate facts, but a held link is the
+    // stronger one: it is the thing an advertisement was only evidence for.
+    // Believing "not on the air" over it is how holding the camera made the
+    // daemon lose sight of the camera it was holding.
+    if (held) {
+      st.present = true;
+    } else if (seen.known &&
+               (seen.id.empty() || st.id.empty() || seen.id == st.id)) {
+      st.present = seen.present;
+    }
+    apply_presence(&st, seen, held);
+
+    if (held) {
+      const octo::CameraView view = link->view();
+      const double now_mono = octo::mono_now();
+      // A cached reading that has been sitting for more than a few seconds is
+      // evidence that the notifications have stopped, not evidence about a
+      // clock. Republishing it with a fresh timestamp would dress up an old
+      // number as a new one, so the last cycle's figures are left standing
+      // instead.
+      const double sat_for = now_mono - view.timecode_mono;
+      if (view.has_timecode && view.timecode_mono > 0.0 && sat_for <= 5.0) {
+        const int fps = view.has_fps ? view.fps
+                                     : (st.has_fps ? st.fps : opt.sync.fps);
+        st.has_fps = view.has_fps || st.has_fps;
+        if (view.has_fps) st.fps = view.fps;
+        st.timecode = octo::bmd::format_timecode(view.timecode);
+        if (view.has_transport) {
+          st.recording = view.transport == octo::bmd::kTransportRecord;
+        }
+        if (have_watch_offset) {
+          // The same arithmetic a cycle does, and for the same reason: the
+          // reading arrived at view.timecode_mono and comparing it against a
+          // host clock sampled now would charge the camera for however long it
+          // sat there.
+          const double age = octo::reading_age_s(now_mono, view.timecode_mono);
+          const double centre =
+              opt.sync.centre_frames ? octo::frame_centre_s(fps) : 0.0;
+          const double cam =
+              octo::bmd::timecode_sod(view.timecode, fps) + centre;
+          const double want =
+              octo::local_seconds_of_day(octo::wall_now() - age) + watch_offset;
+          st.has_error = true;
+          st.error_s = octo::wrap_delta(cam - want);
+        }
+      }
+    }
+
+    published = st;
     control.publish_camera(st);
   };
 
@@ -2022,8 +2252,17 @@ int main(int argc, char** argv) {
   // Even with a presence signal, look properly now and then. The daemon can be
   // wrong about a camera -- one that is connected to another app stops
   // advertising -- and a whole night on a wrong answer is worth avoiding for
-  // the price of one scan a quarter of an hour.
+  // the price of a scan.
   double next_blind_check = 0.0;
+  // How many looks in a row have found nothing, which is what prices the next
+  // one. See reacquire_interval() in camsync.h for why it is not a constant.
+  int blind_misses = 0;
+
+  // What the link was doing last time we looked. The camera can drop the
+  // connection at any moment and says nothing when it does, so the only way to
+  // know is to keep asking -- and the only way for anyone else to find out is
+  // for this program to say so when the answer changes.
+  bool link_held = link->connected();
 
   while (!g_stop) {
     console.maybe_rotate();
@@ -2051,6 +2290,31 @@ int main(int argc, char** argv) {
         // camera that is already in step, is a quarter of an hour away.
         for (const std::string& id : control.camera_ids()) {
           control.set_writes_enabled(id, conf.writes_enabled(id));
+        }
+        // And the bench, for the same reason and with more at stake: switching
+        // a box off changes the median that gets written to cameras, so a page
+        // still showing the old figure is showing a time nothing is syncing
+        // to. Only from octomancerd, because the other way of finding a bench
+        // is eight seconds of scanning and this is the loop thread.
+        if (opt.use_daemon) {
+          octo::Snapshot snap;
+          std::string ferr;
+          if (octo::fetch(opt.socket_path, &snap, &ferr) && snap.has_bench) {
+            const Bench b = bench_from(snap, conf, "octomancerd");
+            octo::BenchStatus bs;
+            bs.has = true;
+            bs.source = opt.source == Source::kMac ? "mac" : "tentacle";
+            bs.boxes = b.boxes;
+            bs.offset_s = b.offset;
+            bs.spread_s = b.spread;
+            bs.daemon_reachable = true;
+            control.set_bench(bs);
+            if (b.skipped > 0) {
+              say("  %d timecode box%s switched off -- the bench is now %d"
+                  " box%s", b.skipped, b.skipped == 1 ? "" : "es", b.boxes,
+                  b.boxes == 1 ? "" : "es");
+            }
+          }
         }
       }
     }
@@ -2089,6 +2353,44 @@ int main(int argc, char** argv) {
                    "the camera is no longer on the air");
     }
     last = cam;
+
+    // The other half of that story: what the *link* is doing, which since
+    // holding became the default is a different fact from what the air says.
+    // A camera that drops the connection does it at a moment of its own
+    // choosing, and the next cycle can be a quarter of an hour away, so the
+    // sample is taken here on the presence tick -- it is a bool read off an
+    // object, with no radio behind it -- rather than only after a cycle.
+    // Presence transitions are logged above as up/down; these are held and
+    // dropped, and both are worth having: "the camera stopped advertising" and
+    // "the camera hung up on us" read identically in a log that only records
+    // the first.
+    {
+      const bool now_held = link->connected();
+      if (now_held != link_held) {
+        const std::string who =
+            state.camera_id.empty() ? cam.id : state.camera_id;
+        Record ev;
+        ev.str("state", now_held ? "held" : "dropped");
+        ev.str("camera_id", who);
+        log.record("camera", ev.fields());
+        if (now_held) {
+          say("camera link held -- timecode will keep arriving between cycles");
+        } else {
+          say("camera link dropped -- the camera or the radio let go;"
+              " reconnecting at the next look");
+        }
+        link_held = now_held;
+      }
+    }
+
+    // Seeing the camera, by either route, means the next disappearance starts
+    // its backoff from scratch.
+    if ((cam.known && cam.present) || link_held) blind_misses = 0;
+
+    // Say what is currently true about the camera, whether or not a cycle is
+    // due. Without this, everything a client can see is as old as the last
+    // cycle, which on a settled camera is a quarter of an hour.
+    refresh(cam);
 
     // Anything asked for over the socket comes first: someone is waiting on
     // it, and the schedule is not.
@@ -2138,15 +2440,28 @@ int main(int argc, char** argv) {
       // absent means no more cycles until the next blind check a quarter of an
       // hour later.
       if (!cam.known || cam.present || blind_due || link->connected()) {
-        if (cam.known && !cam.present) {
+        const bool blind = cam.known && !cam.present && !link->connected();
+        if (blind) {
           // The presence signal can be wrong -- a camera connected to another
           // app stops advertising -- so it is checked directly now and then
           // rather than trusted for a whole night.
           say("octomancerd has not heard the camera; looking directly anyway");
         }
-        next_blind_check = now + opt.sync.max_poll;
         Errand errand;
         const octo::PollPlan plan = run_errand(&errand, cam);
+        // What the look cost is decided by what it found. Reaching the camera
+        // clears the count; a look that went out and found nothing adds to it,
+        // and the next one is twice as far off, up to max_poll. This used to
+        // be a flat max_poll either way, which meant --poll had no say in
+        // reacquisition at all and a camera switched back on went unnoticed
+        // for a quarter of an hour.
+        if (errand.have_status) {
+          blind_misses = 0;
+        } else if (blind && errand.looked) {
+          ++blind_misses;
+        }
+        next_blind_check =
+            octo::mono_now() + octo::reacquire_interval(opt.sync, blind_misses);
         if (opt.once) break;
         next_cycle = octo::mono_now() + plan.seconds;
       } else {

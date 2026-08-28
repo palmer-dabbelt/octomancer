@@ -34,10 +34,20 @@ a camera in the same callback costs nothing at all.
 Two things to keep in mind about it:
 
 * **Absence means "not advertising", not "switched off".** A camera stops
-  advertising while something holds a connection to it, and `octomancer-sync`
-  holds one for about twenty seconds every cycle it acts. `camera_gone_after`
-  is 90 s for that reason. Set it below a cycle's connection and every
-  correction would read as the camera being power-cycled.
+  advertising while something holds a connection to it. `octomancer-sync` used
+  to hold one for about twenty seconds every cycle it acted, which is what
+  `camera_gone_after` of 90 s was sized against: set it below a cycle's
+  connection and every correction would read as the camera being power-cycled.
+
+  It now holds the connection *between* cycles as well, by default, so the
+  presence signal for a working camera is false essentially all of the time.
+  That is not a fault to be fixed in this file -- `octomancer-sync` treats its
+  own live connection as presence, which is a better signal than an
+  advertisement because it is the thing the advertisement was evidence for.
+  What it does mean is that `octomancer status` will report a camera as not on
+  the air while it is being held, and that is correct rather than confusing
+  once you know the connection is the point. See `doc/pairing-notes.md` for why
+  letting go is expensive.
 * **A second camera is ignored.** The first one heard wins and the rest are
   dropped, because alternating between two would flap the presence flag and the
   session counter on every advertisement. Choosing between cameras is

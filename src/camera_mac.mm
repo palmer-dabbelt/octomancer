@@ -83,6 +83,7 @@ class MacCameraLink : public CameraLink {
   void disconnect() override;
   bool connected() const override;
   bool subscribe(double timeout, std::string* err) override;
+  bool subscribed() const override;
   bool read_status(std::vector<uint8_t>* out, double timeout,
                    std::string* err) override;
   bool write_control(const std::vector<uint8_t>& packet, double timeout,
@@ -709,6 +710,14 @@ void MacCameraLink::disconnect() {
 
 bool MacCameraLink::connected() const {
   return link_up;
+}
+
+bool MacCameraLink::subscribed() const {
+  // The outgoing characteristic is the one subscribe() insists on, so it is
+  // the honest test of whether that call has already succeeded on this
+  // connection. Both are cleared by on_disconnected(), which is what makes
+  // this safe to ask after the camera has gone away without telling anyone.
+  return link_up && have_outgoing;
 }
 
 bool MacCameraLink::subscribe(double timeout, std::string* err) {

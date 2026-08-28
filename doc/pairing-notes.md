@@ -84,6 +84,30 @@ is running fails as "could not connect", which is the least informative of the
 four verdicts. `octomancer pair` says so up front when it finds the daemon
 running; stopping it with `octomancer stop --daemon sync` is the fix.
 
+## Holding the connection
+
+Pairing succeeded and then the camera went quiet again, because the daemon
+disconnected at the end of the cycle and there is no bond storage: the next
+connection pairs from scratch. A key that only lasts as long as one cycle is
+not much of a key, and it makes the daemon unrunnable unattended -- every
+reconnection would want somebody to read six digits off a camera.
+
+So `octomancer-sync` now keeps the connection open between cycles. `--no-hold`
+restores the old behaviour. Three consequences worth knowing:
+
+* **`subscribe()` must not be called twice on one connection**, so there is now
+  a `subscribed()` on the seam and the cycle asks rather than remembers. It has
+  to ask, because the camera can drop the link at any moment and a remembered
+  "yes" would then be wrong in the direction that silently produces no
+  timecode.
+* **A held camera stops advertising**, so `octomancerd` reports it absent for
+  as long as it is working. The main loop counts its own live connection as
+  presence; without that, holding would make the daemon stop scheduling cycles
+  and only wake for a blind check every fifteen minutes.
+* **The timecode keeps arriving between cycles**, which is most of the point. A
+  cycle that opens with a reading already in hand does not spend its first
+  seconds waiting for one.
+
 ## What is tested, and what is not
 
 | Test | What it pins |
@@ -122,5 +146,10 @@ What has **not** been verified, and should not be read as working:
 * **The `refused` verdict has never been produced by a radio.** Its matcher is
   tested against strings written from the documentation, not against strings a
   camera caused.
+* **Holding has not been observed against hardware.** The code path is
+  exercised and the daemon runs, but every attempt to watch it hold a real
+  camera across two cycles has run into a camera that was not advertising at
+  the time. That it reconnects cleanly when the camera does drop the link, and
+  that a second cycle really does skip the scan, are both unwatched.
 * **The 90-second default is a guess.** It is long enough to read a number off
   a screen and type it, and nothing more principled than that.

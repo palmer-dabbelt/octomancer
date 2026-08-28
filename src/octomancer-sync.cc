@@ -75,6 +75,9 @@ struct Options {
   // Pairing waits on a person: reading a code off a camera screen and typing
   // it into a dialog is not a twenty-second operation.
   double pair_seconds = 90.0;
+  // Whether to keep the camera connected between cycles. On by default: see
+  // release() for why letting go is the expensive choice.
+  bool hold = true;
   // Hand-written packets for --poke, in the order given.
   std::vector<std::string> pokes;
   double poke_watch = 4.0;
@@ -328,6 +331,23 @@ void seed_from_db(octo::CamDb* db, const Options& opt, octo::SyncState* state,
 // CoreBluetooth can usually connect straight to it; scanning for 20 seconds
 // every cycle would otherwise dominate the poll interval and keep the radio
 // busy for no reason.
+// Let go of the camera -- unless we are holding on to it, which is the
+// default and wants explaining.
+//
+// There is no bond storage. Every reconnection pairs from scratch, and on this
+// hardware pairing means a six-digit code on the camera's screen and a person
+// to read it, so a daemon that reconnects once a cycle is a daemon that cannot
+// run unattended at all. Holding also keeps the notifications flowing, so the
+// next cycle opens with a timecode already in hand rather than waiting for
+// one -- and waiting for one is where a cycle spends most of its time.
+//
+// The cost is real: a connected camera stops advertising, so octomancerd stops
+// seeing it and its presence signal goes false and stays there. The main loop
+// is what makes that survivable, by counting a held connection as presence.
+void release(octo::CameraLink* link, const Options& opt) {
+  if (!opt.hold) link->disconnect();
+}
+
 // One camera, one line. Shared because this is printed from inside a scan
 // callback now as well as after one, and two format strings that are meant to
 // match are two format strings that will stop matching.
@@ -347,6 +367,11 @@ bool connect_camera(octo::CameraLink* link, octo::SyncState* state,
   // because the only way to tell a name from a body is to see it advertise.
   const bool bound_is_wanted =
       want.empty() || (!state->camera_id.empty() && want == state->camera_id);
+  // Still connected from a previous cycle, and still subscribed. This is what
+  // holding buys: no scan, no connect, and -- with no bond storage -- no
+  // pairing.
+  if (bound_is_wanted && link->connected() && link->subscribed()) return true;
+
   if (!state->camera_id.empty() && bound_is_wanted) {
     std::string err;
     if (link->connect(state->camera_id, opt.sync.connect_timeout, &err)) {
@@ -543,13 +568,13 @@ void run_cycle(octo::CameraLink* link, octo::SyncState* state,
   errand->status.action = "connected";
 
   std::string err;
-  if (!link->subscribe(opt.sync.camera_wait, &err)) {
+  if (!link->subscribed() && !link->subscribe(opt.sync.camera_wait, &err)) {
     say("connected, but %s", err.c_str());
     rec.action("skip:no-characteristics");
     errand->status.action = "no-characteristics";
     errand->status.connected = false;
     errand->note(false, err);
-    link->disconnect();
+    release(link, opt);
     log->record("cycle", rec.fields());
     return;
   }
@@ -588,7 +613,7 @@ void run_cycle(octo::CameraLink* link, octo::SyncState* state,
       errand->note(false,
                    "writes are disabled for this camera -- enable it with"
                    " `octomancer writes on`");
-      link->disconnect();
+      release(link, opt);
       plan->seconds = opt.sync.poll;
       log->record("cycle", rec.fields());
       return;
@@ -625,7 +650,7 @@ void run_cycle(octo::CameraLink* link, octo::SyncState* state,
                                 static_cast<long long>(errand->source_value))
                           : "the camera did not echo the change back");
     }
-    link->disconnect();
+    release(link, opt);
     plan->seconds = opt.sync.poll;
     log->record("cycle", rec.fields());
     return;
@@ -637,7 +662,7 @@ void run_cycle(octo::CameraLink* link, octo::SyncState* state,
     errand->status.action = "no-timecode";
     errand->status.connected = false;
     errand->note(false, "the camera sent no timecode");
-    link->disconnect();
+    release(link, opt);
     log->record("cycle", rec.fields());
     return;
   }
@@ -772,7 +797,7 @@ void run_cycle(octo::CameraLink* link, octo::SyncState* state,
       answered = false;
     }
     errand->note(answered, why);
-    link->disconnect();
+    release(link, opt);
     plan_next(error);
     log->record("cycle", rec.fields());
     return;
@@ -787,7 +812,7 @@ void run_cycle(octo::CameraLink* link, octo::SyncState* state,
     rec.action("write:rejected");
     rec.str("error", err);
     state->failures += 1;
-    link->disconnect();
+    release(link, opt);
     log->record("cycle", rec.fields());
     return;
   }
@@ -814,7 +839,7 @@ void run_cycle(octo::CameraLink* link, octo::SyncState* state,
     say("  could not verify: no timecode after the write");
     rec.action("write:unverified");
     state->failures += 1;
-    link->disconnect();
+    release(link, opt);
     log->record("cycle", rec.fields());
     return;
   }
@@ -914,7 +939,7 @@ void run_cycle(octo::CameraLink* link, octo::SyncState* state,
     }
   }
 
-  link->disconnect();
+  release(link, opt);
   plan_next(err2);
   log->record("cycle", rec.fields());
 }
@@ -1432,6 +1457,12 @@ void usage(FILE* out) {
       "                        characteristics will answer. The camera shows a\n"
       "                        six-digit code and macOS asks for it.\n"
       "  --pair-timeout SEC    how long to wait for that (default 90)\n"
+      "  --no-hold             disconnect between cycles instead of keeping\n"
+      "                        the camera connected. Holding is the default:\n"
+      "                        there is no bond storage, so every reconnection\n"
+      "                        pairs afresh, and pairing needs somebody to read\n"
+      "                        a code off the camera. It also keeps timecode\n"
+      "                        arriving between cycles.\n"
       "  --rtc-test            write a deliberately wrong clock, to prove the\n"
       "                        write lands\n"
       "  --packet              print the RTC packet for now and exit, no"
@@ -1455,7 +1486,7 @@ bool parse_args(int argc, char** argv, Options* opt) {
     kMaxFailures, kBenchSpread, kRtcBias, kNoAdaptBias, kMaxBiasStep,
     kMaxAdapts, kLead, kVerifyWait, kCameraWait, kScanTimeout, kConnectTimeout,
     kMinDriftInterval, kFps, kScanOnly, kAll, kWatch, kRtcTest, kPacket,
-    kPair, kPairTimeout,
+    kPair, kPairTimeout, kNoHold,
     kPoke, kPokeWatch,
     kMaxPoll, kPollSlices, kFixedPoll, kPresencePoll, kConsole, kLogMax,
     kLogKeep, kMinPpm, kRestartStep,
@@ -1516,6 +1547,7 @@ bool parse_args(int argc, char** argv, Options* opt) {
       {"watch", required_argument, nullptr, kWatch},
       {"pair", no_argument, nullptr, kPair},
       {"pair-timeout", required_argument, nullptr, kPairTimeout},
+      {"no-hold", no_argument, nullptr, kNoHold},
       {"rtc-test", no_argument, nullptr, kRtcTest},
       {"packet", no_argument, nullptr, kPacket},
       {"poke", required_argument, nullptr, kPoke},
@@ -1618,6 +1650,7 @@ bool parse_args(int argc, char** argv, Options* opt) {
       case kPacket: opt->mode = Mode::kPacket; break;
       case kPair: opt->mode = Mode::kPair; break;
       case kPairTimeout: opt->pair_seconds = std::atof(optarg); break;
+      case kNoHold: opt->hold = false; break;
       case kPoke:
         opt->mode = Mode::kPoke;
         opt->pokes.push_back(optarg);
@@ -2038,7 +2071,8 @@ int main(int argc, char** argv) {
       // trusted to describe what is running now.
       octo::forget_drift(&state);
       next_cycle = now;
-    } else if (cam.known && last.known && last.present && !cam.present) {
+    } else if (cam.known && last.known && last.present && !cam.present &&
+               !link->connected()) {
       // Expected after every cycle that connects -- a camera stops
       // advertising while something is talking to it -- so this is a log line,
       // not a cause for alarm.
@@ -2093,7 +2127,13 @@ int main(int argc, char** argv) {
 
     if (now >= next_cycle) {
       const bool blind_due = now >= next_blind_check;
-      if (!cam.known || cam.present || blind_due) {
+      // A held connection is itself presence -- and a stronger signal than an
+      // advertisement, because it is the thing the advertisement was only
+      // evidence for. Without this the daemon would stop advertising to
+      // itself: holding makes the camera go quiet, quiet reads as absent, and
+      // absent means no more cycles until the next blind check a quarter of an
+      // hour later.
+      if (!cam.known || cam.present || blind_due || link->connected()) {
         if (cam.known && !cam.present) {
           // The presence signal can be wrong -- a camera connected to another
           // app stops advertising -- so it is checked directly now and then

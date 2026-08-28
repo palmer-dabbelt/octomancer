@@ -96,6 +96,13 @@ class CameraLink {
   // itself and the verification pass after a write samples the same object.
   virtual bool subscribe(double timeout, std::string* err) = 0;
 
+  // Whether the current connection has already been subscribed. Subscribing
+  // twice is an error, so a caller that holds a connection across several
+  // cycles needs to be able to ask rather than remember -- the link can be
+  // dropped by the camera at any moment, and then the caller's memory is
+  // wrong in the direction that silently produces no timecode.
+  virtual bool subscribed() const = 0;
+
   // Read the Camera Status characteristic -- the only readable one in the
   // profile, per doc/protocol-notes.md. Reading is also the only operation
   // here that makes macOS negotiate encryption: subscribing to a notify

@@ -183,6 +183,11 @@ class HciCamera : public CameraLink {
     return result;
   }
 
+  bool subscribed() const override {
+    std::lock_guard<std::mutex> lock(mu_);
+    return conn_ != 0 && subscribed_;
+  }
+
   bool read_status(std::vector<uint8_t>* out, double timeout,
                    std::string* err) override {
     (void)out;

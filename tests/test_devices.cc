@@ -237,11 +237,25 @@ void test_the_brief_view_is_the_table_and_nothing_else() {
   CHECK(!contains(text, "canonical"));
   CHECK(!contains(text, "vs this Mac"));
 
+  // Signal is in the brief view, not behind the flag. "Why is this one not
+  // being heard" is asked too often for the answer to need asking for.
+  CHECK(contains(text, "RSSI"));
+  CHECK(contains(text, "-55"));
+
   // And with it, the header is back and the table is still under it.
   const std::string loud = strip_escapes(octo::render_devices(v, true, false));
   CHECK(loud.compare(0, 6, "DEVICE") != 0);
   CHECK(contains(loud, "canonical time"));
   CHECK(contains(loud, "DEVICE"));
+
+  // The brief table is the first columns of the verbose one, character for
+  // character. Pinned because the two are one format string with a suffix, and
+  // the moment they stop being that they become two tables to learn.
+  const std::string brief_head = text.substr(0, text.find('\n'));
+  const size_t at = loud.find("DEVICE");
+  const std::string loud_head = loud.substr(at, loud.find('\n', at) - at);
+  CHECK(brief_head.size() < loud_head.size());
+  CHECK(loud_head.compare(0, brief_head.size(), brief_head) == 0);
 }
 
 void test_offsets_are_against_canonical_not_this_mac() {

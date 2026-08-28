@@ -1229,13 +1229,14 @@ const CGFloat kWindowWidth = 460.0;
   // sentence gets to decide the width of.
   _canonicalLine = wrapped_label(@"…");
   _canonicalLine.textColor = [NSColor labelColor];
-  _deviceGrid = [NSGridView gridViewWithNumberOfColumns:4 rows:0];
+  _deviceGrid = [NSGridView gridViewWithNumberOfColumns:5 rows:0];
   _deviceGrid.columnSpacing = 16;
   _deviceGrid.rowSpacing = 5;
-  // The two numeric columns hang off their right edge, which is the only way
+  // The three numeric columns hang off their right edge, which is the only way
   // digits of different lengths line up under each other.
-  [_deviceGrid columnAtIndex:1].xPlacement = NSGridCellPlacementTrailing;
-  [_deviceGrid columnAtIndex:2].xPlacement = NSGridCellPlacementTrailing;
+  for (NSInteger i = 1; i <= 3; ++i) {
+    [_deviceGrid columnAtIndex:i].xPlacement = NSGridCellPlacementTrailing;
+  }
   _hiddenLine = wrapped_label(@"");
 
   NSStackView* devicesStack = [NSStackView stackViewWithViews:@[
@@ -2246,8 +2247,11 @@ const CGFloat kWindowWidth = 460.0;
     if (!r.note.empty()) {
       said = [NSString stringWithFormat:@"%@ — %@", said, ns(r.note)];
     }
-    cells[3].stringValue = said;
+    cells[3].stringValue =
+        r.has_rssi ? [NSString stringWithFormat:@"%d dBm", r.rssi] : @"--";
     cells[3].textColor = faint;
+    cells[4].stringValue = said;
+    cells[4].textColor = faint;
   }
 
   if (view.rows.empty()) {
@@ -2284,9 +2288,14 @@ const CGFloat kWindowWidth = 460.0;
 - (void)rebuildDeviceGrid:(NSArray<NSString*>*)keys {
   while (_deviceGrid.numberOfRows > 0) [_deviceGrid removeRowAtIndex:0];
 
+  // Signal sits before Link rather than after it, which is the one place this
+  // table's column order departs from `octomancer status`. The terminal keeps
+  // its notes under the table and so has a fixed-width LINK; here the note
+  // rides in the same cell, so Link is the column that can be a sentence, and
+  // a sentence belongs at the end of a row rather than in the middle of one.
   NSArray<NSTextField*>* header = @[
     dim_label(@"Device"), dim_label(@"Last seen"),
-    dim_label(@"From canonical"), dim_label(@"Link"),
+    dim_label(@"From canonical"), dim_label(@"Signal"), dim_label(@"Link"),
   ];
   for (NSTextField* f in header) {
     f.font = [NSFont systemFontOfSize:NSFont.smallSystemFontSize];
@@ -2296,7 +2305,10 @@ const CGFloat kWindowWidth = 460.0;
   for (NSString* key in keys) {
     NSArray<NSTextField*>* cells = _deviceCells[key];
     if (cells == nil) {
-      cells = @[ label(@""), mono_label(@""), mono_label(@""), label(@"") ];
+      cells = @[
+        label(@""), mono_label(@""), mono_label(@""), mono_label(@""),
+        label(@""),
+      ];
       _deviceCells[key] = cells;
     }
     [_deviceGrid addRowWithViews:cells];

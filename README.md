@@ -308,14 +308,21 @@ cameras. What somebody standing at the bench wants is one list, with numbers
 that mean the same thing on every line:
 
 ```
-DEVICE            AGE     OFFSET LINK
-BMPCC              1s     +1.3ms on the air
-F55                2s     -0.8ms on the air
-FS5                4s     +0.8ms on the air
-Krysta             1s     -0.8ms on the air
-FS7             3m02s         -- off the air
-A:1EAE18A7     56m32s         -- off the air
+DEVICE            AGE     OFFSET LINK         RSSI
+BMPCC              1s     +1.3ms on the air    -51
+F55                2s     -0.8ms on the air    -76
+FS5                4s     +0.8ms on the air    -81
+Krysta             1s     -0.8ms on the air    -55
+FS7             3m02s         -- off the air   -84
+A:1EAE18A7     56m32s         -- off the air    --
 ```
+
+`RSSI` is there because "why is this one not being heard" comes up constantly
+and the answer is usually in that column. The bench in this room reads about
+-51 to -55 dBm; a box at -84 is at the edge of what gets decoded and will go
+quiet for minutes at a time. It is also how the camera in these examples was
+diagnosed: never heard above -75 dBm even in the same room, about 20 dB quieter
+than everything else in the rig.
 
 That is the whole of it, deliberately. There is no version, no pair of daemon
 lines and no arithmetic above the table, because none of that changes between

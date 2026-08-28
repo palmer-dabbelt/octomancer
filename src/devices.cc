@@ -436,14 +436,17 @@ std::string render_devices(const DeviceView& v, bool verbose, bool color) {
   // string that already contains an escape pads the escape too, which lines up
   // in one mode and not the other -- and the tests here compare the coloured
   // output against the plain one byte for byte.
+  // The brief table is exactly the first five columns of the verbose one, so
+  // the two share a prefix rather than each spelling out its own. Two tables
+  // that can drift apart are two tables somebody has to learn separately, and
+  // the whole point of one renderer is that there is only ever one to learn.
+  out += fmt("%s%-14s %6s %10s %-11s %5s%s", st.dim, "DEVICE", "AGE", "OFFSET",
+             "LINK", "RSSI", st.off);
   if (verbose) {
-    out += fmt("%s%-14s %6s %10s %-11s %5s %-15s %10s %9s %s%s\n", st.dim,
-               "DEVICE", "AGE", "OFFSET", "LINK", "RSSI", "TIMECODE", "MEDIAN",
-               "DRIFT", "RATE", st.off);
-  } else {
-    out += fmt("%s%-14s %6s %10s %s%s\n", st.dim, "DEVICE", "AGE", "OFFSET",
-               "LINK", st.off);
+    out += fmt("%s %-15s %10s %9s %s%s", st.dim, "TIMECODE", "MEDIAN", "DRIFT",
+               "RATE", st.off);
   }
+  out += "\n";
 
   for (const DeviceRow& r : v.rows) {
     // A warning outranks the alert colour and the dimming, because it is the
@@ -471,17 +474,21 @@ std::string render_devices(const DeviceView& v, bool verbose, bool color) {
         r.has_offset ? offset_text(r.offset_s) : std::string("--");
     const char* link_colour = link_is_live(r.link) ? st.green : st.dim;
 
-    // The last column on a line is never padded: trailing spaces are invisible
-    // until somebody copies a row out of a terminal, and then they are not.
-    out += fmt(verbose ? "%s%-14.14s%s %s%6s%s %s%10s%s %s%-11s%s"
-                       : "%s%-14.14s%s %s%6s%s %s%10s%s %s%s%s",
+    // Signal is in both views. It is the column that answers "why is this one
+    // not being heard" without anybody having to go and look at the box, and
+    // that question comes up far too often for the answer to live behind a
+    // flag. Right-justified, which pads on the left: a trailing space is
+    // invisible until somebody copies a row out of a terminal, and then it is
+    // not.
+    const std::string rssi = r.has_rssi ? fmt("%d", r.rssi) : "--";
+    out += fmt("%s%-14.14s%s %s%6s%s %s%10s%s %s%-11s%s %s%5s%s",
                name_colour, label.c_str(), st.off,
                r.has_age ? "" : st.dim, age.c_str(), st.off,
                r.has_offset ? "" : st.dim, off.c_str(), st.off,
-               link_colour, link_state_name(r.link), st.off);
+               link_colour, link_state_name(r.link), st.off,
+               r.has_rssi ? "" : st.dim, rssi.c_str(), st.off);
 
     if (verbose) {
-      const std::string rssi = r.has_rssi ? fmt("%d", r.rssi) : "--";
       const std::string tc = r.timecode.empty() ? "--" : r.timecode;
       const std::string med =
           r.has_median ? offset_text(r.median_offset_s) : std::string("--");
@@ -493,8 +500,7 @@ std::string render_devices(const DeviceView& v, bool verbose, bool color) {
           : r.has_drift_span ? "~" + format_age(r.drift_span_s)
                              : "--";
       const std::string rate = r.resolution.empty() ? "--" : r.resolution;
-      out += fmt(" %s%5s%s %s%-15.15s%s %s%10s%s %s%9s%s %s%.11s%s",
-                 r.has_rssi ? "" : st.dim, rssi.c_str(), st.off,
+      out += fmt(" %s%-15.15s%s %s%10s%s %s%9s%s %s%.11s%s",
                  r.timecode.empty() ? st.dim : "", tc.c_str(), st.off,
                  r.has_median ? "" : st.dim, med.c_str(), st.off,
                  r.has_drift ? "" : st.dim, drift.c_str(), st.off,

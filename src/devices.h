@@ -127,6 +127,12 @@ struct DeviceRow {
   std::string resolution;
   bool has_drift = false;
   double drift_ppm = 0.0;
+  // How long the device has been watched, set only while there is no drift
+  // figure yet. Drift needs a long lever arm rather than more samples, so the
+  // column stays empty for a good while, and "not yet, and here is how long"
+  // is a better answer than a blank that could equally mean broken.
+  bool has_drift_span = false;
+  double drift_span_s = 0.0;
   // The raw median offset against this Mac, which is what `offset_s` was
   // derived from. Worth keeping for the verbose view: it is the number that
   // moves when the Mac's clock is the thing that is wrong.

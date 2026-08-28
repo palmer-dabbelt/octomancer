@@ -176,11 +176,22 @@ NSTextField* heading(NSString* text) {
 // one -- an unconstrained label reports the whole sentence on one line as its
 // natural width, and the window grows to match -- so every caller pins it to
 // something. See -pinWidth:to:inset:.
+// The width these are told to wrap at when nothing else has told them yet.
+// Roughly the window's content width less the page insets; see kWindowWidth.
+const CGFloat kWrapWidth = 400.0;
+
 NSTextField* wrapped_label(NSString* text) {
   NSTextField* f = [NSTextField wrappingLabelWithString:text];
   f.selectable = NO;
   f.textColor = [NSColor secondaryLabelColor];
   f.font = [NSFont systemFontOfSize:NSFont.smallSystemFontSize];
+  // Without this a wrapping label's *intrinsic* width is the width of the
+  // whole sentence on one line, however wide that is. Every one of these is
+  // also pinned to its container, so the pin and the intrinsic size disagree
+  // and the container's fitting width goes to the unwrapped sentence -- which
+  // is how a window sized to fit its content opened half again as wide as it
+  // was meant to, and got wider every time a note gained a clause.
+  f.preferredMaxLayoutWidth = kWrapWidth;
   return f;
 }
 
@@ -219,7 +230,7 @@ bool parse_scan_row(const std::string& line, std::string* id,
   return !id->empty();
 }
 
-// One line of the Configuration page's device list.
+// One line of the merged list of devices this Mac knows of.
 //
 // Kept as a list of its own rather than looked up in the two daemons when a
 // checkbox is clicked, because the checkbox has to keep working for a device
@@ -279,6 +290,8 @@ struct ScanHit {
   NSTextField* _daemonLine;
   NSTextField* _benchLine;
   NSPopUpButton* _cameraPicker;
+  NSArray<NSString*>* _cameraKeys;
+  NSString* _cameraSelectedId;
   NSGridView* _detail;
   NSTextField* _tcValue;
   NSTextField* _errorValue;
@@ -299,6 +312,32 @@ struct ScanHit {
   NSButton* _showStatusItem;
   NSTextField* _statusNote;
   NSButton* _writesEnabled;
+  NSButton* _cameraWarn;
+  NSButton* _removeCameraButton;
+  NSTextField* _cameraNote;
+
+  // --- the Details page, timecode-box half ------------------------------
+  //
+  // The selection is remembered by id, not by the title showing in the menu:
+  // a title gains and loses "(off the air)" as the box comes and goes, and a
+  // page that jumped back to the first box every time one went quiet would be
+  // useless in exactly the moment somebody was watching it. `_boxKeys` is the
+  // menu's index-to-id map, rebuilt whenever the menu is.
+  NSPopUpButton* _boxPicker;
+  NSArray<NSString*>* _boxKeys;
+  NSString* _boxSelectedId;
+  NSTextField* _boxTcValue;
+  NSTextField* _boxOffValue;
+  NSTextField* _boxMacValue;
+  NSTextField* _boxResValue;
+  NSTextField* _boxDriftValue;
+  NSTextField* _boxSignalValue;
+  NSTextField* _boxHeardValue;
+  NSTextField* _boxStateValue;
+  NSTextField* _boxNote;
+  NSButton* _boxEnabled;
+  NSButton* _boxWarn;
+  NSButton* _removeBoxButton;
 
   // The configuration file, read on the polling queue and kept here. The draw
   // path runs every two seconds and must not touch a disk to do it.
@@ -317,12 +356,13 @@ struct ScanHit {
   NSArray<NSString*>* _deviceKeys;
   NSMutableDictionary<NSString*, NSArray<NSTextField*>*>* _deviceCells;
 
-  // --- the Configuration page ------------------------------------------
-  NSGridView* _configGrid;
-  NSArray<NSString*>* _configKeys;
-  NSMutableDictionary<NSString*, NSArray<NSView*>*>* _configCells;
+  // --- the known-device list -------------------------------------------
+  // Every device either daemon has heard of plus every device the
+  // configuration file mentions, merged and in a fixed order. Both pickers on
+  // the Details page index into this, and so do the checkboxes: a device
+  // switched off is left out of the merged DeviceView entirely, so a page that
+  // took its list from there would have no way to switch one back on.
   std::vector<ConfigEntry> _configEntries;
-  NSTextField* _configNote;
   NSTextField* _benchAgentLine;
   NSTextField* _syncAgentLine;
   int _daemonTick;
@@ -358,8 +398,6 @@ struct ScanHit {
     _daemonTick = 0;
     _deviceKeys = @[];
     _deviceCells = [NSMutableDictionary dictionary];
-    _configKeys = @[];
-    _configCells = [NSMutableDictionary dictionary];
     _pairPending = [NSMutableString string];
     _benchSocket = octo::default_socket_path();
     _controlSocket = octo::default_control_socket_path();
@@ -883,6 +921,12 @@ struct ScanHit {
 
 // ------------------------------------------------------------------- window
 
+// The width the window opens at. Chosen for the two status lines above the
+// tabs, which are longer than anything inside them, and used again to measure
+// the pages -- a page has to be measured at the width it will be given or its
+// wrapping labels answer for a shape it will never have.
+const CGFloat kWindowWidth = 460.0;
+
 // One page of the window.
 //
 // The sections used to be NSBoxes, which cannot constrain a content view that
@@ -893,8 +937,14 @@ struct ScanHit {
 // first, out of habit from the box days, is what would leave a page frozen at
 // the width it happened to have when the window was built.
 //
-// The bottom is pinned loosely so that a short page sits at the top of the tab
-// rather than being stretched down to fill it.
+// The page goes inside a scroll view, and that is not about scrolling. A plain
+// NSView does not clip its subviews, so a page taller than the tab simply drew
+// past the bottom of it -- over the window, and outside the rectangle AppKit
+// invalidates when the selected tab changes. The overflow was therefore never
+// erased, and switching tabs left the tall page's text lying under the short
+// page's: two pages legibly on top of each other. A clip view clips, which
+// ends it. That the leftovers can now be scrolled to instead of lost is the
+// second-best thing about it.
 - (void)tabView:(NSTabView*)tabView
     didSelectTabViewItem:(NSTabViewItem*)item {
   [[NSUserDefaults standardUserDefaults]
@@ -905,16 +955,29 @@ struct ScanHit {
 - (NSTabViewItem*)tabTitled:(NSString*)title content:(NSView*)content {
   NSTabViewItem* item = [[NSTabViewItem alloc] initWithIdentifier:title];
   item.label = title;
-  NSView* host = [[NSView alloc] init];
+
+  // Deliberately left with its autoresizing mask intact: the tab view sets
+  // this view's frame itself, and taking that away leaves the page a zero-
+  // sized nothing in the corner.
+  NSScrollView* scroll = [[NSScrollView alloc] init];
+  scroll.hasVerticalScroller = YES;
+  scroll.hasHorizontalScroller = NO;
+  scroll.drawsBackground = NO;
+  scroll.borderType = NSNoBorder;
+  scroll.scrollerStyle = NSScrollerStyleOverlay;
+
   content.translatesAutoresizingMaskIntoConstraints = NO;
-  [host addSubview:content];
+  scroll.documentView = content;
+  NSClipView* clip = scroll.contentView;
   [NSLayoutConstraint activateConstraints:@[
-    [content.leadingAnchor constraintEqualToAnchor:host.leadingAnchor],
-    [content.trailingAnchor constraintEqualToAnchor:host.trailingAnchor],
-    [content.topAnchor constraintEqualToAnchor:host.topAnchor],
-    [content.bottomAnchor constraintLessThanOrEqualToAnchor:host.bottomAnchor],
+    [content.leadingAnchor constraintEqualToAnchor:clip.leadingAnchor],
+    [content.trailingAnchor constraintEqualToAnchor:clip.trailingAnchor],
+    // Top only. Pinning the bottom as well would stretch a short page down to
+    // fill the tab; leaving it free lets the page keep its own height and sit
+    // at the top, which is where every one of them starts reading from.
+    [content.topAnchor constraintEqualToAnchor:clip.topAnchor],
   ]];
-  item.view = host;
+  item.view = scroll;
   return item;
 }
 
@@ -934,7 +997,6 @@ struct ScanHit {
   _cameraPicker = [[NSPopUpButton alloc] init];
   _cameraPicker.target = self;
   _cameraPicker.action = @selector(cameraPicked:);
-  [_cameraPicker addItemWithTitle:@"All cameras"];
 
   _tcValue = mono_label(@"--");
   _errorValue = mono_label(@"--");
@@ -962,21 +1024,47 @@ struct ScanHit {
   _detail.rowSpacing = 6;
   [_detail columnAtIndex:0].xPlacement = NSGridCellPlacementTrailing;
 
-  // The permission switch, next to the controls it governs rather than in a
-  // preferences pane: "why will this not sync?" and "let it sync" should be
-  // the same glance.
-  _writesEnabled =
-      [NSButton checkboxWithTitle:@"Let octomancer change this camera"
-                           target:self
-                           action:@selector(writesToggled:)];
+  // The two settings live next to the readings they govern rather than in a
+  // preferences pane, which is the whole reason this page absorbed them: "why
+  // will this not sync?" and "let it sync" should be the same glance. They
+  // were a grid of bare checkboxes on another tab, where reading a row meant
+  // counting across to find out which column was which.
+  _writesEnabled = [NSButton checkboxWithTitle:@"Enabled"
+                                        target:self
+                                        action:@selector(deviceEnabledToggled:)];
+  _cameraWarn = [NSButton checkboxWithTitle:@"Warn if out of sync"
+                                     target:self
+                                     action:@selector(deviceWarnToggled:)];
+  _cameraNote = wrapped_label(@"");
 
-  _syncButton = [NSButton buttonWithTitle:@"Sync Now"
+  // "Jam sync" rather than "Sync Now" because that is what the operation is
+  // called by everybody who does it for a living, and this window is the one
+  // place the program speaks to them rather than about them.
+  _syncButton = [NSButton buttonWithTitle:@"Jam Sync"
                                    target:self
                                    action:@selector(syncNow:)];
   _syncButton.keyEquivalent = @"\r";
+  _removeCameraButton = [NSButton buttonWithTitle:@"Remove…"
+                                           target:self
+                                           action:@selector(removeDevice:)];
   _activity = dim_label(@"");
+  // Whatever the last action had to say, which can be a sentence. It shares a
+  // row with two buttons, so it truncates rather than wrapping -- and it gives
+  // up its width before anything else does, so a long message widens the
+  // window not at all.
+  _activity.lineBreakMode = NSLineBreakByTruncatingTail;
+  [_activity
+      setContentCompressionResistancePriority:NSLayoutPriorityDefaultLow - 1
+                               forOrientation:
+                                   NSLayoutConstraintOrientationHorizontal];
 
-  NSStackView* actions = [NSStackView stackViewWithViews:@[ _syncButton, _activity ]];
+  NSStackView* cameraFlags =
+      [NSStackView stackViewWithViews:@[ _writesEnabled, _cameraWarn ]];
+  cameraFlags.orientation = NSUserInterfaceLayoutOrientationHorizontal;
+  cameraFlags.spacing = 18;
+
+  NSStackView* actions = [NSStackView
+      stackViewWithViews:@[ _syncButton, _removeCameraButton, _activity ]];
   actions.orientation = NSUserInterfaceLayoutOrientationHorizontal;
   actions.spacing = 12;
   actions.alignment = NSLayoutAttributeCenterY;
@@ -991,13 +1079,91 @@ struct ScanHit {
   [detailRow setHuggingPriority:NSLayoutPriorityDefaultLow
                  forOrientation:NSLayoutConstraintOrientationHorizontal];
 
-  NSStackView* cameraStack = [NSStackView stackViewWithViews:@[
-    _cameraPicker, detailRow, _writesEnabled, actions,
+  // --- the Details page, timecode-box half --------------------------------
+  //
+  // Same shape as the camera half above, on purpose. This page answers one
+  // question -- tell me everything about one device -- and somebody should not
+  // have to learn two layouts to ask it about two kinds of device. Devices is
+  // the list; this is the single thing looked at closely.
+  //
+  // A box gets a picker and readings and no controls, because there are no
+  // controls to give: nothing in this program can set a Tentacle's clock. The
+  // note at the bottom says so rather than leaving the empty space to be read
+  // as something unfinished.
+  _boxPicker = [[NSPopUpButton alloc] init];
+  _boxPicker.target = self;
+  _boxPicker.action = @selector(boxPicked:);
+
+  _boxTcValue = mono_label(@"--");
+  _boxOffValue = mono_label(@"--");
+  _boxMacValue = mono_label(@"--");
+  _boxResValue = label(@"--");
+  _boxDriftValue = mono_label(@"--");
+  _boxSignalValue = mono_label(@"--");
+  _boxHeardValue = mono_label(@"--");
+  _boxStateValue = label(@"--");
+  _boxNote = wrapped_label(@"");
+
+  // "Off by" is the first number on both halves and means the same thing on
+  // both: distance from the time everything else is being held to, never from
+  // this Mac. The Mac appears once, further down, labelled as itself.
+  NSGridView* boxDetail = [NSGridView gridViewWithViews:@[
+    @[ dim_label(@"Timecode"), _boxTcValue ],
+    @[ dim_label(@"Off by"), _boxOffValue ],
+    @[ dim_label(@"Counting in"), _boxResValue ],
+    @[ dim_label(@"Against this Mac"), _boxMacValue ],
+    @[ dim_label(@"Drift"), _boxDriftValue ],
+    @[ dim_label(@"Signal"), _boxSignalValue ],
+    @[ dim_label(@"Last heard"), _boxHeardValue ],
+    @[ dim_label(@"State"), _boxStateValue ],
   ]];
-  cameraStack.orientation = NSUserInterfaceLayoutOrientationVertical;
-  cameraStack.alignment = NSLayoutAttributeLeading;
-  cameraStack.spacing = 10;
-  cameraStack.edgeInsets = NSEdgeInsetsMake(8, 8, 8, 8);
+  boxDetail.columnSpacing = 12;
+  boxDetail.rowSpacing = 6;
+  [boxDetail columnAtIndex:0].xPlacement = NSGridCellPlacementTrailing;
+
+  NSStackView* boxDetailRow =
+      [NSStackView stackViewWithViews:@[ boxDetail, [[NSView alloc] init] ]];
+  boxDetailRow.orientation = NSUserInterfaceLayoutOrientationHorizontal;
+  boxDetailRow.spacing = 0;
+  [boxDetailRow setHuggingPriority:NSLayoutPriorityDefaultLow
+                    forOrientation:NSLayoutConstraintOrientationHorizontal];
+
+  // The same two settings, in the same place on the page, meaning the same
+  // thing to the same file. A box has no third control because there is no
+  // third thing anybody can do to it from here.
+  _boxEnabled = [NSButton checkboxWithTitle:@"Enabled"
+                                     target:self
+                                     action:@selector(deviceEnabledToggled:)];
+  _boxWarn = [NSButton checkboxWithTitle:@"Warn if out of sync"
+                                  target:self
+                                  action:@selector(deviceWarnToggled:)];
+  _removeBoxButton = [NSButton buttonWithTitle:@"Remove…"
+                                        target:self
+                                        action:@selector(removeDevice:)];
+
+  NSStackView* boxFlags =
+      [NSStackView stackViewWithViews:@[ _boxEnabled, _boxWarn ]];
+  boxFlags.orientation = NSUserInterfaceLayoutOrientationHorizontal;
+  boxFlags.spacing = 18;
+
+  NSStackView* boxActions =
+      [NSStackView stackViewWithViews:@[ _removeBoxButton ]];
+  boxActions.orientation = NSUserInterfaceLayoutOrientationHorizontal;
+  boxActions.spacing = 12;
+
+  NSStackView* detailsStack = [NSStackView stackViewWithViews:@[
+    heading(@"Camera"), _cameraPicker, detailRow, cameraFlags, actions,
+    _cameraNote,
+    heading(@"Timecode box"), _boxPicker, boxDetailRow, boxFlags, boxActions,
+    _boxNote,
+  ]];
+  detailsStack.orientation = NSUserInterfaceLayoutOrientationVertical;
+  detailsStack.alignment = NSLayoutAttributeLeading;
+  detailsStack.spacing = 10;
+  detailsStack.edgeInsets = NSEdgeInsetsMake(8, 8, 8, 8);
+  [detailsStack setCustomSpacing:20 afterView:_cameraNote];
+  [self pinWidth:_boxNote to:detailsStack inset:24];
+  [self pinWidth:_cameraNote to:detailsStack inset:24];
 
   _notifyFailed = [NSButton checkboxWithTitle:@"a sync fails"
                                        target:self
@@ -1048,7 +1214,12 @@ struct ScanHit {
   // time. Which devices those are, and what that offset is measured against,
   // is decided in src/devices.h -- nothing on this page decides anything.
 
-  _canonicalLine = label(@"…");
+  // Wrapping, because this line names every box that voted and is the longest
+  // sentence in the window. As a single-line label its intrinsic width was the
+  // whole sentence, and a window sized to fit its content is a window that
+  // sentence gets to decide the width of.
+  _canonicalLine = wrapped_label(@"…");
+  _canonicalLine.textColor = [NSColor labelColor];
   _deviceGrid = [NSGridView gridViewWithNumberOfColumns:4 rows:0];
   _deviceGrid.columnSpacing = 16;
   _deviceGrid.rowSpacing = 5;
@@ -1061,28 +1232,25 @@ struct ScanHit {
   NSStackView* devicesStack = [NSStackView stackViewWithViews:@[
     _canonicalLine, _deviceGrid, _hiddenLine,
   ]];
+  
   devicesStack.orientation = NSUserInterfaceLayoutOrientationVertical;
   devicesStack.alignment = NSLayoutAttributeLeading;
   devicesStack.spacing = 10;
   devicesStack.edgeInsets = NSEdgeInsetsMake(12, 12, 12, 12);
-  [self pinWidth:_hiddenLine to:devicesStack inset:24];
+  for (NSTextField* note in @[ _canonicalLine, _hiddenLine ]) {
+    [self pinWidth:note to:devicesStack inset:24];
+  }
 
-  // --- the Configuration page --------------------------------------------
+  // --- the System page ----------------------------------------------------
   //
-  // Everything a person decides, as opposed to everything they watch: which
-  // devices count, whether the daemons are running, and the one thing that has
-  // to have happened before a camera can be talked to at all.
-
-  // Two checkboxes per device and so two columns of them, headed, because
-  // "on" and "warn" are different questions and a row of bare boxes would make
-  // somebody count across to work out which is which. Centred under their
-  // headings for the same reason.
-  _configGrid = [NSGridView gridViewWithNumberOfColumns:4 rows:0];
-  _configGrid.columnSpacing = 10;
-  _configGrid.rowSpacing = 5;
-  [_configGrid columnAtIndex:0].xPlacement = NSGridCellPlacementCenter;
-  [_configGrid columnAtIndex:1].xPlacement = NSGridCellPlacementCenter;
-  _configNote = wrapped_label(@"…");
+  // What is true of the whole installation rather than of any one device: the
+  // two daemons, whether they come back at login, and the one thing that has
+  // to happen before a camera exists to have settings at all.
+  //
+  // The per-device checkboxes used to be here, in a grid. They are on Details
+  // now, beside the readings they explain, which is where somebody is standing
+  // when the question comes up. What is left is genuinely about the system, so
+  // that is what the tab is called.
 
   NSButton* pairButton = [NSButton buttonWithTitle:@"Pair Camera…"
                                             target:self
@@ -1128,8 +1296,7 @@ struct ScanHit {
   daemonButtons.spacing = 8;
 
   NSStackView* configStack = [NSStackView stackViewWithViews:@[
-    heading(@"Devices"), _configGrid, _configNote,
-    pairButton, pairNote,
+    heading(@"Add a camera"), pairButton, pairNote,
     heading(@"Daemons"), agentGrid, daemonButtons, _startAtBoot, _bootNote,
   ]];
   configStack.orientation = NSUserInterfaceLayoutOrientationVertical;
@@ -1137,7 +1304,7 @@ struct ScanHit {
   configStack.spacing = 8;
   configStack.edgeInsets = NSEdgeInsetsMake(12, 12, 12, 12);
   [configStack setCustomSpacing:18 afterView:pairNote];
-  for (NSTextField* note in @[ _configNote, pairNote, _bootNote ]) {
+  for (NSTextField* note in @[ pairNote, _bootNote ]) {
     [self pinWidth:note to:configStack inset:24];
   }
 
@@ -1177,8 +1344,8 @@ struct ScanHit {
   _tabs = [[NSTabView alloc] init];
   _tabs.translatesAutoresizingMaskIntoConstraints = NO;
   [_tabs addTabViewItem:[self tabTitled:@"Devices" content:devicesStack]];
-  [_tabs addTabViewItem:[self tabTitled:@"Camera" content:cameraStack]];
-  [_tabs addTabViewItem:[self tabTitled:@"Configuration" content:configStack]];
+  [_tabs addTabViewItem:[self tabTitled:@"Details" content:detailsStack]];
+  [_tabs addTabViewItem:[self tabTitled:@"System" content:configStack]];
   [_tabs addTabViewItem:[self tabTitled:@"Notifications" content:notifyPage]];
   _tabs.delegate = self;
   {
@@ -1205,11 +1372,36 @@ struct ScanHit {
 
   // The tab view is the one thing here that should take the window's width; a
   // leading-aligned stack would otherwise leave it as wide as whichever page
-  // happens to be showing. The floor is so that the shortest page does not
-  // open a window too small to read the others in.
+  // happens to be showing.
   [[_tabs.widthAnchor constraintEqualToAnchor:root.widthAnchor
                                      constant:-32] setActive:YES];
-  [[_tabs.heightAnchor constraintGreaterThanOrEqualToConstant:320]
+
+  // Tall enough for the tallest page, asked of each page directly. A scroll
+  // view is content to be any size at all, so the window can no longer take
+  // its height from the view hierarchy the way it did when the pages were
+  // pinned straight into the tab -- it would open every page scrolled.
+  //
+  // Each page is measured with the width it will actually be given, because a
+  // wrapping label's height is a function of its width: asking before fixing
+  // the width answers for a shape the page will never have, and the answer is
+  // always too short.
+  const CGFloat page_width = kWindowWidth - 32.0;
+  CGFloat tallest = 320.0;
+  for (NSView* page in @[ devicesStack, detailsStack, configStack, notifyPage ]) {
+    NSLayoutConstraint* fixed =
+        [page.widthAnchor constraintEqualToConstant:page_width];
+    fixed.active = YES;
+    [page layoutSubtreeIfNeeded];
+    tallest = MAX(tallest, page.fittingSize.height);
+    fixed.active = NO;
+  }
+  // Room for the tab strip itself, which is inside the tab view's height and
+  // not inside any page's -- and then a ceiling, because "as tall as the
+  // tallest page" is only a good rule while the tallest page fits on a screen.
+  // Past this the page scrolls, which is the other thing the scroll view is
+  // for.
+  tallest = MIN(tallest, 620.0);
+  [[_tabs.heightAnchor constraintGreaterThanOrEqualToConstant:tallest + 40.0]
       setActive:YES];
 
   _window = [[NSWindow alloc]
@@ -1226,8 +1418,13 @@ struct ScanHit {
   // status lines above the tabs are longer than anything inside them, and
   // fitting the window to the pages alone would open it with those truncated.
   NSSize fits = root.fittingSize;
-  [_window setContentSize:NSMakeSize(MAX(460, fits.width), fits.height)];
-  [_window setContentMinSize:NSMakeSize(MAX(420, fits.width), fits.height)];
+  [_window setContentSize:NSMakeSize(MAX(kWindowWidth, fits.width),
+                                     fits.height)];
+  // The floor on the height is deliberately not `fits.height`: a page can now
+  // scroll, so a window somebody has dragged shorter is a window they can
+  // still read, and refusing to let them make it smaller than its tallest page
+  // is refusing them the thing the scroll view was added for.
+  [_window setContentMinSize:NSMakeSize(MAX(420, fits.width), 360.0)];
   [_window center];
 
   [self refreshDaemonState];
@@ -1265,52 +1462,142 @@ struct ScanHit {
     _benchLine.stringValue = @"Bench: nothing heard yet";
   }
 
+  // The merged list of known devices first: both pickers index into it, and
+  // so do the checkboxes underneath them.
+  [self updateKnownDevices];
   [self rebuildCameraPicker];
+  [self rebuildBoxPicker];
+  // Built once and handed to both pages that read it. They are two views of
+  // one list and must not be able to disagree about what is in it.
+  const octo::DeviceView view = [self deviceView];
   [self updateCameraDetail];
-  [self updateDevices];
-  [self updateConfiguration];
+  [self updateBoxDetail:view];
+  [self updateDevices:view];
 }
 
 // Rebuilt in place: replacing the whole menu on a two-second timer would fight
 // anyone trying to use it.
+// Both pickers, filled the same way from the same list.
+//
+// The list is `_configEntries`, not the merged DeviceView, and that is the
+// load-bearing part: a device somebody switched off is deliberately absent
+// from the DeviceView, so a picker built from there would have no entry for
+// the one device whose settings somebody most likely came here to change back.
+//
+// Rebuilt in place, and only when the titles actually differ: replacing the
+// whole menu on a two-second timer would fight anybody trying to use it.
+//
+// The selection is remembered by id rather than by the title showing in the
+// menu, because a title gains and loses "(off the air)" as the device comes
+// and goes. Matching on the title would drop the selection back to the first
+// device every time one went quiet, which is exactly the moment somebody is
+// looking at it.
+- (void)fillPicker:(NSPopUpButton*)picker
+           cameras:(BOOL)cameras
+              keys:(NSArray<NSString*>* __strong*)keysOut
+          selected:(NSString* __strong*)selectedOut
+             empty:(NSString*)empty {
+  if (picker == nil) return;
+  NSMutableArray<NSString*>* titles = [NSMutableArray array];
+  NSMutableArray<NSString*>* keys = [NSMutableArray array];
+  for (const ConfigEntry& e : _configEntries) {
+    if (e.camera != (cameras == YES)) continue;
+    NSString* title = ns(e.name.empty() ? e.id : e.name);
+    if (!e.present) title = [title stringByAppendingString:@" (off the air)"];
+    if (!e.enabled) title = [title stringByAppendingString:@" — switched off"];
+    // NSPopUpButton treats a title as an identity and drops the older of two
+    // that match, which would leave `keys` a row longer than the menu and
+    // every selection past the collision pointing at the wrong device.
+    if ([titles containsObject:title]) {
+      title = [NSString stringWithFormat:@"%@ [%@]", title,
+                                         ns(e.id.substr(0, 8))];
+    }
+    [titles addObject:title];
+    [keys addObject:ns(e.id)];
+  }
+  *keysOut = keys;
+  if ([titles isEqualToArray:[picker itemTitles]]) return;
+
+  [picker removeAllItems];
+  if (titles.count == 0) {
+    [picker addItemWithTitle:empty];
+    picker.enabled = NO;
+    return;
+  }
+  [picker addItemsWithTitles:titles];
+  picker.enabled = YES;
+  const NSUInteger want =
+      *selectedOut == nil ? NSNotFound : [keys indexOfObject:*selectedOut];
+  [picker selectItemAtIndex:want == NSNotFound ? 0 : (NSInteger)want];
+  if (want == NSNotFound) *selectedOut = keys.firstObject;
+}
+
 - (void)rebuildCameraPicker {
-  NSMutableArray<NSString*>* wanted = [NSMutableArray array];
-  [wanted addObject:@"All cameras"];
-  for (const octo::CameraStatus& c : _status.cameras) {
-    NSString* title = c.name.empty() ? ns(c.id) : ns(c.name);
-    if (!c.present) title = [title stringByAppendingString:@" (off the air)"];
-    [wanted addObject:title];
-  }
-  if ([wanted isEqualToArray:[_cameraPicker itemTitles]]) return;
-
-  NSString* was = _cameraPicker.titleOfSelectedItem;
-  [_cameraPicker removeAllItems];
-  [_cameraPicker addItemsWithTitles:wanted];
-  if (was != nil && [wanted containsObject:was]) {
-    [_cameraPicker selectItemWithTitle:was];
-  }
+  [self fillPicker:_cameraPicker
+           cameras:YES
+              keys:&_cameraKeys
+          selected:&_cameraSelectedId
+             empty:@"No cameras"];
 }
 
-// Which camera the controls act on, as the id the daemon knows it by. Empty
-// means all of them.
+// The id under a picker's current selection, or empty when there is none.
+- (std::string)pickedIdIn:(NSPopUpButton*)picker
+                     keys:(NSArray<NSString*>*)keys {
+  const NSInteger index = picker.indexOfSelectedItem;
+  if (keys == nil || index < 0 || index >= (NSInteger)keys.count) {
+    return std::string();
+  }
+  return keys[index].UTF8String;
+}
+
+// Which camera the controls act on, as the id the daemon knows it by.
 - (std::string)selectedCameraId {
-  const NSInteger index = _cameraPicker.indexOfSelectedItem;
-  if (index <= 0) return std::string();
-  const size_t which = static_cast<size_t>(index - 1);
-  if (which >= _status.cameras.size()) return std::string();
-  return _status.cameras[which].id;
+  return [self pickedIdIn:_cameraPicker keys:_cameraKeys];
 }
 
+// Where the selected device sits in `_configEntries`, which is what a
+// checkbox's tag carries and what the save path indexes into. -1 when there
+// is no selection, which every caller has to be able to mean "no device".
+- (NSInteger)configIndexFor:(const std::string&)id camera:(BOOL)camera {
+  if (id.empty()) return -1;
+  for (size_t i = 0; i < _configEntries.size(); ++i) {
+    const ConfigEntry& e = _configEntries[i];
+    if (e.camera == (camera == YES) && e.id == id) {
+      return static_cast<NSInteger>(i);
+    }
+  }
+  return -1;
+}
+
+// The daemon's view of the selected camera, when it has one. A camera that is
+// only in the configuration file has no status at all, and that is not an
+// error -- its readings are blank and its settings still work, which is the
+// whole reason it is still listed.
 - (const octo::CameraStatus*)selectedCamera {
-  const NSInteger index = _cameraPicker.indexOfSelectedItem;
-  if (_status.cameras.empty()) return nullptr;
-  if (index <= 0) return &_status.cameras[0];  // "All": show the first
-  const size_t which = static_cast<size_t>(index - 1);
-  if (which >= _status.cameras.size()) return nullptr;
-  return &_status.cameras[which];
+  const std::string want = [self selectedCameraId];
+  if (want.empty()) return nullptr;
+  for (const octo::CameraStatus& c : _status.cameras) {
+    if (c.id == want) return &c;
+  }
+  return nullptr;
 }
 
 - (void)updateCameraDetail {
+  const std::string picked = [self selectedCameraId];
+  const NSInteger which = [self configIndexFor:picked camera:YES];
+  const ConfigEntry* entry =
+      which < 0 ? nullptr : &_configEntries[static_cast<size_t>(which)];
+  // Before the early return below, deliberately. A camera that is only in the
+  // configuration file has no status to draw, but its two settings still work
+  // and removing it still works -- and those are the only things anybody can
+  // do about a camera that has stopped turning up.
+  [self setFlags:_writesEnabled
+            warn:_cameraWarn
+          remove:_removeCameraButton
+              to:entry
+              at:which];
+  [self updateCameraNote:entry];
+
   const octo::CameraStatus* c = [self selectedCamera];
   const bool have = c != nullptr;
   _syncButton.enabled = have && _controlUp && !_busy;
@@ -1356,9 +1643,6 @@ struct ScanHit {
     }
   }
 
-  _writesEnabled.state =
-      c->writes_enabled ? NSControlStateValueOn : NSControlStateValueOff;
-  _writesEnabled.enabled = _controlUp && !_busy;
   // Nothing acts on a camera that has not been permitted, so offering the
   // buttons would be offering something that will be refused.
   _syncButton.enabled = _syncButton.enabled && c->writes_enabled;
@@ -1393,6 +1677,216 @@ struct ScanHit {
 - (void)cameraPicked:(id)sender {
   (void)sender;
   [self updateCameraDetail];
+}
+
+// --------------------------------------------- the Details page, box half
+
+- (void)rebuildBoxPicker {
+  [self fillPicker:_boxPicker
+           cameras:NO
+              keys:&_boxKeys
+          selected:&_boxSelectedId
+             empty:@"No timecode boxes"];
+}
+
+// The readings for the selected box, when the merged view has any. A box that
+// has been switched off is not in the view at all -- that is what switching it
+// off means -- so this returns nothing and the page says so rather than
+// drawing a row of dashes that could equally mean the radio is dead.
+- (const octo::DeviceRow*)boxIn:(const octo::DeviceView&)view {
+  const std::string want = [self pickedIdIn:_boxPicker keys:_boxKeys];
+  if (want.empty()) return nullptr;
+  for (const octo::DeviceRow& r : view.rows) {
+    if (r.kind == octo::DeviceKind::kTentacle && r.id == want) return &r;
+  }
+  return nullptr;
+}
+
+// The two settings and the remove button for whichever device a half of the
+// page is showing.
+//
+// The tag is how a click finds its way back to a device: the control itself
+// knows nothing, and the list it indexes into is rebuilt in the same order
+// every tick. -1 means no device, and every control goes dead rather than
+// acting on whatever happens to be first.
+- (void)setFlags:(NSButton*)enabled
+            warn:(NSButton*)warn
+          remove:(NSButton*)remove
+              to:(const ConfigEntry*)entry
+              at:(NSInteger)which {
+  for (NSButton* b in @[ enabled, warn, remove ]) b.tag = which;
+  if (entry == nullptr) {
+    enabled.state = NSControlStateValueOff;
+    warn.state = NSControlStateValueOff;
+    enabled.enabled = NO;
+    warn.enabled = NO;
+    remove.enabled = NO;
+    return;
+  }
+  enabled.state = entry->enabled ? NSControlStateValueOn : NSControlStateValueOff;
+  warn.state = entry->warn ? NSControlStateValueOn : NSControlStateValueOff;
+  enabled.enabled = _confLoaded && !_busy;
+  // A switched-off device is left out of the merged view entirely, so its
+  // warning could never fire. Greyed rather than cleared: the setting is still
+  // in the file and comes back the moment the device is switched on again, and
+  // silently unticking somebody's box to mean "this has no effect right now"
+  // would lose what they asked for.
+  warn.enabled = _confLoaded && !_busy && entry->enabled;
+  remove.enabled = !_busy;
+}
+
+// What the two settings on the camera half actually mean, said in words,
+// because "Enabled" is the same label on both halves of this page and does not
+// mean the same thing on each: a box that is enabled is one that counts, and a
+// camera that is enabled is one this program is allowed to write to.
+- (void)updateCameraNote:(const ConfigEntry*)entry {
+  if (_cameraNote == nil) return;
+  if (entry == nullptr) {
+    _cameraNote.stringValue =
+        _controlUp ? @"No camera is known yet. Pair one on the System page and "
+                     @"it appears here."
+                   : @"octomancer-sync is not answering, so nothing here knows "
+                     @"about any camera.";
+    _cameraNote.textColor = [NSColor secondaryLabelColor];
+    return;
+  }
+  NSString* what =
+      entry->enabled
+          ? @"Enabled: octomancer may set this camera's clock."
+          : @"Not enabled: octomancer will read this camera and never write "
+            @"to it.";
+  _cameraNote.stringValue =
+      _confLoaded
+          ? [NSString stringWithFormat:@"%@ Saved in %@.", what,
+                                       ns(_conf.path())]
+          : @"The configuration file could not be read, so a change here will "
+            @"not stick.";
+  _cameraNote.textColor = [NSColor secondaryLabelColor];
+}
+
+- (void)boxPicked:(id)sender {
+  (void)sender;
+  const NSInteger index = _boxPicker.indexOfSelectedItem;
+  if (_boxKeys != nil && index >= 0 && index < (NSInteger)_boxKeys.count) {
+    _boxSelectedId = _boxKeys[index];
+  }
+  [self updateBoxDetail:[self deviceView]];
+}
+
+- (void)updateBoxDetail:(const octo::DeviceView&)view {
+  if (_boxPicker == nil) return;
+  NSArray<NSTextField*>* values = @[
+    _boxTcValue, _boxOffValue, _boxResValue, _boxMacValue, _boxDriftValue,
+    _boxSignalValue, _boxHeardValue,
+  ];
+
+  const std::string picked = [self pickedIdIn:_boxPicker keys:_boxKeys];
+  const NSInteger which = [self configIndexFor:picked camera:NO];
+  const ConfigEntry* entry =
+      which < 0 ? nullptr : &_configEntries[static_cast<size_t>(which)];
+  [self setFlags:_boxEnabled
+            warn:_boxWarn
+          remove:_removeBoxButton
+              to:entry
+              at:which];
+
+  const octo::DeviceRow* r = [self boxIn:view];
+  if (r == nullptr) {
+    for (NSTextField* f in values) {
+      f.stringValue = @"--";
+      f.textColor = [NSColor labelColor];
+    }
+    // Three different silences, and a page that drew them the same way would
+    // be answering a question it had not been asked.
+    _boxStateValue.stringValue =
+        entry == nullptr
+            ? (_benchUp ? @"no timecode box heard yet"
+                        : @"octomancerd is not answering")
+        : !entry->enabled ? @"switched off — nothing is being read from it"
+                          : @"not heard from since the daemon started";
+    _boxStateValue.textColor = [NSColor secondaryLabelColor];
+    _boxNote.stringValue =
+        entry == nullptr
+            ? @""
+            : @"Nothing here can set a timecode box's clock; only the "
+              @"Tentacle app can re-jam one.";
+    _boxNote.textColor = [NSColor secondaryLabelColor];
+    return;
+  }
+  for (NSTextField* f in values) f.textColor = [NSColor labelColor];
+
+  _boxTcValue.stringValue = r->timecode.empty() ? @"--" : ns(r->timecode);
+
+  // Blank while the box is away rather than blank full stop, and the two are
+  // said differently. See DeviceRow::has_offset for why the number is
+  // withheld: subtracting a current canonical time from an old reading
+  // measures the silence, not the box.
+  if (r->has_offset) {
+    _boxOffValue.stringValue = offset_text(r->offset_s);
+    _boxOffValue.textColor = fabs(r->offset_s) < octo::kWarnOffset
+                                 ? [NSColor systemGreenColor]
+                                 : [NSColor systemOrangeColor];
+  } else if (r->offset_is_stale) {
+    _boxOffValue.stringValue = @"not while it is off the air";
+    _boxOffValue.textColor = [NSColor secondaryLabelColor];
+  } else {
+    _boxOffValue.stringValue = @"--";
+  }
+
+  _boxResValue.stringValue =
+      r->resolution.empty() ? @"--" : ns(r->resolution);
+  _boxMacValue.stringValue =
+      r->has_median ? offset_text(r->median_offset_s) : @"--";
+
+  if (r->has_drift) {
+    _boxDriftValue.stringValue =
+        [NSString stringWithFormat:@"%+.1f ppm", r->drift_ppm];
+  } else if (r->has_drift_span) {
+    // Not a measurement, and said so. Drift needs a long lever arm rather
+    // than more samples, so this row stays empty for a good while and a bare
+    // "--" would read as broken.
+    _boxDriftValue.stringValue = [NSString
+        stringWithFormat:@"not yet — watched for %@",
+                         elapsed_text(r->drift_span_s)];
+    _boxDriftValue.textColor = [NSColor secondaryLabelColor];
+  } else {
+    _boxDriftValue.stringValue = @"--";
+  }
+
+  _boxSignalValue.stringValue =
+      r->has_rssi ? [NSString stringWithFormat:@"%d dBm", r->rssi] : @"--";
+  _boxHeardValue.stringValue =
+      r->has_age ? [elapsed_text(r->age_s) stringByAppendingString:@" ago"]
+                 : @"--";
+
+  NSString* state = @(octo::link_state_name(r->link));
+  state = [state stringByAppendingString:
+                     r->contributes ? @", voting on the canonical time"
+                                    : @", not voting on the canonical time"];
+  _boxStateValue.stringValue = state;
+  _boxStateValue.textColor = octo::link_is_live(r->link)
+                                 ? [NSColor labelColor]
+                                 : [NSColor secondaryLabelColor];
+
+  // The only instruction this half can offer, and the reason it has no
+  // controls. A box that has drifted out of its alert band cannot be fixed
+  // from here by anybody -- re-jamming is the Tentacle app's job.
+  NSMutableArray<NSString*>* note = [NSMutableArray array];
+  if (r->alerting) {
+    [note addObject:[NSString stringWithFormat:
+                                  @"%@ is out on its own and needs re-jamming "
+                                  @"in the Tentacle app.",
+                                  ns(r->name)]];
+  }
+  if (!octo::link_is_live(r->link)) {
+    [note addObject:@"Nothing is being heard from it now, so the readings "
+                    @"above are the last ones it gave."];
+  }
+  [note addObject:@"Nothing here can set a timecode box's clock; only the "
+                  @"Tentacle app can re-jam one."];
+  _boxNote.stringValue = [note componentsJoinedByString:@" "];
+  _boxNote.textColor = r->alerting ? [NSColor systemRedColor]
+                                   : [NSColor secondaryLabelColor];
 }
 
 // Send a request and watch it to the end, off the main thread. The button is
@@ -1444,7 +1938,7 @@ struct ScanHit {
   if (!_controlUp) {
     [self complain:@"The sync daemon is not answering."
               info:@"Start it with `make install-agent`, or with the buttons "
-                   @"on the Configuration page."];
+                   @"on the System page."];
     return;
   }
   [self ensureWindow];
@@ -1486,46 +1980,6 @@ struct ScanHit {
 // Permission is written to the configuration file, not sent over the socket:
 // the daemon only ever reads that file. Then it is told to re-read it, which
 // it does within a quarter of a second, rather than at the next restart.
-- (void)writesToggled:(id)sender {
-  (void)sender;
-  const octo::CameraStatus* c = [self selectedCamera];
-  if (c == nullptr) return;
-  const bool wanted = _writesEnabled.state == NSControlStateValueOn;
-  const std::string id = c->id;
-  const std::string name = c->name;
-  const std::string configPath = _status.daemon.config_path.empty()
-                                     ? octo::default_camera_config_path()
-                                     : _status.daemon.config_path;
-  const std::string socketPath = _controlSocket;
-
-  dispatch_async(_queue, ^{
-    octo::CamConf conf;
-    std::string err;
-    bool ok = conf.load(configPath, &err);
-    if (ok) ok = conf.set_writes(id, name, wanted, &err);
-
-    if (ok) {
-      std::string reply, ignored;
-      octo::query(socketPath, "reload", &reply, &ignored, 3.0);
-    }
-    dispatch_async(dispatch_get_main_queue(), ^{
-      if (!ok) {
-        [self complain:@"Could not save that setting."
-                  info:[NSString stringWithFormat:@"%@\n\n%@", ns(err),
-                                                  ns(configPath)]];
-        // Put the checkbox back where the daemon says it is.
-        [self updateCameraDetail];
-        return;
-      }
-      self->_activity.stringValue =
-          wanted ? @"Writes enabled for this camera."
-                 : @"Writes disabled — octomancer will read it and not touch it.";
-      self->_activity.textColor = [NSColor secondaryLabelColor];
-      [self refresh];
-    });
-  });
-}
-
 - (void)notifyToggled:(id)sender {
   NSUserDefaults* defaults = [NSUserDefaults standardUserDefaults];
   if (sender == _notifyFailed) {
@@ -1702,10 +2156,8 @@ struct ScanHit {
   return octo::build_device_view(src);
 }
 
-- (void)updateDevices {
+- (void)updateDevices:(const octo::DeviceView&)view {
   if (_deviceGrid == nil) return;
-
-  const octo::DeviceView view = [self deviceView];
 
   if (view.has_canonical) {
     _canonicalLine.stringValue =
@@ -1859,9 +2311,7 @@ struct ScanHit {
 // appearing anywhere else, and the only way back is a checkbox with its name
 // on it. So this is built from the two daemons *and* from the configuration
 // file, and the file is what supplies the rows neither daemon can see.
-- (void)updateConfiguration {
-  if (_configGrid == nil) return;
-
+- (void)updateKnownDevices {
   std::vector<ConfigEntry> entries;
   std::set<std::string> known;
 
@@ -1921,130 +2371,122 @@ struct ScanHit {
   }
 
   _configEntries = entries;
-
-  NSMutableArray<NSString*>* keys = [NSMutableArray array];
-  for (const ConfigEntry& e : entries) {
-    [keys addObject:ns((e.camera ? "c:" : "t:") + e.id)];
-  }
-  if (![keys isEqualToArray:_configKeys]) {
-    [self rebuildConfigGrid:keys];
-    _configKeys = [keys copy];
-  }
-
-  for (size_t i = 0; i < entries.size(); ++i) {
-    const ConfigEntry& e = entries[i];
-    NSArray<NSView*>* cells = _configCells[_configKeys[i]];
-    if (cells == nil) continue;
-    NSButton* box = (NSButton*)cells[0];
-    NSButton* warn = (NSButton*)cells[1];
-    NSTextField* name = (NSTextField*)cells[2];
-    NSTextField* who = (NSTextField*)cells[3];
-    // The tag is how a click finds its way back to a device: the checkbox
-    // itself knows nothing, and the list it indexes into is rebuilt in the
-    // same order every tick.
-    box.tag = static_cast<NSInteger>(i);
-    warn.tag = static_cast<NSInteger>(i);
-    box.state = e.enabled ? NSControlStateValueOn : NSControlStateValueOff;
-    warn.state = e.warn ? NSControlStateValueOn : NSControlStateValueOff;
-    // A switched-off device is left out of the merged view entirely, so its
-    // warning could never fire -- see build_device_view. Greyed rather than
-    // cleared: the setting is still in the file and comes back the moment the
-    // device is switched on again, and silently unticking somebody's box to
-    // represent "this has no effect right now" would lose what they asked for.
-    warn.enabled = e.enabled;
-    name.stringValue = ns(e.name);
-    name.textColor = e.present ? [NSColor labelColor]
-                               : [NSColor secondaryLabelColor];
-    // Eight characters of the id: enough to tell two bodies of the same model
-    // apart, short enough not to own the window.
-    who.stringValue =
-        [NSString stringWithFormat:@"%@ %s", ns(e.id.substr(0, 8)),
-                                   e.camera ? "camera" : "timecode box"];
-  }
-
-  if (entries.empty()) {
-    _configNote.stringValue =
-        @"No devices known yet. They appear here as soon as either daemon "
-        @"hears one.";
-  } else if (_confLoaded) {
-    _configNote.stringValue =
-        ns("Saved in " + _conf.path() +
-           ". A camera has to be enabled before anything will write to it; a "
-           "box is heard unless it is switched off here. Warn puts a blip in "
-           "the menu bar -- red when that device is out of sync, yellow when "
-           "it has been quiet too long to say -- and it is off everywhere "
-           "until asked for, so that the light still means something on the "
-           "day it comes on.");
-  } else {
-    _configNote.stringValue =
-        @"The configuration file could not be read, so everything is shown as "
-        @"enabled and a change here will not stick.";
-  }
 }
 
-- (void)rebuildConfigGrid:(NSArray<NSString*>*)keys {
-  while (_configGrid.numberOfRows > 0) [_configGrid removeRowAtIndex:0];
-
-  NSArray<NSTextField*>* header = @[
-    dim_label(@"On"), dim_label(@"Warn if out of sync"), dim_label(@"Device"),
-    dim_label(@""),
-  ];
-  for (NSTextField* f in header) {
-    f.font = [NSFont systemFontOfSize:NSFont.smallSystemFontSize];
-  }
-  // The first column's heading has to cover two different things -- a camera
-  // may be written to, a timecode box is listened to -- and no single word
-  // covers both without lying about one of them. "On" is the word people use
-  // for a checkbox anyway, and the note under the grid says what it means for
-  // each kind.
-  header[0].toolTip = @"Cameras: may octomancer set this one's clock. "
-                      @"Timecode boxes: is this one listened to at all.";
-  header[1].toolTip =
-      @"Show a blip in the menu bar when this device is too far from the "
-      @"bench, or when it has not been heard from recently enough to say.";
-  [_configGrid addRowWithViews:header];
-
-  for (NSString* key in keys) {
-    NSArray<NSView*>* cells = _configCells[key];
-    if (cells == nil) {
-      SEL onOff = @selector(deviceEnabledToggled:);
-      SEL warned = @selector(deviceWarnToggled:);
-      NSButton* on = [NSButton checkboxWithTitle:@"" target:self action:onOff];
-      NSButton* warn = [NSButton checkboxWithTitle:@""
-                                            target:self
-                                            action:warned];
-      on.toolTip = header[0].toolTip;
-      warn.toolTip = header[1].toolTip;
-      cells = @[ on, warn, label(@""), dim_label(@"") ];
-      _configCells[key] = cells;
-    }
-    [_configGrid addRowWithViews:cells];
-  }
-
-  NSMutableArray<NSString*>* stale = [NSMutableArray array];
-  for (NSString* key in _configCells) {
-    if (![keys containsObject:key]) [stale addObject:key];
-  }
-  [_configCells removeObjectsForKeys:stale];
-}
-
-// A device switched on or off, or asked to start warning.
-//
-// Written to the configuration file rather than sent over a socket, because
-// that file is the one a person owns and the daemons only ever read it -- see
-// camconf.h. The reload afterwards is what turns a saved line into behaviour
-// inside a quarter of a second rather than at the next restart.
-//
-// Both checkboxes come here. They set different keys on the same line and are
-// otherwise the same job -- write, complain and snap back if it did not take,
-// refresh -- and two copies of that would be two chances to get the
-// snapping-back wrong on one of them.
 - (void)deviceEnabledToggled:(id)sender {
   [self saveDeviceFlag:(NSButton*)sender warning:NO];
 }
 
 - (void)deviceWarnToggled:(id)sender {
   [self saveDeviceFlag:(NSButton*)sender warning:YES];
+}
+
+// Take a device off the list entirely: out of the configuration file, and out
+// of whichever daemon is holding what it has learned about it.
+//
+// Not the same as switching it off, and the alert says so, because the two are
+// one click apart and only one of them can be undone by clicking again. What
+// this throws away is history -- an hour of drift measurement for a box, a
+// camera body's RTC bias and apply delay, both of which took hours to converge.
+// What it does not throw away is the device: it is not blacklisted, so the next
+// advertisement puts it straight back on the list at its defaults. That is the
+// honest thing to promise, and it is also why removing something that is still
+// in the room is a temporary condition rather than a mistake.
+- (void)removeDevice:(id)sender {
+  const NSInteger which = ((NSButton*)sender).tag;
+  if (which < 0 || static_cast<size_t>(which) >= _configEntries.size()) return;
+  const ConfigEntry entry = _configEntries[static_cast<size_t>(which)];
+  NSString* name = ns(entry.name.empty() ? entry.id : entry.name);
+
+  NSAlert* alert = [[NSAlert alloc] init];
+  alert.alertStyle = NSAlertStyleWarning;
+  alert.messageText = [NSString stringWithFormat:@"Remove %@?", name];
+  NSMutableString* why = [NSMutableString string];
+  [why appendString:@"Its settings and everything measured about it are "
+                    @"deleted."];
+  [why appendString:entry.camera
+                        ? @" That means the learned RTC bias and apply delay "
+                          @"for this body, which took hours to settle."
+                        : @" That means its drift history, which needs hours "
+                          @"of listening to build up again."];
+  [why appendString:@"\n\nIt is not blocked: if it is still switched on and "
+                    @"in range it will reappear on this list, at its "
+                    @"defaults. To stop hearing about it instead, switch it "
+                    @"off."];
+  if (entry.camera) {
+    // The one part of removing a camera this program cannot do, said plainly
+    // rather than left for somebody to discover when pairing fails oddly.
+    [why appendString:@"\n\nThe Bluetooth pairing is not octomancer's to "
+                      @"undo. To unpair properly, remove this Mac from the "
+                      @"camera's Bluetooth setup menu, and remove the camera "
+                      @"in System Settings ▸ Bluetooth."];
+  }
+  alert.informativeText = why;
+  NSButton* go = [alert addButtonWithTitle:@"Remove"];
+  NSButton* cancel = [alert addButtonWithTitle:@"Cancel"];
+  // Return is Cancel. The default on a destructive question should be the one
+  // that changes nothing.
+  go.keyEquivalent = @"";
+  cancel.keyEquivalent = @"\r";
+  if ([alert runModal] != NSAlertFirstButtonReturn) return;
+
+  const std::string configPath = _status.daemon.config_path.empty()
+                                     ? octo::default_camera_config_path()
+                                     : _status.daemon.config_path;
+  const std::string controlPath = _controlSocket;
+  const std::string benchPath = _benchSocket;
+  const bool camera = entry.camera;
+  const std::string id = entry.id;
+
+  _busy = true;
+  dispatch_async(_queue, ^{
+    // The file first. A daemon that is asked to forget and then restarted
+    // would read the line straight back in, so the line has to go first for
+    // the two halves to end up agreeing however the order works out.
+    octo::CamConf conf;
+    std::string err;
+    bool ok = conf.load(configPath, &err);
+    if (ok) {
+      ok = camera ? conf.forget_camera(id, &err) : conf.forget_box(id, &err);
+    }
+
+    // Then the daemon holding what was learned. Reported but not fatal: the
+    // settings are already gone, and a daemon that did not answer will have
+    // nothing to say about the device once it restarts either.
+    std::string reply, derr;
+    const std::string ask =
+        camera ? "forget camera=" + id : "forget " + id;
+    const bool told =
+        octo::query(camera ? controlPath : benchPath, ask, &reply, &derr, 5.0);
+
+    dispatch_async(dispatch_get_main_queue(), ^{
+      self->_busy = false;
+      if (!ok) {
+        [self complain:@"Could not remove that device."
+                  info:[NSString stringWithFormat:@"%@\n\n%@", ns(err),
+                                                  ns(configPath)]];
+        return;
+      }
+      // The selection pointed at something that no longer exists; letting the
+      // picker keep it would leave the page showing a device it can no longer
+      // find and cannot act on.
+      if (camera) {
+        self->_cameraSelectedId = nil;
+      } else {
+        self->_boxSelectedId = nil;
+      }
+      self->_activity.stringValue =
+          told ? [NSString stringWithFormat:@"Removed %@.", name]
+               : [NSString stringWithFormat:
+                               @"Removed %@ from the configuration. The daemon "
+                               @"did not answer, so what it had learned is "
+                               @"still in memory until it restarts.",
+                               name];
+      self->_activity.textColor = told ? [NSColor secondaryLabelColor]
+                                       : [NSColor systemOrangeColor];
+      [self refresh];
+    });
+  });
 }
 
 - (void)saveDeviceFlag:(NSButton*)box warning:(BOOL)warning {
@@ -2248,7 +2690,7 @@ struct ScanHit {
               @"A camera takes one connection at a time, so this may fail as "
               @"\"could not connect\", which is the least informative way it "
               @"can fail. Stopping it first is the reliable order — it has to "
-              @"be started again afterwards, from the Configuration page.",
+              @"be started again afterwards, from the System page.",
               octo::agent_program(octo::Agent::kSync), state.pid];
     });
   });
@@ -2482,7 +2924,7 @@ struct ScanHit {
 // `launchctl bootout`, which unloads the agent but leaves the plist in
 // ~/Library/LaunchAgents, so an installed agent is back at the next login.
 // Taking the plist away is `agent_uninstall`, that is a different decision, and
-// the "Start at boot" checkbox on the Configuration page is where it is made.
+// the "Start at boot" checkbox on the System page is where it is made.
 //
 // The daemons go down before this process does. Quitting first and stopping
 // afterwards would leave nothing on screen to say that a daemon refused.

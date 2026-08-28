@@ -431,26 +431,52 @@ programs answering that question separately would answer it differently
 eventually, and on the day they disagreed neither would be obviously the wrong
 one.
 
-**Camera** is the page about one body: a camera picker, the live figures, the
-permission checkbox, a timecode-source picker and a **Sync Now** button. The
-permission switch sits next to the controls it governs rather than in a
-preferences pane, because "why will this not sync?" and "let it sync" should be
-the same glance.
+**Details** is the page about one device at a time, in two halves with the same
+shape: a picker, the readings, then the settings. Somebody should not have to
+learn two layouts to ask the same question about two kinds of device.
 
-**Configuration** lists every device this Mac knows of, whether or not anything
-is hearing it at the moment, each with two checkboxes. The first is `enabled`
-for a timecode box and `writes` for a camera; the second is **Warn if out of
-sync**, which is the same `warn` the command line sets. It is built from the two
-daemons *and* from `cameras.conf`, and the file is the half that matters here —
-a device somebody switched off has stopped appearing anywhere else, so the only
-way back is a checkbox with its name on it. A switched-off device has its warn
-box greyed rather than cleared: it could not warn about anything while it is off
-the list, but what somebody asked for is still in the file and comes back with
-it. Below the list are **Start**, **Stop** and **Restart** for the daemons, what
-launchd currently thinks of each and how long each has been up, and **Start at
-boot**.
+The camera half has the live figures, a timecode-source picker, and a **Jam
+Sync** button — the operation's real name, and this window is the one place the
+program speaks to the people who do it rather than about them. The timecode-box
+half has what an advertisement carries and nothing else: its timecode, what it
+is counting in, how far it is from the canonical time, how far it is from this
+Mac, its drift, its signal and when it was last heard. It has no controls
+because there are none to give — nothing here can set a Tentacle's clock, only
+the Tentacle app can re-jam one, and the page says so rather than leaving the
+gap to be read as unfinished.
 
-**Pair Camera...** on the same page opens a sheet that runs `octomancer-sync`'s
+Both halves carry the same two settings: **Enabled**, which is `writes` for a
+camera and `enabled` for a box, and **Warn if out of sync**, the same `warn` the
+command line sets. They sit under the readings they explain, because "why will
+this not sync?" and "let it sync" should be the same glance. A switched-off
+device has its warn box greyed rather than cleared: it could not warn about
+anything while it is off the list, but what somebody asked for is still in the
+file and comes back with it.
+
+Both pickers list every device this Mac knows of — from the two daemons *and*
+from `cameras.conf` — whether or not anything is hearing it. The file is the
+half that matters: a device somebody switched off has stopped appearing anywhere
+else, so a picker built from the merged view would have no entry for the one
+device somebody most likely came here to switch back on.
+
+**Remove** is on both halves and is not the same thing as switching a device
+off, which is the reason it asks first. Switching off is a decision that gets
+remembered, and remembering it is exactly what keeps a device on the page
+forever. Remove deletes the memory instead — the settings, and whatever the
+owning daemon had learned: an hour of drift history for a box, a camera body's
+RTC bias and apply delay. Nothing is blacklisted, so a device still switched on
+and in range comes back at its defaults, which the alert says out loud. For a
+camera it also says the one part octomancer cannot do: the Bluetooth pairing is
+undone in the camera's own setup menu and in System Settings ▸ Bluetooth, not
+here. `octomancer remove --box NAME` and `--camera ID` do the same thing from a
+terminal.
+
+**System** is what is true of the whole installation rather than of any one
+device: **Start**, **Stop** and **Restart** for the daemons, what launchd
+currently thinks of each and how long each has been up, **Start at boot**, and
+pairing.
+
+**Pair Camera...** opens a sheet that runs `octomancer-sync`'s
 own scan and pair, and shows what the tool says as it goes, verdict and all.
 The six digits are on the camera's screen and macOS asks for them; nothing in
 this window ever sees them. If the sync daemon is running the sheet says so

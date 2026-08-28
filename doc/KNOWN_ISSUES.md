@@ -128,30 +128,57 @@ setting, look for a phone that is connected to it, and carry it to the Mac.
 
 ## The window
 
-### None of the new interface has been watched running
+### Most of the interface has not been watched running
 
-The app has four tabs now -- Devices, Camera, Configuration, Notifications --
-with the Devices page drawing the same `build_device_view()` the terminal
-draws, the Configuration page listing every known device with an enable/disable
-checkbox alongside the daemon controls and their uptimes, and a sheet that
-drives `octomancer-sync --scan-only` and `--pair` through `NSTask`. It
-compiles, and it has been launched once far enough to see a window. Nothing
-past that has been watched.
+The app has four tabs -- Devices, Details, System, Notifications -- with the
+Devices page drawing the same `build_device_view()` the terminal draws, the
+Details page carrying both halves of the per-device view and every per-device
+setting, and a sheet that drives `octomancer-sync --scan-only` and `--pair`
+through `NSTask`. It compiles and it runs; the Devices and Details pages have
+been seen with real data on them. Most of the rest has not been watched.
 
-Three parts are reasoned about rather than observed. The tab layout is sized
-from what the pages add up to, and no page has been seen at a size somebody
-dragged it to. The Devices grid keeps its row views across a device
-disappearing and rebuilds only when the set of devices changes, so the case it
-exists for -- a camera going and coming back without the page flinching -- is
-the case nobody has watched. And the pairing sheet reads the tool's output as
+The pages used to be pinned straight into their tab, and an `NSView` does not
+clip its subviews, so a page taller than the tab drew past the bottom of it --
+over the window, and outside the rectangle AppKit invalidates when the selected
+tab changes. The overflow was therefore never erased and two pages ended up
+legibly on top of each other. Each page is in a scroll view now, which clips,
+and the tab is sized from the tallest page measured at the width it will be
+given. That was reported from a running window and the fix has been seen to
+build; it has not been watched across every pair of tabs.
+
+Four parts are reasoned about rather than observed. No page has been seen at a
+size somebody dragged it to. The Devices grid keeps its row views across a
+device disappearing and rebuilds only when the set of devices changes, so the
+case it exists for -- a camera going and coming back without the page flinching
+-- is the case nobody has watched. The pairing sheet reads the tool's output as
 it arrives, parses the scan list out of it, and has to kill the child when the
-sheet closes.
+sheet closes. And **Remove** has never been clicked.
 
-**What would settle it:** open the window with both daemons running, watch the
+**What would settle it:** open the window with both daemons running, switch
+between all four tabs at a window height that makes a page scroll, watch the
 Devices page for a few minutes while a timecode box is disabled and re-enabled
-in Configuration and a camera comes and goes, then open the pairing sheet,
-search, pair, and close the sheet mid-search -- and check with `ps` that no
+on Details and a camera comes and goes, then open the pairing sheet, search,
+pair, and close the sheet mid-search -- and check with `ps` that no
 `octomancer-sync` was left behind.
+
+### Removing a device has not been done to a device that was there
+
+`Registry::forget`, `CamDb::forget`, `CamConf::forget_camera` and
+`forget_box` are each unit-tested, including that the deletion survives
+reopening the camera database, which is the part an append-only log makes
+awkward. The wire path has been exercised end to end from the terminal: a
+`box test-fake` line was added to `cameras.conf` by hand, `octomancer remove
+--box test-fake` deleted it and octomancerd answered the `forget`, and the
+file came back byte-identical to what it had been.
+
+What has not been done is removing a device that is actually in the registry,
+because doing it on the bench in this room would delete a real box's drift
+history -- hours of listening -- to prove something the unit test already
+pins. So the erase-then-reappear cycle has been reasoned about, not watched.
+
+**What would settle it:** on a rig whose history is expendable, remove a box
+that is advertising, watch it vanish from `octomancer status` and come back
+within a second or two with `samples` at 1 and no drift figure.
 
 ## Errors that are still discarded
 

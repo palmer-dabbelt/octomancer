@@ -229,6 +229,10 @@ DeviceView build_device_view(const DeviceSources& from) {
       r.resolution = d.resolution;
       r.has_drift = d.has_drift;
       r.drift_ppm = d.drift_ppm;
+      if (!d.has_drift && d.samples > 0) {
+        r.has_drift_span = true;
+        r.drift_span_s = d.drift_span;
+      }
       r.has_median = d.has_time;
       r.median_offset_s = d.median_offset;
       r.alerting = d.alerting;
@@ -466,8 +470,13 @@ std::string render_devices(const DeviceView& v, bool verbose, bool color) {
       const std::string tc = r.timecode.empty() ? "--" : r.timecode;
       const std::string med =
           r.has_median ? offset_text(r.median_offset_s) : std::string("--");
+      // The tilde is there so nobody reads the span as a drift figure. It
+      // says how long the box has been watched, which is the reason the
+      // column is empty rather than a measurement of anything.
       const std::string drift =
-          r.has_drift ? fmt("%+.1fppm", r.drift_ppm) : "--";
+          r.has_drift       ? fmt("%+.1fppm", r.drift_ppm)
+          : r.has_drift_span ? "~" + format_age(r.drift_span_s)
+                             : "--";
       const std::string rate = r.resolution.empty() ? "--" : r.resolution;
       out += fmt(" %s%5s%s %s%-15.15s%s %s%10s%s %s%9s%s %s%.11s%s",
                  r.has_rssi ? "" : st.dim, rssi.c_str(), st.off,

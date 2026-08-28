@@ -324,6 +324,16 @@ quiet for minutes at a time. It is also how the camera in these examples was
 diagnosed: never heard above -75 dBm even in the same room, about 20 dB quieter
 than everything else in the rig.
 
+On a terminal the colour carries two rules and no decoration. A device nobody
+is hearing is dimmed all the way across, because every figure on its row is a
+memory rather than a measurement — the age is how long ago, the signal is how
+loud it was then, the timecode is what it said at the time. Half a row dimmed
+would read as a bug in the table; none of it dimmed reads as a device that is
+fine. The headings are the one row that is always true, so they are drawn in
+their own colour rather than in the ink that means "do not trust this number".
+Piped to a file it is all plain text, and the `!` and `?` markers are
+characters rather than colours so nothing that matters is lost on the way.
+
 That is the whole of it, deliberately. There is no version, no pair of daemon
 lines and no arithmetic above the table, because none of that changes between
 one run and the next: the command cannot answer at all unless the daemons are

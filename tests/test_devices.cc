@@ -99,6 +99,36 @@ std::string strip_escapes(const std::string& s) {
   return out;
 }
 
+// The one line of a rendering that mentions `name`, escapes and all.
+std::string row_for(const std::string& out, const std::string& name) {
+  const size_t at = out.find(name);
+  if (at == std::string::npos) return std::string();
+  const size_t start = out.rfind('\n', at);
+  const size_t end = out.find('\n', at);
+  return out.substr(start == std::string::npos ? 0 : start + 1,
+                    end == std::string::npos ? std::string::npos
+                                             : end - (start + 1));
+}
+
+// A row is written as a run of <escape><text><reset> fields, so splitting on
+// the reset hands them back in column order: 0 name, 1 age, 2 offset, 3 link,
+// 4 signal, and the verbose ones after that.
+std::vector<std::string> columns_of(const std::string& row) {
+  std::vector<std::string> out;
+  size_t at = 0;
+  while (true) {
+    const size_t end = row.find("\033[0m", at);
+    if (end == std::string::npos) break;
+    out.push_back(row.substr(at, end - at));
+    at = end + 4;
+  }
+  return out;
+}
+
+bool dimmed(const std::string& column) {
+  return column.find("\033[2m") != std::string::npos;
+}
+
 std::string temp_path(const char* tag) {
   return "/tmp/octo-devices-" + std::to_string(getpid()) + "-" + tag + ".conf";
 }
@@ -226,6 +256,49 @@ void test_a_silent_box_is_listed_but_left_out_of_the_arithmetic() {
 // the header is assembled conditionally now, and the failure mode of building
 // a string that might be empty and then appending a separator to it is a file
 // that opens with a blank line nobody put there.
+// Colour carries meaning in this table, so which colour lands where is worth
+// pinning rather than eyeballing once.
+//
+// Two rules. The headings are the one row on the page that is always true, so
+// they are not drawn in the ink that means "do not trust this number" -- they
+// were dim, which said the opposite of what they are. And a row nobody is
+// hearing is dim all the way across, because every figure on it is a memory:
+// the age is how long ago, the signal is how loud it was then, the timecode is
+// what it said at the time. Half a row dim would read as a bug in the table;
+// none of it dim reads as a device that is fine.
+void test_colour_says_which_numbers_are_memories() {
+  Snapshot snap;
+  snap.device.push_back(box("A", "Tentacle_A", true, 0.000));
+  DeviceSnapshot gone = box("B", "Tentacle_B", false, 0.010);
+  gone.age = 3600.0;
+  snap.device.push_back(gone);
+  const DeviceView v = view_of(snap, nullptr);
+
+  for (int verbose = 0; verbose < 2; ++verbose) {
+    const std::string out = octo::render_devices(v, verbose != 0, true);
+
+    // Cyan, and specifically not the dim used for a stale figure.
+    const size_t head = out.find("DEVICE");
+    CHECK(head >= 5);
+    if (head >= 5) CHECK(out.compare(head - 5, 5, "\033[36m") == 0);
+
+    const std::vector<std::string> heard = columns_of(row_for(out, "Tentacle_A"));
+    const std::vector<std::string> quiet = columns_of(row_for(out, "Tentacle_B"));
+    CHECK(heard.size() >= 5);
+    CHECK(quiet.size() == heard.size());
+    if (heard.size() < 5 || quiet.size() < 5) continue;
+
+    // The two the eye goes to first, named because they are what this is for.
+    CHECK(!dimmed(heard[1]));  // age
+    CHECK(!dimmed(heard[4]));  // signal
+    CHECK(dimmed(quiet[1]));
+    CHECK(dimmed(quiet[4]));
+
+    // And the rest of the row with them, every column of it.
+    for (size_t i = 0; i < quiet.size(); ++i) CHECK(dimmed(quiet[i]));
+  }
+}
+
 void test_the_brief_view_is_the_table_and_nothing_else() {
   Snapshot snap;
   snap.device.push_back(box("A", "Tentacle_A", true, 0.000));
@@ -878,6 +951,7 @@ int main() {
   test_canonical_is_a_median_of_enabled_live_boxes();
   test_a_silent_box_is_listed_but_left_out_of_the_arithmetic();
   test_the_brief_view_is_the_table_and_nothing_else();
+  test_colour_says_which_numbers_are_memories();
   test_offsets_are_against_canonical_not_this_mac();
   test_no_live_boxes_means_no_offsets_at_all();
   test_a_held_camera_reads_as_held();

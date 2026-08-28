@@ -25,15 +25,21 @@ struct Style {
   const char* red;
   const char* yellow;
   const char* green;
+  // The column headings, and nothing else. They were dim, which is the same
+  // ink the table uses for "this number is not to be trusted" -- so the one
+  // row on the page that is always true was drawn like the rows that are not.
+  // Cyan rather than blue: blue on a dark terminal is where readable colours
+  // go to hide.
+  const char* head;
   const char* off;
 };
 
 Style style_for(bool color) {
   if (color) {
-    return {"\033[2m", "\033[1m", "\033[31m",
-            "\033[33m", "\033[32m", "\033[0m"};
+    return {"\033[2m",  "\033[1m", "\033[31m", "\033[33m",
+            "\033[32m", "\033[36m", "\033[0m"};
   }
-  return {"", "", "", "", "", ""};
+  return {"", "", "", "", "", "", ""};
 }
 
 std::string fmt(const char* format, ...) __attribute__((format(printf, 1, 2)));
@@ -440,10 +446,10 @@ std::string render_devices(const DeviceView& v, bool verbose, bool color) {
   // the two share a prefix rather than each spelling out its own. Two tables
   // that can drift apart are two tables somebody has to learn separately, and
   // the whole point of one renderer is that there is only ever one to learn.
-  out += fmt("%s%-14s %6s %10s %-11s %5s%s", st.dim, "DEVICE", "AGE", "OFFSET",
-             "LINK", "RSSI", st.off);
+  out += fmt("%s%-14s %6s %10s %-11s %5s%s", st.head, "DEVICE", "AGE",
+             "OFFSET", "LINK", "RSSI", st.off);
   if (verbose) {
-    out += fmt("%s %-15s %10s %9s %s%s", st.dim, "TIMECODE", "MEDIAN", "DRIFT",
+    out += fmt("%s %-15s %10s %9s %s%s", st.head, "TIMECODE", "MEDIAN", "DRIFT",
                "RATE", st.off);
   }
   out += "\n";
@@ -474,6 +480,18 @@ std::string render_devices(const DeviceView& v, bool verbose, bool color) {
         r.has_offset ? offset_text(r.offset_s) : std::string("--");
     const char* link_colour = link_is_live(r.link) ? st.green : st.dim;
 
+    // A row nobody is hearing is drawn dim all the way across, and that is one
+    // rule rather than a column-by-column decision. Every number on such a row
+    // is a memory: the age is how long ago, the signal is how loud it was
+    // then, the timecode is what it said at the time. Drawing half of them as
+    // though they were current and half as though they were not would read as
+    // a bug in the table, and drawing all of them bright reads as a device
+    // that is fine.
+    //
+    // `live` is a prefix, not a replacement, so a column with nothing in it is
+    // still dim on a row that is otherwise being heard.
+    const char* live = link_is_live(r.link) ? "" : st.dim;
+
     // Signal is in both views. It is the column that answers "why is this one
     // not being heard" without anybody having to go and look at the box, and
     // that question comes up far too often for the answer to live behind a
@@ -483,10 +501,11 @@ std::string render_devices(const DeviceView& v, bool verbose, bool color) {
     const std::string rssi = r.has_rssi ? fmt("%d", r.rssi) : "--";
     out += fmt("%s%-14.14s%s %s%6s%s %s%10s%s %s%-11s%s %s%5s%s",
                name_colour, label.c_str(), st.off,
-               r.has_age ? "" : st.dim, age.c_str(), st.off,
+               r.has_age && *live == '\0' ? "" : st.dim, age.c_str(), st.off,
                r.has_offset ? "" : st.dim, off.c_str(), st.off,
                link_colour, link_state_name(r.link), st.off,
-               r.has_rssi ? "" : st.dim, rssi.c_str(), st.off);
+               r.has_rssi && *live == '\0' ? "" : st.dim, rssi.c_str(),
+               st.off);
 
     if (verbose) {
       const std::string tc = r.timecode.empty() ? "--" : r.timecode;
@@ -501,10 +520,10 @@ std::string render_devices(const DeviceView& v, bool verbose, bool color) {
                              : "--";
       const std::string rate = r.resolution.empty() ? "--" : r.resolution;
       out += fmt(" %s%-15.15s%s %s%10s%s %s%9s%s %s%.11s%s",
-                 r.timecode.empty() ? st.dim : "", tc.c_str(), st.off,
-                 r.has_median ? "" : st.dim, med.c_str(), st.off,
-                 r.has_drift ? "" : st.dim, drift.c_str(), st.off,
-                 r.resolution.empty() ? st.dim : "", rate.c_str(), st.off);
+                 r.timecode.empty() ? st.dim : live, tc.c_str(), st.off,
+                 r.has_median ? live : st.dim, med.c_str(), st.off,
+                 r.has_drift ? live : st.dim, drift.c_str(), st.off,
+                 r.resolution.empty() ? st.dim : live, rate.c_str(), st.off);
     }
     out += "\n";
   }

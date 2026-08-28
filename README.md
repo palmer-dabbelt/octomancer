@@ -312,15 +312,16 @@ octomancer 0.1.0
   octomancerd      answering, up 1h01m
   octomancer-sync  answering, up 1h01m
 
-canonical time  -1.773s vs this Mac,  spread +2.1ms across 4 timecode boxes
+canonical time  -1.773s vs this Mac,  spread +2.1ms across 4 timecode boxes on the air
+1 timecode box off the air: listed below, but not voting on the canonical time and not in the spread
 
 DEVICE            AGE     OFFSET LINK
 BMPCC              1s     +1.3ms on the air
 F55                2s     -0.8ms on the air
 FS5                4s     +0.8ms on the air
 Krysta             1s     -0.8ms on the air
-FS7             3m02s     -0.5ms off the air
-A:1EAE18A7     56m32s     -4.7ms off the air
+FS7             3m02s         -- off the air
+A:1EAE18A7     56m32s         -- off the air
 ```
 
 The offsets in that table are **not** against this Mac. Everything either
@@ -331,6 +332,18 @@ in the header, and each row carries the device's distance from the *canonical*
 time: the median across the live, enabled timecode boxes. Four boxes nearly two
 seconds away from a laptop that has not seen an NTP server all week are still
 in millisecond agreement with each other, and this is the view that says so.
+
+`OFFSET` is blank for a device nobody is hearing, and the blank is deliberate.
+A box that has gone quiet goes on free-running while the canonical time goes on
+moving, so the gap between the two widens for as long as the silence lasts:
+`FS7` above would read tens of milliseconds out after an hour away, having done
+nothing whatsoever to deserve it. That number is a measurement of the silence,
+not of a sync error, and putting it in the same column as the live boxes on a
+page whose spread is two milliseconds invites exactly one conclusion — that the
+spread must be wrong. It is not. A box off the air is out of the median and out
+of the spread, which is what the second header line exists to say out loud, and
+the last raw thing it said survives in the `MEDIAN` column under `--verbose`,
+where it is quoted against this Mac and so does not rot.
 
 The boxes come first and the cameras after, and within each the devices being
 heard come before the ones that are not: `FS7` above has not been heard for

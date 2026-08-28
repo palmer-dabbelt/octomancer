@@ -104,13 +104,19 @@ WarnLevel warn_level_for(const DeviceRow& r) {
   if (r.link != LinkState::kHeld && (!r.has_age || r.age_s > kWarnSilence)) {
     return WarnLevel::kUnsure;
   }
-  // No offset means either that there is no canonical time to measure this
-  // against or that the device has not said what time it thinks it is. Either
-  // way there is nothing to have an opinion about, and staying quiet here
-  // would amount to saying it is fine.
-  if (!r.has_offset) return WarnLevel::kUnsure;
-  if (std::fabs(r.offset_s) > kWarnOffset) return WarnLevel::kOutOfSync;
-  return WarnLevel::kNone;
+  if (r.has_offset) {
+    return std::fabs(r.offset_s) > kWarnOffset ? WarnLevel::kOutOfSync
+                                               : WarnLevel::kNone;
+  }
+  // No offset, and the age rule above has already decided the silence is
+  // short enough to live with. If the reason is that the device told us a
+  // time and we are simply not hearing it this second, that is the dropout we
+  // just agreed to tolerate, and lighting it up here would undo the
+  // tolerance -- it would mean a box going quiet for a minute is treated
+  // exactly like one gone for an hour. Anything else means there is no
+  // canonical time, or the device has never said what time it thinks it is,
+  // and staying quiet about that would amount to saying it is fine.
+  return r.offset_is_stale ? WarnLevel::kNone : WarnLevel::kUnsure;
 }
 
 // The marker a warned row carries in the DEVICE column. One character either
@@ -205,10 +211,18 @@ DeviceView build_device_view(const DeviceSources& from) {
       r.link = d.live ? LinkState::kOnTheAir : LinkState::kOffTheAir;
       r.has_age = true;
       r.age_s = d.age;
+      // Only while we are hearing it. An old reading minus a current
+      // canonical time is not a stale offset, it is a wrong one, and it grows
+      // for as long as the box stays quiet. See DeviceRow::has_offset.
       if (v.has_canonical && d.has_time) {
-        r.has_offset = true;
-        r.offset_s = d.median_offset - v.canonical_offset_s;
+        if (d.live) {
+          r.has_offset = true;
+          r.offset_s = d.median_offset - v.canonical_offset_s;
+        } else {
+          r.offset_is_stale = true;
+        }
       }
+      if (!d.live) ++v.silent;
       r.has_rssi = d.rssi != 0;
       r.rssi = d.rssi;
       if (d.has_time) r.timecode = d.display;
@@ -268,9 +282,16 @@ DeviceView build_device_view(const DeviceSources& from) {
       // disagree about which boxes are live, and only this one knows which
       // boxes a person switched off. Close enough to show on one line,
       // not close enough to subtract things from.
+      //
+      // Held or on the air only, for the same reason a silent box has no
+      // offset: the error from the last cycle is not the camera's error now.
       if (v.has_canonical && c.has_error) {
-        r.has_offset = true;
-        r.offset_s = c.error_s;
+        if (link_is_live(r.link)) {
+          r.has_offset = true;
+          r.offset_s = c.error_s;
+        } else {
+          r.offset_is_stale = true;
+        }
       }
       r.has_rssi = c.has_rssi;
       r.rssi = c.rssi;
@@ -359,7 +380,7 @@ std::string render_devices(const DeviceView& v, bool verbose, bool color) {
   if (v.has_canonical) {
     const char* spread_colour = v.canonical_spread_s > 0.100 ? st.yellow : "";
     out += fmt("canonical time  %s vs this Mac,  spread %s%s%s across %d"
-               " timecode box%s\n",
+               " timecode box%s on the air\n",
                offset_text(v.canonical_offset_s).c_str(), spread_colour,
                offset_text(v.canonical_spread_s).c_str(),
                spread_colour[0] == '\0' ? "" : st.off, v.contributing,
@@ -371,6 +392,15 @@ std::string render_devices(const DeviceView& v, bool verbose, bool color) {
   if (verbose) {
     out += fmt("%scanonical source: %s%s\n", st.dim,
                v.canonical_source.c_str(), st.off);
+  }
+  if (v.has_canonical && v.silent > 0) {
+    // Said out loud rather than left to be inferred from the table. The count
+    // in the line above is the answer to "how many boxes agreed on this time",
+    // and without this line the only way to find out why it is smaller than
+    // the table is to count the rows and subtract.
+    out += fmt("%s%d timecode box%s off the air: listed below, but not voting"
+               " on the canonical time and not in the spread%s\n",
+               st.dim, v.silent, v.silent == 1 ? "" : "es", st.off);
   }
   if (v.hidden > 0) {
     out += fmt("%s%d device%s hidden: disabled in the configuration%s\n",

@@ -65,6 +65,14 @@ CameraStatus camera(const std::string& id, const std::string& name) {
   return c;
 }
 
+DeviceView view_of(const Snapshot& snap, const CamConf* conf) {
+  DeviceSources from;
+  from.bench = &snap;
+  from.conf = conf;
+  from.now_wall = kNow;
+  return octo::build_device_view(from);
+}
+
 const DeviceRow* find_row(const DeviceView& v, const std::string& name) {
   for (const DeviceRow& r : v.rows) {
     if (r.name == name) return &r;
@@ -157,6 +165,56 @@ void test_canonical_is_a_median_of_enabled_live_boxes() {
 // The point of the whole module: this Mac's clock cancels out. Both boxes are
 // half a minute from the host and ten milliseconds apart, and it is the ten
 // milliseconds that get rendered.
+// The rig as it actually stands: four boxes on the bench and a fifth that
+// wandered off. The fifth is still listed -- somebody wants to know it is
+// missing -- but nothing it said an hour ago is allowed anywhere near the
+// arithmetic, and the column that would quote it is left blank.
+//
+// The trap this pins down is subtle enough to have been read as a bug in the
+// spread. A box quiet for two hours free-runs against this Mac the whole
+// time, so `median_offset - canonical` grows steadily whatever the box was
+// doing when it left. Printing that in the same column as the live boxes puts
+// a forty-millisecond number on a page whose spread is eight, and the only
+// available conclusion is that the spread must be wrong.
+void test_a_silent_box_is_listed_but_left_out_of_the_arithmetic() {
+  Snapshot snap;
+  snap.device.push_back(box("bmpcc", "BMPCC", true, -1.733));
+  snap.device.push_back(box("f55", "F55", true, -1.741));
+  snap.device.push_back(box("fs5", "FS5", true, -1.736));
+  snap.device.push_back(box("krysta", "Krysta", true, -1.739));
+  DeviceSnapshot gone = box("fs7", "FS7", false, -1.778);
+  gone.age = 6600.0;
+  snap.device.push_back(gone);
+
+  const DeviceView v = view_of(snap, nullptr);
+
+  // Four votes, and the median and spread of exactly those four. Were the
+  // fifth in, the spread would be 45ms rather than 8.
+  CHECK_EQ(v.contributing, 4);
+  CHECK_NEAR(v.canonical_offset_s, -1.7375, 1e-9);
+  CHECK_NEAR(v.canonical_spread_s, 0.008, 1e-9);
+  CHECK_EQ(v.silent, 1);
+  CHECK_EQ(v.hidden, 0);  // not the same thing, and not counted as one
+
+  // Listed, and honest about why there is no number.
+  const DeviceRow* row = find_row(v, "FS7");
+  CHECK(row != nullptr);
+  CHECK(row->link == LinkState::kOffTheAir);
+  CHECK(!row->has_offset);
+  CHECK(row->offset_is_stale);
+  CHECK(!row->contributes);
+  // The raw reading survives, because it is quoted against this Mac and so
+  // does not drift out from under itself the way the difference does.
+  CHECK(row->has_median);
+  CHECK_NEAR(row->median_offset_s, -1.778, 1e-9);
+
+  const std::string text = strip_escapes(octo::render_devices(v, false, false));
+  CHECK(contains(text, "across 4 timecode boxes on the air"));
+  CHECK(contains(text, "1 timecode box off the air"));
+  // The number that started all this, and it is nowhere on the page.
+  CHECK(!contains(text, "40.5ms"));
+}
+
 void test_offsets_are_against_canonical_not_this_mac() {
   Snapshot snap;
   snap.device.push_back(box("A", "Tentacle_A", true, 1000.000));
@@ -536,14 +594,6 @@ void test_link_state_names() {
 // about kit nobody claimed, and never dressing an old reading up as a current
 // one. Red is a measurement we do not like. Yellow is the absence of one.
 
-DeviceView view_of(const Snapshot& snap, const CamConf* conf) {
-  DeviceSources from;
-  from.bench = &snap;
-  from.conf = conf;
-  from.now_wall = kNow;
-  return octo::build_device_view(from);
-}
-
 // Nobody asked, so nothing is said -- however wrong the device is. This is
 // the setting's whole reason for existing: an indicator that lights up about
 // every box in range is one people stop reading.
@@ -614,8 +664,10 @@ void test_a_stale_reading_is_yellow_however_good_it_looked() {
 
   DeviceView v = view_of(snap, &conf);
   const DeviceRow* row = find_row(v, "Tentacle_C");
-  CHECK(row->has_offset);
-  CHECK_NEAR(row->offset_s, 0.0, 1e-9);  // a perfect number, and worthless
+  // Withheld rather than shown and disbelieved. It was a perfect number an
+  // hour ago and it is worthless now, and the column has no way to say so.
+  CHECK(!row->has_offset);
+  CHECK(row->offset_is_stale);
   CHECK(row->warn_level == WarnLevel::kUnsure);
   CHECK(v.worst_warning == WarnLevel::kUnsure);
   CHECK_EQ(v.warned_unsure, 1);
@@ -774,6 +826,7 @@ void test_the_table_marks_and_names_the_warned() {
 
 int main() {
   test_canonical_is_a_median_of_enabled_live_boxes();
+  test_a_silent_box_is_listed_but_left_out_of_the_arithmetic();
   test_offsets_are_against_canonical_not_this_mac();
   test_no_live_boxes_means_no_offsets_at_all();
   test_a_held_camera_reads_as_held();

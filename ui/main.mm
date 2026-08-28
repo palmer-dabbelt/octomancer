@@ -1710,8 +1710,8 @@ struct ScanHit {
   if (view.has_canonical) {
     _canonicalLine.stringValue =
         [NSString stringWithFormat:
-                      @"Canonical time: %d timecode box%s from %s, %@ from this Mac, "
-                      @"spread %.0f ms",
+                      @"Canonical time: %d timecode box%s on the air, via %s, "
+                      @"%@ from this Mac, spread %.0f ms",
                       view.contributing, view.contributing == 1 ? "" : "es",
                       view.canonical_source.c_str(),
                       offset_text(view.canonical_offset_s),
@@ -1795,16 +1795,25 @@ struct ScanHit {
             ? @"Nothing to show yet. A timecode box has to be advertising, or a "
               @"camera enabled in Configuration, before it appears here."
             : @"Neither daemon is answering, so nothing here knows anything.";
-  } else if (view.hidden > 0) {
-    // Counted rather than dropped silently: a bench that quietly lists fewer
-    // boxes than are in the room is not an honest bench.
-    _hiddenLine.stringValue =
-        [NSString stringWithFormat:
-                      @"%d device%s switched off and left out of this list. "
-                      @"Configuration has them.",
-                      view.hidden, view.hidden == 1 ? "" : "s"];
   } else {
-    _hiddenLine.stringValue = @"";
+    // Counted rather than dropped silently: a bench that quietly lists fewer
+    // boxes than are in the room is not an honest bench, and neither is one
+    // that counts four boxes in the header while showing six rows without
+    // saying which two did not count.
+    NSMutableArray<NSString*>* notes = [NSMutableArray array];
+    if (view.has_canonical && view.silent > 0) {
+      [notes addObject:[NSString stringWithFormat:
+                            @"%d timecode box%s off the air, so not voting on "
+                            @"the canonical time and not in the spread.",
+                            view.silent, view.silent == 1 ? "" : "es"]];
+    }
+    if (view.hidden > 0) {
+      [notes addObject:[NSString stringWithFormat:
+                            @"%d device%s switched off and left out of this "
+                            @"list. Configuration has them.",
+                            view.hidden, view.hidden == 1 ? "" : "s"]];
+    }
+    _hiddenLine.stringValue = [notes componentsJoinedByString:@" "];
   }
 }
 

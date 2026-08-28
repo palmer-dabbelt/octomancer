@@ -91,8 +91,24 @@ struct DeviceRow {
   // Against the canonical time, never against this Mac. Unset when there is no
   // canonical time to be against, because a distance from a time that does not
   // exist is not a small number -- it is not a number at all.
+  //
+  // Also unset for a device we are not currently hearing. Its last reading was
+  // taken against a canonical time that has moved on since, so subtracting
+  // today's canonical time from it measures mostly the drift that piled up
+  // while nobody was listening: a box quiet for two hours reads tens of
+  // milliseconds out on that arithmetic alone, and the column would be
+  // reporting the length of the silence as though it were a sync error. The
+  // last raw reading survives in `median_offset_s`, which is quoted against
+  // this Mac and so does not rot the same way.
   bool has_offset = false;
   double offset_s = 0.0;
+  // Why the offset is missing, which is not the same question as whether it
+  // is. Set when the device did tell us a time and we are declining to quote
+  // the distance because we are not hearing it now; clear when it has never
+  // said one at all. A short dropout and a device that will not say what time
+  // it thinks it is both leave the column blank, and they deserve opposite
+  // reactions.
+  bool offset_is_stale = false;
 
   bool has_age = false;   // seconds since we last heard from it
   double age_s = 0.0;
@@ -140,6 +156,12 @@ struct DeviceView {
   // than dropped silently: "3 devices hidden" is honest, and a bench that
   // quietly lists fewer boxes than are in the room is not.
   int hidden = 0;
+  // Enabled timecode boxes we are not hearing. They still get a row, but they
+  // did not vote and are not in the spread -- a box that has gone quiet cannot
+  // say what time it thinks it is *now*, and the last thing it said is not an
+  // answer to that question. Counted for the same reason `hidden` is: so the
+  // header can explain why fewer boxes are voting than are on the page.
+  int silent = 0;
 
   // The worst thing any warned device is saying, and how many are saying
   // each. This is what a one-character indicator is made of: `worst_warning`

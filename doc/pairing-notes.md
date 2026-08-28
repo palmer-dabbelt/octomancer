@@ -127,29 +127,29 @@ Run against real hardware, and confirmed:
   by `--pair`: the camera advertised at 19:30, accepted a connection, and sent
   nothing.
 
+Since confirmed against the 6K Pro:
+
+* **Pairing works.** Reading Camera Status is enough to make the bond happen;
+  the camera accepts it. That settles the question the read was added to
+  answer, and it settles it in favour of CoreBluetooth rather than of driving
+  SMP ourselves.
+* **Holding works.** With the connection kept open between cycles the camera
+  stays paired and stays synced, which is the combination that had never
+  survived a cycle boundary before.
+
 What has **not** been verified, and should not be read as working:
 
-* **No successful pairing has been observed.** The `bonded` verdict has never
-  been returned by real hardware. Everything downstream of a passkey being
-  accepted -- that encryption actually comes up, that the characteristics then
-  answer, that the bond survives a reconnection -- is untested.
-* **The macOS pairing dialog has still not been seen.** It is now known that
-  *subscribing* will not produce one, which is why the read exists; whether
-  *reading* produces one against this camera is the next thing to find out and
-  has not been observed. If it does not, the work is `src/smp.cc`, which
-  already implements legacy pairing with a supplied passkey for the dongle:
-  the answer would be to drive the bond from there rather than through
-  CoreBluetooth.
+* **Reconnection after the camera drops the link is unwatched.** Holding has
+  been seen to work; what has not been seen is what happens when the camera
+  goes away on its own -- a power cycle, a flat battery, someone walking out of
+  range -- and the daemon has to come back without a person present. That path
+  ends in pairing, and pairing needs somebody to read a code, so there may be
+  nothing to do but say so clearly. It is the obvious next thing to test.
 * **`read_status` is not implemented for the dongle backend.** It returns an
   error saying so. That wants doing alongside the SMP work rather than as a
   stub that half answers.
 * **The `refused` verdict has never been produced by a radio.** Its matcher is
   tested against strings written from the documentation, not against strings a
   camera caused.
-* **Holding has not been observed against hardware.** The code path is
-  exercised and the daemon runs, but every attempt to watch it hold a real
-  camera across two cycles has run into a camera that was not advertising at
-  the time. That it reconnects cleanly when the camera does drop the link, and
-  that a second cycle really does skip the scan, are both unwatched.
 * **The 90-second default is a guess.** It is long enough to read a number off
   a screen and type it, and nothing more principled than that.

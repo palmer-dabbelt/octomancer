@@ -172,8 +172,9 @@ newer version added, so editing by hand is not a thing you get punished for:
 # octomancer camera configuration.
 default writes=off
 default enabled=on
-camera 09EE26AF-D630-DB5A-0CAC-ECB7B610DFBC writes=on name=A:1EAE18A7
-box    42723B20-45C0-272F-4313-973390EB1542 enabled=off name=FS7
+default warn=off
+camera 09EE26AF-D630-DB5A-0CAC-ECB7B610DFBC writes=on  warn=on name=A:1EAE18A7
+box    42723B20-45C0-272F-4313-973390EB1542 enabled=off        name=FS7
 ```
 
 The same file describes the timecode boxes, because there is one question a
@@ -208,6 +209,63 @@ daemon's own notebook — learned biases, measured apply delays, write history �
 and which the daemon rewrites constantly. Permissions and measurements should
 not share a file.
 
+## Being told when something is wrong
+
+Both kinds of line also carry `warn`, which is not a permission but a request:
+*tell me when this one is wrong.*
+
+```
+$ octomancer warn on --box FS7 --camera A:1EAE18A7
+FS7 will be warned about
+A:1EAE18A7 will be warned about
+saved to ~/.octomancer/cameras.conf
+```
+
+A device with it set gets a marker in `octomancer status` and puts a blip in
+the menu bar, in one of two colours:
+
+* **red** — it is being heard, and it is more than **100 ms** from the
+  canonical time. That is past anything normal: a jammed bench sits within a
+  few milliseconds of itself, and a camera an hour after its last write is tens
+  of milliseconds out, which is what the re-write cycle exists to mop up. 100 ms
+  is about two frames at 24, which is far enough that somebody would see it in
+  the edit. Anything tighter would go red every time a camera got warm.
+* **yellow** — nothing has been heard from it for **five minutes**, so there is
+  no opinion to have. A stale offset is not evidence of being in sync; it is a
+  measurement of where the device was the last time anybody listened, and
+  drawing an hour-old reading as though it were current is how somebody ends up
+  shooting against a clock that walked off while they were not looking. Better
+  to say "we do not know" than to say something reassuring that nothing
+  supports. Five minutes because a box at -84 dBm can genuinely go three
+  minutes between advertisements, and a light that flickers whenever somebody
+  stands in front of the cart is a light nobody reads — but short enough that a
+  device switched off, or carried out of the room, is noticed within a setup
+  break rather than in the rushes. Yellow also covers having nothing to compare
+  against — no canonical time, or a device that has not said what time it
+  thinks it is — because staying quiet there would amount to saying it is fine.
+
+Red beats yellow, since a device known to be wrong outranks one we cannot
+speak for. A camera whose link is being *held* is heard by definition and never
+goes yellow for silence: it stopped advertising because something is talking to
+it.
+
+It defaults to **off**, and that default is the whole design. An indicator that
+lights up about a timecode box sitting in a case in the truck, or about a
+camera nobody is shooting with today, is one people learn to ignore inside a
+day — and a red light that has been learned to mean nothing is worse than no
+red light at all, because it is still there on the day it means something. So
+somebody has to name the devices they are actually working with before anything
+goes red on their behalf. For the same reason a device that has been switched
+off never warns: switching it off is how somebody says they are not working
+with it today, and it would be no relief at all if the light stayed on
+afterwards.
+
+`octomancer warn` with no argument reports what the file says. Unlike
+`octomancer enable`, it does not go on to list the devices the file has never
+heard of: they are off, everything is off until asked for, and printing the
+whole room to say so would bury the two lines that matter. `octomancer status`
+is where the room is listed.
+
 ## Driving it
 
 `octomancer` is the front door. It has no radio of its own: most commands are
@@ -234,6 +292,9 @@ octomancer writes on --camera ID    # may octomancer change that camera at all?
 octomancer writes off --all         # ...or every camera it knows about
 octomancer enable --box FS7         # listen to that timecode box
 octomancer disable --box FS7        # ...or ignore it, and stop counting its vote
+octomancer warn                     # which devices are worth a red light?
+octomancer warn on --box FS7        # tell me when that one is wrong
+octomancer warn off --camera ID     # ...and stop telling me about that one
 octomancer reload                   # re-read the configuration after editing it
 octomancer status --json | jq .     # for everything that isn't this program
 ```
@@ -288,6 +349,14 @@ talking to it, and showing that the same way as a camera somebody switched off
 would have people power-cycling a body mid-write. Nobody has yet watched that
 column with a camera in the room, which is the only way to find out whether
 `held` means what it says; `doc/KNOWN_ISSUES.md` says what that would take.
+
+A device somebody has asked to be warned about carries a marker in the `DEVICE`
+column — `!` when it is out of sync with the bench, `?` when it has been quiet
+too long to say — and the names are repeated under the table with what each mark
+means, because "one device out of sync" only sends somebody looking. The marker
+rides inside the name column rather than in one of its own, so a table that
+already fills a narrow terminal does not get two characters wider for a flag
+most rows do not carry.
 
 Either daemon may be down, and the half that answered still prints. Which one
 went quiet is usually the answer rather than an obstacle, so it is said in
@@ -356,13 +425,17 @@ preferences pane, because "why will this not sync?" and "let it sync" should be
 the same glance.
 
 **Configuration** lists every device this Mac knows of, whether or not anything
-is hearing it at the moment, each with a checkbox: `enabled` for a timecode box,
-`writes` for a camera. It is built from the two daemons *and* from
-`cameras.conf`, and the file is the half that matters here — a device somebody
-switched off has stopped appearing anywhere else, so the only way back is a
-checkbox with its name on it. Below the list are **Start**, **Stop** and
-**Restart** for the daemons, what launchd currently thinks of each and how long
-each has been up, and **Start at boot**.
+is hearing it at the moment, each with two checkboxes. The first is `enabled`
+for a timecode box and `writes` for a camera; the second is **Warn if out of
+sync**, which is the same `warn` the command line sets. It is built from the two
+daemons *and* from `cameras.conf`, and the file is the half that matters here —
+a device somebody switched off has stopped appearing anywhere else, so the only
+way back is a checkbox with its name on it. A switched-off device has its warn
+box greyed rather than cleared: it could not warn about anything while it is off
+the list, but what somebody asked for is still in the file and comes back with
+it. Below the list are **Start**, **Stop** and **Restart** for the daemons, what
+launchd currently thinks of each and how long each has been up, and **Start at
+boot**.
 
 **Pair Camera...** on the same page opens a sheet that runs `octomancer-sync`'s
 own scan and pair, and shows what the tool says as it goes, verdict and all.
@@ -396,8 +469,25 @@ is a shortcut to the window, not the program, and someone driving all this from
 the command line has no use for it. Hidden, the app keeps running and keeps
 notifying (posting a notification needs a bundled app, so this process is the
 only thing here that can); opening Octomancer.app again brings the window back.
-Quitting it stops notifications and nothing else: the daemons hold the clocks
-and do not care whether anybody is watching.
+
+The icon itself carries one thing: a coloured blip when a device somebody asked
+about is red or yellow, and nothing at all when none of them is. It used to
+carry a count of the boxes being heard, which looks like information and is not
+— five boxes on the bench reads as 5 whether all five are jammed to each other
+or one of them left the building an hour ago. "Is anything wrong" is the
+question somebody glancing up actually has. A question mark instead of a blip
+means neither daemon is answering, which is kept its own shape on purpose: that
+is a thing to fix on this Mac, not at the cameras.
+
+The menu has two ways out, because there were two things behind the one that
+used to be there and only one of them was quitting. **Quit the Menu Bar App**
+closes this process: notifications stop, and nothing else changes — the daemons
+hold the clocks and do not care whether anybody is watching. **Stop Octomancer
+and its Daemons** is the other thing, asks first, and says in the asking that
+nothing will be corrected until they are started again — and that they stay
+installed, so with **Start at boot** on they are back at the next login. If a
+daemon refuses to stop it says so and stays up rather than quitting and leaving
+somebody believing it had.
 
 **Start at boot** installs both daemons as LaunchAgents in your login session
 and starts them. Agents rather than system daemons, and deliberately:

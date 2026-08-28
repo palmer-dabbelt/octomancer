@@ -25,8 +25,9 @@
 //   # octomancer camera configuration
 //   default writes=off
 //   default enabled=on
-//   camera 09EE26AF-...  writes=on   name=A:1EAE18A7
-//   box    C7B1F0A2-...  enabled=off name=Tentacle_3
+//   default warn=off
+//   camera 09EE26AF-...  writes=on   warn=on  name=A:1EAE18A7
+//   box    C7B1F0A2-...  enabled=off          name=Tentacle_3
 //
 // The camera setting is `writes` and it defaults to **off**. Octomancer
 // connects to cameras and changes their clocks; doing that to a body someone
@@ -44,6 +45,16 @@
 // thing changed no existing behaviour: until somebody switches one off, every
 // box is heard exactly as it was before this setting existed.
 //
+// Both kinds of line also carry `warn`, which is not a permission but a
+// request: tell me when this one is wrong. It defaults to **off**, and that
+// default is the whole design. An indicator that lights up about a timecode
+// box sitting in a case in the truck, or about a camera nobody is shooting
+// with today, is an indicator people learn to ignore inside a day -- and a
+// red light that has been learned to mean nothing is worse than no red light
+// at all, because it is still there the day it means something. So somebody
+// has to name the devices they are actually working with before anything is
+// allowed to go red on their behalf.
+//
 // Cameras and boxes are separate lists over separate id spaces. A `box` line
 // never answers a question about writes and a `camera` line never answers one
 // about boxes, even in the impossible case of the same id appearing as both.
@@ -59,12 +70,14 @@ struct CameraConfig {
   std::string id;
   std::string name;   // a label for the file's benefit; matching is on id
   bool writes_enabled = false;
+  bool warn = false;  // tell me when this one is wrong; off unless asked for
 };
 
 struct BoxConfig {
   std::string id;
   std::string name;   // same deal: a label, not a key
   bool enabled = true;
+  bool warn = false;  // the same request, asked about a timecode box
 };
 
 // ~/.octomancer/cameras.conf
@@ -112,6 +125,14 @@ class CamConf {
   bool box_enabled(const std::string& id) const;
   bool default_box_enabled() const { return default_box_enabled_; }
 
+  // Whether somebody asked to be told when this device is wrong. One question
+  // across both device classes on purpose: the person asking it is looking at
+  // one bench, and "warn me about this thing" does not mean anything
+  // different depending on whether the thing is a camera or a timecode box.
+  // An id in neither list gets the default, which is off.
+  bool warn_enabled(const std::string& id) const;
+  bool default_warn() const { return default_warn_; }
+
   // --- writing, which only the tools do -------------------------------
   //
   // Rewrites the file in place, keeping every other line exactly as it was.
@@ -120,6 +141,12 @@ class CamConf {
                   std::string* err);
   bool set_box_enabled(const std::string& id, const std::string& name,
                        bool enabled, std::string* err);
+  // A device line carries both its own setting and its warning, so these
+  // rewrite the same line the two above do, changing only `warn=`.
+  bool set_camera_warn(const std::string& id, const std::string& name,
+                       bool warn, std::string* err);
+  bool set_box_warn(const std::string& id, const std::string& name, bool warn,
+                    std::string* err);
 
  private:
   bool parse(const std::string& text, std::string* err);
@@ -135,6 +162,7 @@ class CamConf {
   bool exists_ = false;
   bool default_writes_ = false;
   bool default_box_enabled_ = true;
+  bool default_warn_ = false;
   std::vector<CameraConfig> cameras_;
   std::vector<BoxConfig> boxes_;
 };

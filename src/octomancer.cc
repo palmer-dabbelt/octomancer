@@ -96,6 +96,13 @@ void usage(FILE* out) {
       "                        this is for the one in the next room that is\n"
       "                        not part of this shoot. Say which with --box.\n"
       "                        With no --box, reports the file.\n"
+      "  warn [on|off]         whether to be told when a device is wrong: a\n"
+      "                        marker beside it here and a blip in the menu\n"
+      "                        bar, red when it is too far from the bench and\n"
+      "                        yellow when it has been quiet too long to say.\n"
+      "                        Off until asked for, so name the devices you\n"
+      "                        are working with, with --box and --camera.\n"
+      "                        With no argument, reports the file.\n"
       "  source [MODE]         report or set the camera's timecode source.\n"
       "                        MODE is `time-of-day` (the timecode follows the\n"
       "                        camera's clock, which is what lets it be\n"
@@ -108,8 +115,8 @@ void usage(FILE* out) {
       "  --camera ID|NAME      which camera, repeatable. Without it, sync and\n"
       "                        source act on whichever camera the daemon is\n"
       "                        following.\n"
-      "  --box NAME|ID         which timecode box, repeatable. enable and\n"
-      "                        disable take this.\n"
+      "  --box NAME|ID         which timecode box, repeatable. enable,\n"
+      "                        disable and warn take this.\n"
       "  --daemon WHICH        `all` (the default), `bench` for octomancerd,\n"
       "                        or `sync` for octomancer-sync. Only start,\n"
       "                        stop and restart look at this.\n"
@@ -408,6 +415,107 @@ int run_agent_command(const Options& opt, const std::string& verb,
 // Written here and never by the daemon, which is the whole point of keeping it
 // separate from the daemon's own notebook: a permission cannot quietly become
 // something else because a measurement moved.
+
+// A device to write a line about: the id the file is keyed on, and the name to
+// put beside it and to say back to whoever typed this.
+using Target = std::pair<std::string, std::string>;
+
+// The word a person says for yes and the word they say for no.
+//
+// Three spellings each, because `writes on` and `writes enable` are the same
+// sentence and refusing one of them teaches nothing.
+bool parse_on_off(const std::string& word, bool* on) {
+  if (word == "on" || word == "enable" || word == "yes") {
+    *on = true;
+    return true;
+  }
+  if (word == "off" || word == "disable" || word == "no") {
+    *on = false;
+    return true;
+  }
+  return false;
+}
+
+// Turning what somebody typed into ids, for cameras.
+//
+// `status` is whatever octomancer-sync answered with, or null when it did not
+// answer -- which is not a failure here: an id works without a daemon, and a
+// name that matches nothing is written through as an id, because naming a
+// camera before it has ever been seen is a reasonable thing to want.
+//
+// The file is looked in second, for the case that is neither of those: a
+// camera named by the name it advertises while nothing is answering. Its id is
+// already written down beside that name from the last time a daemon was up,
+// and without this the name would be taken for an id and a second line written
+// about a camera that already has one.
+std::vector<Target> resolve_cameras(const octo::Status* status,
+                                    const octo::CamConf& conf,
+                                    const std::vector<std::string>& want) {
+  std::vector<Target> targets;
+  for (const std::string& which : want) {
+    std::string id = which, name;
+    bool found = false;
+    if (status != nullptr) {
+      for (const octo::CameraStatus& c : status->cameras) {
+        if (c.id == which || c.name == which) {
+          id = c.id;
+          name = c.name;
+          found = true;
+          break;
+        }
+      }
+    }
+    if (!found) {
+      for (const octo::CameraConfig& c : conf.cameras()) {
+        if (c.id == which || c.name == which) {
+          id = c.id;
+          name = c.name;
+          break;
+        }
+      }
+    }
+    targets.emplace_back(id, name);
+  }
+  return targets;
+}
+
+// The same, for timecode boxes, and it looks in the same two places.
+//
+// A box can be named by the id in the file or by the name it advertises, and
+// somebody has whichever of those is in front of them. Looking in both means a
+// box can be switched off by name while octomancerd is up and back on by id
+// when it is not.
+std::vector<Target> resolve_boxes(const octo::Snapshot* snap,
+                                  const octo::CamConf& conf,
+                                  const std::vector<std::string>& want) {
+  std::vector<Target> targets;
+  for (const std::string& which : want) {
+    std::string id = which, name;
+    bool found = false;
+    if (snap != nullptr) {
+      for (const octo::DeviceSnapshot& d : snap->device) {
+        if (d.id == which || d.name == which) {
+          id = d.id;
+          name = d.name;
+          found = true;
+          break;
+        }
+      }
+    }
+    if (!found) {
+      for (const octo::BoxConfig& b : conf.boxes()) {
+        if (b.id == which || b.name == which) {
+          id = b.id;
+          name = b.name;
+          break;
+        }
+      }
+    }
+    targets.emplace_back(id, name);
+  }
+  return targets;
+}
+
 int run_writes_command(const Options& opt, const std::string& argument,
                        const Paint& p) {
   octo::CamConf conf;
@@ -438,11 +546,7 @@ int run_writes_command(const Options& opt, const std::string& argument,
   }
 
   bool enable = false;
-  if (argument == "on" || argument == "enable" || argument == "yes") {
-    enable = true;
-  } else if (argument == "off" || argument == "disable" || argument == "no") {
-    enable = false;
-  } else {
+  if (!parse_on_off(argument, &enable)) {
     std::fprintf(stderr, "octomancer: say `on` or `off`, not '%s'\n",
                  argument.c_str());
     return 2;
@@ -465,7 +569,7 @@ int run_writes_command(const Options& opt, const std::string& argument,
     return 2;
   }
 
-  std::vector<std::pair<std::string, std::string>> targets;  // id, name
+  std::vector<Target> targets;
   if (opt.all_cameras) {
     octo::Status s;
     if (!fetch_status_quiet(opt, &s) || s.cameras.empty()) {
@@ -481,19 +585,7 @@ int run_writes_command(const Options& opt, const std::string& argument,
   } else {
     octo::Status s;
     const bool have_status = fetch_status_quiet(opt, &s);
-    for (const std::string& want : opt.cameras) {
-      std::string id = want, name;
-      if (have_status) {
-        for (const octo::CameraStatus& c : s.cameras) {
-          if (c.id == want || c.name == want) {
-            id = c.id;
-            name = c.name;
-            break;
-          }
-        }
-      }
-      targets.emplace_back(id, name);
-    }
+    targets = resolve_cameras(have_status ? &s : nullptr, conf, opt.cameras);
   }
 
   for (const auto& target : targets) {
@@ -580,36 +672,8 @@ int run_boxes_command(const Options& opt, bool enable, const Paint& p) {
     return 0;
   }
 
-  // Named by whatever a person has in front of them -- the id from the file or
-  // the name the box advertises -- and looked up in both places, so a box can
-  // be switched off by name while octomancerd is up and back on by id when it
-  // is not. A name that matches nothing is written through as an id: switching
-  // off a box before it has ever been heard is a reasonable thing to want.
-  std::vector<std::pair<std::string, std::string>> targets;  // id, name
-  for (const std::string& want : opt.boxes) {
-    std::string id = want, name;
-    bool found = false;
-    if (have_bench) {
-      for (const octo::DeviceSnapshot& d : snap.device) {
-        if (d.id == want || d.name == want) {
-          id = d.id;
-          name = d.name;
-          found = true;
-          break;
-        }
-      }
-    }
-    if (!found) {
-      for (const octo::BoxConfig& b : conf.boxes()) {
-        if (b.id == want || b.name == want) {
-          id = b.id;
-          name = b.name;
-          break;
-        }
-      }
-    }
-    targets.emplace_back(id, name);
-  }
+  const std::vector<Target> targets =
+      resolve_boxes(have_bench ? &snap : nullptr, conf, opt.boxes);
 
   for (const auto& target : targets) {
     if (!conf.set_box_enabled(target.first, target.second, enable, &err)) {
@@ -631,6 +695,132 @@ int run_boxes_command(const Options& opt, bool enable, const Paint& p) {
   if (octo::query(opt.socket_path, "reload", &reply, &unused, 3.0)) {
     std::printf("the running daemon has been told to re-read it\n");
   }
+  return 0;
+}
+
+// -------------------------------------------------------------- the warning
+//
+// The third setting on the same file, and the only one that is neither a
+// permission nor a filter: it does not change what anything does to a device,
+// it changes whether anybody is told when that device is wrong. So it takes
+// both selectors -- `--camera` and `--box` -- where the other two take one
+// each, because "warn me about this thing" means the same sentence whichever
+// kind of thing it is, and somebody standing at a bench is looking at one
+// room, not at two lists.
+//
+// Off by default, and src/camconf.h explains why at length: an indicator that
+// lights up about a box in a case in the truck is one people learn to ignore
+// inside a day, and a red light that has been learned to mean nothing is worse
+// than no red light at all.
+// One line of that report. The kind is said on every line and in dim, because
+// this is the one list in the program with cameras and timecode boxes in it at
+// once, and an id says nothing about which of the two it names.
+void print_warn_line(const std::string& id, const std::string& name, bool warn,
+                     const char* kind, const Paint& p) {
+  std::printf("  %-38s %s%s%s  %s%s%s(%s)%s\n", id.c_str(),
+              p(warn ? kGreen : kDim), warn ? "on " : "off", p(kReset),
+              name.c_str(), name.empty() ? "" : "  ", p(kDim), kind,
+              p(kReset));
+}
+
+int run_warn_command(const Options& opt, const std::string& argument,
+                     const Paint& p) {
+  octo::CamConf conf;
+  std::string err;
+  if (!conf.load(octo::default_camera_config_path(), &err)) {
+    std::fprintf(stderr, "octomancer: %s\n", err.c_str());
+    return 1;
+  }
+
+  // No argument is a question, and the file answers it on its own. Unlike
+  // `enable`, nothing is added here for the devices the file has never heard
+  // of: they are off, because everything is off until asked for, and printing
+  // every box in the room to say so would bury the two lines that matter.
+  // `octomancer status` is where the room is listed.
+  if (argument.empty()) {
+    std::printf("%s%s\n", conf.path().c_str(),
+                conf.file_exists() ? "" : "  (does not exist yet)");
+    std::printf("  %-38s %s\n", "default", conf.default_warn() ? "on" : "off");
+    bool any = false;
+    for (const octo::CameraConfig& c : conf.cameras()) {
+      any = any || c.warn;
+      print_warn_line(c.id, c.name, c.warn, "camera", p);
+    }
+    for (const octo::BoxConfig& b : conf.boxes()) {
+      any = any || b.warn;
+      print_warn_line(b.id, b.name, b.warn, "timecode box", p);
+    }
+    if (!any && !conf.default_warn()) {
+      std::printf("\n%sNothing warns, so nothing will ever go red.%s\n"
+                  "Ask about one with: octomancer warn on --box <name>\n",
+                  p(kYellow), p(kReset));
+    }
+    return 0;
+  }
+
+  bool warn = false;
+  if (!parse_on_off(argument, &warn)) {
+    std::fprintf(stderr, "octomancer: say `on` or `off`, not '%s'\n",
+                 argument.c_str());
+    return 2;
+  }
+
+  // --all is refused rather than taken to mean the cameras, which is all it
+  // could mean: this command spans both kinds of device, and a flag that
+  // silently covered half of them would be read as covering the room.
+  if (opt.all_cameras) {
+    std::fprintf(stderr,
+                 "octomancer: --all is every *camera*, which is not the whole"
+                 " room. Name the devices with --camera and --box.\n");
+    return 2;
+  }
+  if (opt.cameras.empty() && opt.boxes.empty()) {
+    std::fprintf(stderr,
+                 "octomancer: say which device -- `--box NAME|ID` or"
+                 " `--camera ID|NAME`, repeatable.\n"
+                 "  `octomancer warn` shows what is set now.\n");
+    return 2;
+  }
+
+  octo::Snapshot snap;
+  std::string ignored;
+  const bool have_bench =
+      opt.boxes.empty()
+          ? false
+          : octo::fetch(opt.bench_socket_path, &snap, &ignored);
+  octo::Status status;
+  const bool have_status =
+      opt.cameras.empty() ? false : fetch_status_quiet(opt, &status);
+
+  std::vector<std::pair<bool, Target>> targets;  // camera?, device
+  for (const Target& t :
+       resolve_boxes(have_bench ? &snap : nullptr, conf, opt.boxes)) {
+    targets.emplace_back(false, t);
+  }
+  for (const Target& t :
+       resolve_cameras(have_status ? &status : nullptr, conf, opt.cameras)) {
+    targets.emplace_back(true, t);
+  }
+
+  for (const auto& target : targets) {
+    const Target& d = target.second;
+    const bool ok = target.first
+                        ? conf.set_camera_warn(d.first, d.second, warn, &err)
+                        : conf.set_box_warn(d.first, d.second, warn, &err);
+    if (!ok) {
+      std::fprintf(stderr, "octomancer: %s\n", err.c_str());
+      return 1;
+    }
+    std::printf("%s%s%s %s\n", p(warn ? kGreen : kYellow),
+                (d.second.empty() ? d.first : d.second).c_str(), p(kReset),
+                warn ? "will be warned about" : "will not be warned about");
+  }
+  std::printf("saved to %s\n", conf.path().c_str());
+
+  // Nothing is told to re-read it, and there is nothing to tell: no daemon has
+  // ever read this key. A warning is decided where the devices are drawn --
+  // `octomancer status` and the app both call build_device_view -- so it is in
+  // force the next time somebody looks, with or without a daemon running.
   return 0;
 }
 
@@ -908,6 +1098,10 @@ int main(int argc, char** argv) {
 
   if (command == "writes") {
     return run_writes_command(opt, argument, paint);
+  }
+
+  if (command == "warn") {
+    return run_warn_command(opt, argument, paint);
   }
 
   if (command == "enable" || command == "disable") {

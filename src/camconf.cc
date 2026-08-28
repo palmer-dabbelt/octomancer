@@ -25,8 +25,9 @@ const char kHeader[] =
     "#\n"
     "#   default writes=off\n"
     "#   default enabled=on\n"
-    "#   camera <ble-id> writes=on name=<label>\n"
-    "#   box    <ble-id> enabled=off name=<label>\n"
+    "#   default warn=off\n"
+    "#   camera <ble-id> writes=on warn=on name=<label>\n"
+    "#   box    <ble-id> enabled=off warn=on name=<label>\n"
     "#\n"
     "# `writes` is permission to change anything on that camera: its clock,\n"
     "# and its timecode source. Off means octomancer will read it and report\n"
@@ -36,6 +37,13 @@ const char kHeader[] =
     "# on: listening to one is passive and costs nothing, so unlike writing\n"
     "# to a camera it needs nobody's permission first. Turn one off here to\n"
     "# stop seeing a timecode box that is not part of this shoot.\n"
+    "#\n"
+    "# `warn` asks to be told when that device's clock has wandered off the\n"
+    "# bench, and to be told separately when it has been quiet long enough\n"
+    "# that nobody can say. It goes on either kind of line. New devices are\n"
+    "# off: a warning about kit that is not on this shoot is a warning\n"
+    "# people learn to ignore, so name the ones that matter and only those\n"
+    "# ever light up.\n"
     "\n";
 
 std::string trim(const std::string& s) {
@@ -123,6 +131,7 @@ bool CamConf::load(const std::string& path, std::string* err) {
   exists_ = false;
   default_writes_ = false;
   default_box_enabled_ = true;
+  default_warn_ = false;
   cameras_.clear();
   boxes_.clear();
 
@@ -168,6 +177,7 @@ bool CamConf::parse(const std::string& text, std::string* err) {
         bool* into = nullptr;
         if (f.key == "writes") into = &default_writes_;
         if (f.key == "enabled") into = &default_box_enabled_;
+        if (f.key == "warn") into = &default_warn_;
         if (into == nullptr) continue;
         if (!parse_bool(f.value, into)) {
           if (err) {
@@ -191,6 +201,7 @@ bool CamConf::parse(const std::string& text, std::string* err) {
       CameraConfig cfg;
       cfg.id = fields[0].value.empty() ? fields[0].key : fields[0].value;
       cfg.writes_enabled = default_writes_;
+      cfg.warn = default_warn_;
       for (size_t i = 1; i < fields.size(); ++i) {
         const Field& f = fields[i];
         if (f.key == "writes") {
@@ -198,6 +209,14 @@ bool CamConf::parse(const std::string& text, std::string* err) {
             if (err) {
               *err = path_ + ":" + std::to_string(lineno) +
                      ": writes must be on or off, not '" + f.value + "'";
+            }
+            return false;
+          }
+        } else if (f.key == "warn") {
+          if (!parse_bool(f.value, &cfg.warn)) {
+            if (err) {
+              *err = path_ + ":" + std::to_string(lineno) +
+                     ": warn must be on or off, not '" + f.value + "'";
             }
             return false;
           }
@@ -222,6 +241,7 @@ bool CamConf::parse(const std::string& text, std::string* err) {
       BoxConfig cfg;
       cfg.id = fields[0].value.empty() ? fields[0].key : fields[0].value;
       cfg.enabled = default_box_enabled_;
+      cfg.warn = default_warn_;
       for (size_t i = 1; i < fields.size(); ++i) {
         const Field& f = fields[i];
         if (f.key == "enabled") {
@@ -229,6 +249,14 @@ bool CamConf::parse(const std::string& text, std::string* err) {
             if (err) {
               *err = path_ + ":" + std::to_string(lineno) +
                      ": enabled must be on or off, not '" + f.value + "'";
+            }
+            return false;
+          }
+        } else if (f.key == "warn") {
+          if (!parse_bool(f.value, &cfg.warn)) {
+            if (err) {
+              *err = path_ + ":" + std::to_string(lineno) +
+                     ": warn must be on or off, not '" + f.value + "'";
             }
             return false;
           }
@@ -271,6 +299,18 @@ bool CamConf::box_enabled(const std::string& id) const {
   return b != nullptr ? b->enabled : default_box_enabled_;
 }
 
+// The one question that crosses the two id spaces, because the person asking
+// it is looking at one bench and does not think of it as two lists. A camera
+// answers first only because that is an order, not a precedence: an id in
+// both lists is not a thing that happens.
+bool CamConf::warn_enabled(const std::string& id) const {
+  const CameraConfig* c = find(id);
+  if (c != nullptr) return c->warn;
+  const BoxConfig* b = find_box(id);
+  if (b != nullptr) return b->warn;
+  return default_warn_;
+}
+
 bool CamConf::any_writes_enabled() const {
   if (default_writes_) return true;
   for (const CameraConfig& c : cameras_) {
@@ -287,6 +327,16 @@ bool CamConf::set_writes(const std::string& id, const std::string& name,
 bool CamConf::set_box_enabled(const std::string& id, const std::string& name,
                               bool enabled, std::string* err) {
   return set_flag("box", "enabled", id, name, enabled, err);
+}
+
+bool CamConf::set_camera_warn(const std::string& id, const std::string& name,
+                              bool warn, std::string* err) {
+  return set_flag("camera", "warn", id, name, warn, err);
+}
+
+bool CamConf::set_box_warn(const std::string& id, const std::string& name,
+                           bool warn, std::string* err) {
+  return set_flag("box", "warn", id, name, warn, err);
 }
 
 bool CamConf::set_flag(const char* verb, const char* key,
@@ -330,7 +380,11 @@ bool CamConf::set_flag(const char* verb, const char* key,
     if (this_id != id) continue;
 
     // Rebuild this line, keeping fields we do not own in their original
-    // order and only replacing the value of our own key.
+    // order and only replacing the value of our own key. That rule was
+    // written for settings from a future version, but it is what makes a line
+    // able to carry two of ours at once: `warn=` is somebody else's field as
+    // far as `writes=` is concerned, so switching one on never disturbs the
+    // other. Anything that changes this loop has to keep that true.
     std::string rebuilt = std::string(verb) + " " + this_id;
     bool wrote_flag = false;
     bool wrote_name = false;

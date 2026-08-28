@@ -54,6 +54,29 @@ const char* link_state_name(LinkState s);
 // is what decides whether a row is drawn bright or dim.
 bool link_is_live(LinkState s);
 
+// What a device with 'warn if out of sync' set is telling us. Red is a
+// measurement we do not like; yellow is the absence of a measurement.
+// Ordered quiet to loud, so the worst of a set is simply the largest.
+enum class WarnLevel { kNone, kUnsure, kOutOfSync };
+
+const char* warn_level_name(WarnLevel w);
+
+// How far from the canonical time is too far. A jammed bench sits within a
+// few milliseconds of itself, and a camera an hour after its last write is
+// tens of milliseconds out -- which is normal, expected, and exactly what the
+// re-write cycle exists to mop up. A tenth of a second is past both of those,
+// and it is about two frames at 24, which is far enough that somebody would
+// see it. Anything tighter would go red every time a camera got warm.
+constexpr double kWarnOffset = 0.100;
+
+// How long silence is allowed to last before we admit we do not know. Long
+// enough that advertisement duty cycling and a weak signal do not trip it: a
+// timecode box at -84 dBm can genuinely go three minutes between packets, and
+// a light that flickers whenever somebody stands in front of the cart is a
+// light nobody reads. Short enough that a device switched off, or carried out
+// of the room, is noticed within a setup break rather than in the rushes.
+constexpr double kWarnSilence = 300.0;
+
 struct DeviceRow {
   DeviceKind kind = DeviceKind::kTentacle;
   std::string id;
@@ -73,6 +96,12 @@ struct DeviceRow {
 
   bool has_age = false;   // seconds since we last heard from it
   double age_s = 0.0;
+
+  // Whether somebody asked to be told about this device, and what it is
+  // currently telling them. A row that nobody asked about is always kNone, so
+  // these two are read together and never separately.
+  bool warn = false;
+  WarnLevel warn_level = WarnLevel::kNone;
 
   // --- verbose only, below here ---------------------------------------
 
@@ -111,6 +140,14 @@ struct DeviceView {
   // than dropped silently: "3 devices hidden" is honest, and a bench that
   // quietly lists fewer boxes than are in the room is not.
   int hidden = 0;
+
+  // The worst thing any warned device is saying, and how many are saying
+  // each. This is what a one-character indicator is made of: `worst_warning`
+  // picks the colour, the counts and the rows say what is behind it. Only
+  // devices in `rows` are considered -- see build_device_view for why.
+  WarnLevel worst_warning = WarnLevel::kNone;
+  int warned_out_of_sync = 0;
+  int warned_unsure = 0;
 };
 
 // Whatever the caller managed to collect. Every pointer may be null: a daemon

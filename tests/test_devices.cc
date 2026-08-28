@@ -33,6 +33,7 @@ using octo::DeviceView;
 using octo::LinkState;
 using octo::Snapshot;
 using octo::Status;
+using octo::WarnLevel;
 
 namespace {
 
@@ -528,6 +529,247 @@ void test_link_state_names() {
   CHECK(!octo::link_is_live(LinkState::kUnknown));
 }
 
+// -------------------------------------------------------------- warnings
+//
+// A warning is a thing somebody asked for, one device at a time, and the
+// tests below are mostly about the two ways of not answering: never warning
+// about kit nobody claimed, and never dressing an old reading up as a current
+// one. Red is a measurement we do not like. Yellow is the absence of one.
+
+DeviceView view_of(const Snapshot& snap, const CamConf* conf) {
+  DeviceSources from;
+  from.bench = &snap;
+  from.conf = conf;
+  from.now_wall = kNow;
+  return octo::build_device_view(from);
+}
+
+// Nobody asked, so nothing is said -- however wrong the device is. This is
+// the setting's whole reason for existing: an indicator that lights up about
+// every box in range is one people stop reading.
+void test_a_device_nobody_asked_about_never_warns() {
+  Snapshot snap;
+  snap.device.push_back(box("A", "Tentacle_A", true, 0.000));
+  snap.device.push_back(box("B", "Tentacle_B", true, 0.000));
+  snap.device.push_back(box("C", "Tentacle_C", true, 20.000));
+
+  // No configuration at all: we do not know what anybody cares about.
+  DeviceView v = view_of(snap, nullptr);
+  CHECK_NEAR(find_row(v, "Tentacle_C")->offset_s, 20.0, 1e-9);
+  CHECK(!find_row(v, "Tentacle_C")->warn);
+  CHECK(find_row(v, "Tentacle_C")->warn_level == WarnLevel::kNone);
+  CHECK(v.worst_warning == WarnLevel::kNone);
+  CHECK_EQ(v.warned_out_of_sync, 0);
+  CHECK_EQ(v.warned_unsure, 0);
+
+  // A configuration that mentions it without asking for a warning is the
+  // same answer.
+  CamConf conf = conf_with("warn-silent", "box C enabled=on\n");
+  v = view_of(snap, &conf);
+  CHECK(!find_row(v, "Tentacle_C")->warn);
+  CHECK(v.worst_warning == WarnLevel::kNone);
+  CHECK_EQ(v.warned_out_of_sync, 0);
+}
+
+void test_a_warned_device_goes_red_only_when_it_is_out() {
+  CamConf conf = conf_with("warn-c", "box C warn=on\n");
+
+  Snapshot snap;
+  snap.device.push_back(box("A", "Tentacle_A", true, 0.000));
+  snap.device.push_back(box("B", "Tentacle_B", true, 0.000));
+  // Fifty milliseconds: further out than a jammed bench, and well inside what
+  // an hour of drift does to a camera. Not worth a red light.
+  snap.device.push_back(box("C", "Tentacle_C", true, 0.050));
+
+  DeviceView v = view_of(snap, &conf);
+  CHECK(find_row(v, "Tentacle_C")->warn);
+  CHECK(find_row(v, "Tentacle_C")->warn_level == WarnLevel::kNone);
+  CHECK(v.worst_warning == WarnLevel::kNone);
+  CHECK_EQ(v.warned_out_of_sync, 0);
+  CHECK_EQ(v.warned_unsure, 0);
+
+  // A hundred and fifty is past the threshold, and past two frames at 24.
+  snap.device[2] = box("C", "Tentacle_C", true, 0.150);
+  v = view_of(snap, &conf);
+  CHECK(find_row(v, "Tentacle_C")->warn_level == WarnLevel::kOutOfSync);
+  CHECK(v.worst_warning == WarnLevel::kOutOfSync);
+  CHECK_EQ(v.warned_out_of_sync, 1);
+  CHECK_EQ(v.warned_unsure, 0);
+  // The devices around it were not asked about and stay quiet.
+  CHECK(find_row(v, "Tentacle_A")->warn_level == WarnLevel::kNone);
+}
+
+// The point of having a yellow at all. This box was dead on the bench the
+// last time anybody heard from it, an hour ago, and that is not evidence of
+// anything now.
+void test_a_stale_reading_is_yellow_however_good_it_looked() {
+  CamConf conf = conf_with("warn-stale", "box C warn=on\n");
+
+  Snapshot snap;
+  snap.device.push_back(box("A", "Tentacle_A", true, 0.000));
+  snap.device.push_back(box("B", "Tentacle_B", true, 0.000));
+  DeviceSnapshot c = box("C", "Tentacle_C", false, 0.000);
+  c.age = 3600.0;
+  snap.device.push_back(c);
+
+  DeviceView v = view_of(snap, &conf);
+  const DeviceRow* row = find_row(v, "Tentacle_C");
+  CHECK(row->has_offset);
+  CHECK_NEAR(row->offset_s, 0.0, 1e-9);  // a perfect number, and worthless
+  CHECK(row->warn_level == WarnLevel::kUnsure);
+  CHECK(v.worst_warning == WarnLevel::kUnsure);
+  CHECK_EQ(v.warned_unsure, 1);
+  CHECK_EQ(v.warned_out_of_sync, 0);
+
+  // Quiet for a couple of minutes is just duty cycling, and says nothing.
+  snap.device[2].age = 200.0;
+  v = view_of(snap, &conf);
+  CHECK(find_row(v, "Tentacle_C")->warn_level == WarnLevel::kNone);
+  CHECK_EQ(v.warned_unsure, 0);
+}
+
+// A held camera has stopped advertising because we are talking to it, so its
+// last advertisement can be as old as it likes. Ageing it out would put a
+// yellow light on the one device we are most certain about.
+void test_a_held_camera_is_never_unsure_on_age() {
+  CamConf conf = conf_with("warn-held", "camera cam-1 writes=on warn=on\n");
+
+  Snapshot snap;
+  snap.device.push_back(box("A", "Tentacle_A", true, 0.000));
+
+  Status status;
+  CameraStatus c = camera("cam-1", "A:1EAE18A7");
+  c.connected = true;
+  c.present = false;
+  c.has_last_seen = true;
+  c.last_seen_wall = kNow - 7200.0;  // two hours, and irrelevant
+  c.has_error = true;
+  c.error_s = 0.004;
+  status.cameras.push_back(c);
+
+  DeviceSources from;
+  from.bench = &snap;
+  from.cameras = &status;
+  from.conf = &conf;
+  from.now_wall = kNow;
+  const DeviceView v = octo::build_device_view(from);
+
+  const DeviceRow* row = find_row(v, "A:1EAE18A7");
+  CHECK(row != nullptr);
+  CHECK(row->link == LinkState::kHeld);
+  CHECK(row->warn);
+  CHECK(row->warn_level == WarnLevel::kNone);
+  CHECK(v.worst_warning == WarnLevel::kNone);
+}
+
+// Heard from a moment ago and still no opinion: there is no canonical time to
+// measure it against, so we cannot say it is fine, and saying nothing would
+// be saying exactly that.
+void test_a_warned_device_with_nothing_to_measure_against_is_yellow() {
+  CamConf conf = conf_with("warn-nocanon", "box A warn=on\n");
+
+  Snapshot snap;
+  DeviceSnapshot a = box("A", "Tentacle_A", true, 0.000);
+  a.has_time = false;  // being heard, but it has not said what time it is
+  snap.device.push_back(a);
+
+  const DeviceView v = view_of(snap, &conf);
+  CHECK(!v.has_canonical);
+  const DeviceRow* row = find_row(v, "Tentacle_A");
+  CHECK(!row->has_offset);
+  CHECK(row->warn_level == WarnLevel::kUnsure);
+  CHECK_EQ(v.warned_unsure, 1);
+}
+
+// Switching a device off is somebody saying they are not working with it
+// today. It must buy silence, or the only way left to stop the light would be
+// to stop looking at it.
+void test_a_disabled_device_raises_nothing() {
+  CamConf conf = conf_with("warn-disabled", "box B enabled=off warn=on\n");
+
+  Snapshot snap;
+  snap.device.push_back(box("A", "Tentacle_A", true, 0.000));
+  snap.device.push_back(box("B", "Tentacle_B", true, 20.000));
+
+  const DeviceView v = view_of(snap, &conf);
+  CHECK_EQ(static_cast<int>(v.rows.size()), 1);
+  CHECK_EQ(v.hidden, 1);
+  CHECK(find_row(v, "Tentacle_B") == nullptr);
+  CHECK(v.worst_warning == WarnLevel::kNone);
+  CHECK_EQ(v.warned_out_of_sync, 0);
+  CHECK_EQ(v.warned_unsure, 0);
+}
+
+void test_worst_warning_is_the_loudest_of_them() {
+  Snapshot snap;
+  snap.device.push_back(box("A", "Tentacle_A", true, 0.000));
+  snap.device.push_back(box("B", "Tentacle_B", true, 0.000));
+  DeviceSnapshot c = box("C", "Tentacle_C", false, 0.000);
+  c.age = 3600.0;
+  snap.device.push_back(c);
+  snap.device.push_back(box("D", "Tentacle_D", true, 5.000));
+
+  CamConf both = conf_with("warn-mix", "box C warn=on\nbox D warn=on\n");
+  DeviceView v = view_of(snap, &both);
+  CHECK(find_row(v, "Tentacle_C")->warn_level == WarnLevel::kUnsure);
+  CHECK(find_row(v, "Tentacle_D")->warn_level == WarnLevel::kOutOfSync);
+  CHECK_EQ(v.warned_unsure, 1);
+  CHECK_EQ(v.warned_out_of_sync, 1);
+  // Red beats yellow: a device we know is wrong outranks one we cannot say
+  // anything about.
+  CHECK(v.worst_warning == WarnLevel::kOutOfSync);
+
+  // With only the quiet one asked about, yellow is the worst there is --
+  // even though the wildly wrong box is still sitting there unasked-about.
+  CamConf quiet = conf_with("warn-quiet", "box C warn=on\n");
+  v = view_of(snap, &quiet);
+  CHECK(v.worst_warning == WarnLevel::kUnsure);
+  CHECK_EQ(v.warned_unsure, 1);
+  CHECK_EQ(v.warned_out_of_sync, 0);
+}
+
+void test_warn_level_names() {
+  CHECK_STR(octo::warn_level_name(WarnLevel::kNone), "none");
+  CHECK_STR(octo::warn_level_name(WarnLevel::kUnsure), "unsure");
+  CHECK_STR(octo::warn_level_name(WarnLevel::kOutOfSync), "out of sync");
+}
+
+// The terminal has to see what the menu bar sees, and it has to see it with
+// colour switched off -- a marker that is only a colour is invisible in a log
+// file, and to anybody who reads red and green the same way.
+void test_the_table_marks_and_names_the_warned() {
+  Snapshot snap;
+  snap.device.push_back(box("A", "Tentacle_A", true, 0.000));
+  snap.device.push_back(box("B", "Tentacle_B", true, 0.000));
+  DeviceSnapshot c = box("C", "Tentacle_C", false, 0.000);
+  c.age = 3600.0;
+  snap.device.push_back(c);
+  snap.device.push_back(box("D", "Tentacle_D", true, 5.000));
+
+  CamConf conf = conf_with("warn-render", "box C warn=on\nbox D warn=on\n");
+  const DeviceView v = view_of(snap, &conf);
+
+  for (int verbose = 0; verbose < 2; ++verbose) {
+    const std::string plain = octo::render_devices(v, verbose != 0, false);
+    const std::string fancy = octo::render_devices(v, verbose != 0, true);
+    CHECK(plain.find('\033') == std::string::npos);
+    // The markers are characters, not colours, so they survive the pipe.
+    CHECK(contains(plain, "Tentacle_D !"));
+    CHECK(contains(plain, "Tentacle_C ?"));
+    // ...and the line under the table says which is which, by name.
+    CHECK(contains(plain, "out of sync with the bench: Tentacle_D"));
+    CHECK(contains(plain, "not heard from recently enough to say: Tentacle_C"));
+    // The two that nobody asked about are not marked or named.
+    CHECK(contains(plain, "Tentacle_A "));
+    CHECK(!contains(plain, "Tentacle_A !"));
+    CHECK(!contains(plain, "Tentacle_A ?"));
+    // Colour adds red and yellow and changes nothing else.
+    CHECK(contains(fancy, "\033[31m"));
+    CHECK(contains(fancy, "\033[33m"));
+    CHECK_STR(strip_escapes(fancy), plain);
+  }
+}
+
 }  // namespace
 
 int main() {
@@ -546,5 +788,14 @@ int main() {
   test_colour_only_adds_escapes();
   test_verbose_adds_the_detail_and_stays_narrow();
   test_link_state_names();
+  test_a_device_nobody_asked_about_never_warns();
+  test_a_warned_device_goes_red_only_when_it_is_out();
+  test_a_stale_reading_is_yellow_however_good_it_looked();
+  test_a_held_camera_is_never_unsure_on_age();
+  test_a_warned_device_with_nothing_to_measure_against_is_yellow();
+  test_a_disabled_device_raises_nothing();
+  test_worst_warning_is_the_loudest_of_them();
+  test_warn_level_names();
+  test_the_table_marks_and_names_the_warned();
   return octotest::report("devices");
 }

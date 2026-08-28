@@ -474,6 +474,176 @@ void test_each_setter_only_touches_its_own_lines() {
   ::unlink(path.c_str());
 }
 
+// --- warn if out of sync --------------------------------------------------
+//
+// The one setting that spans both device classes, because "tell me when this
+// one is wrong" is the same question asked about a camera and about a
+// timecode box. It is also the only setting here that is a request rather
+// than a permission, which is why it may share a line with one.
+void test_warn_is_parsed_on_both_kinds_of_line() {
+  const std::string path = temp_path("warn");
+  write_file(path,
+             "camera AAA writes=on warn=on name=Tripod\n"
+             "camera BBB writes=on\n"
+             "box CCC enabled=on warn=on name=Slate\n"
+             "box DDD enabled=on warn=off\n");
+
+  CamConf conf;
+  std::string err;
+  CHECK(conf.load(path, &err));
+  CHECK(conf.warn_enabled("AAA"));
+  CHECK(!conf.warn_enabled("BBB"));
+  CHECK(conf.warn_enabled("CCC"));
+  CHECK(!conf.warn_enabled("DDD"));
+  CHECK(conf.find("AAA")->warn);
+  CHECK(conf.find_box("CCC")->warn);
+  // A device nobody has mentioned is not warned about. Somebody has to say
+  // which kit is theirs before a light is allowed to go red on their behalf.
+  CHECK(!conf.default_warn());
+  CHECK(!conf.warn_enabled("never-heard-of"));
+  // ...and asking for a warning did not disturb what it shares a line with.
+  CHECK(conf.writes_enabled("AAA"));
+  CHECK(conf.box_enabled("CCC"));
+  ::unlink(path.c_str());
+}
+
+void test_default_warn_on_applies_to_the_unmentioned() {
+  const std::string path = temp_path("warn-default");
+  write_file(path,
+             "default warn=on\n"
+             "camera AAA writes=on warn=off\n"
+             "box CCC enabled=on\n");
+
+  CamConf conf;
+  std::string err;
+  CHECK(conf.load(path, &err));
+  CHECK(conf.default_warn());
+  CHECK(conf.warn_enabled("never-seen"));
+  CHECK(!conf.warn_enabled("AAA"));  // an explicit off beats the default
+  CHECK(conf.warn_enabled("CCC"));   // no warn=, so it inherits
+  // The other two defaults are untouched by this one.
+  CHECK(!conf.default_writes_enabled());
+  CHECK(conf.default_box_enabled());
+  ::unlink(path.c_str());
+}
+
+void test_setting_warn_creates_flips_and_preserves() {
+  const std::string path = temp_path("warn-set");
+  write_file(path,
+             "# my notes\n"
+             "camera AAA writes=on name=Tripod lens=50mm\n"
+             "\n"
+             "# CCC is the one taped to the cart\n"
+             "box CCC enabled=off colour=orange\n");
+
+  CamConf conf;
+  std::string err;
+  CHECK(conf.load(path, &err));
+  CHECK(conf.set_camera_warn("AAA", "Tripod", true, &err));
+  CHECK(conf.set_box_warn("CCC", "Cart", true, &err));
+  CHECK(conf.warn_enabled("AAA"));
+  CHECK(conf.warn_enabled("CCC"));
+
+  std::string after = read_file(path);
+  CHECK(after.find("# my notes") != std::string::npos);
+  CHECK(after.find("# CCC is the one taped to the cart") != std::string::npos);
+  CHECK(after.find("lens=50mm") != std::string::npos);
+  CHECK(after.find("colour=orange") != std::string::npos);
+  CHECK(after.find("warn=on") != std::string::npos);
+
+  // Turning it back off rewrites the line rather than adding a second one.
+  CHECK(conf.set_camera_warn("AAA", "Tripod", false, &err));
+  after = read_file(path);
+  size_t count = 0;
+  for (size_t at = after.find("camera AAA"); at != std::string::npos;
+       at = after.find("camera AAA", at + 1)) {
+    ++count;
+  }
+  CHECK_EQ(static_cast<int>(count), 1);
+
+  CamConf again;
+  CHECK(again.load(path, &err));
+  CHECK(!again.warn_enabled("AAA"));
+  CHECK(again.warn_enabled("CCC"));
+  ::unlink(path.c_str());
+}
+
+void test_setting_warn_on_an_unknown_device_appends() {
+  const std::string path = temp_path("warn-append");
+  ::unlink(path.c_str());
+
+  CamConf conf;
+  std::string err;
+  CHECK(conf.load(path, &err));
+  CHECK(conf.set_box_warn("CCC", "Tentacle 3", true, &err));
+
+  const std::string after = read_file(path);
+  CHECK(after.find("# octomancer camera configuration") != std::string::npos);
+  CHECK(after.find("box CCC warn=on") != std::string::npos);
+  CHECK(after.find("name=Tentacle_3") != std::string::npos);
+  CHECK(conf.warn_enabled("CCC"));
+  // Asking to be warned about a box says nothing about whether it is used,
+  // so it still has the default answer to that question.
+  CHECK(conf.box_enabled("CCC"));
+  ::unlink(path.c_str());
+}
+
+// The one that matters. A line has to be able to carry both settings at once,
+// and writing either of them must leave the other exactly as it was -- in
+// both orders, because a bug here would show up in only one of them.
+void test_warn_and_the_other_setting_share_a_line() {
+  const std::string path = temp_path("warn-both");
+  ::unlink(path.c_str());
+
+  CamConf conf;
+  std::string err;
+  CHECK(conf.load(path, &err));
+
+  // Permission first, then the warning.
+  CHECK(conf.set_writes("AAA", "Tripod", true, &err));
+  CHECK(conf.set_camera_warn("AAA", "Tripod", true, &err));
+  CHECK(conf.writes_enabled("AAA"));
+  CHECK(conf.warn_enabled("AAA"));
+  // Withdrawing the warning is not withdrawing the permission.
+  CHECK(conf.set_camera_warn("AAA", "Tripod", false, &err));
+  CHECK(conf.writes_enabled("AAA"));
+  CHECK(!conf.warn_enabled("AAA"));
+  // ...nor the other way about.
+  CHECK(conf.set_camera_warn("AAA", "Tripod", true, &err));
+  CHECK(conf.set_writes("AAA", "Tripod", false, &err));
+  CHECK(!conf.writes_enabled("AAA"));
+  CHECK(conf.warn_enabled("AAA"));
+
+  // The warning first this time, on the other kind of line.
+  CHECK(conf.set_box_warn("CCC", "Cart", true, &err));
+  CHECK(conf.set_box_enabled("CCC", "Cart", false, &err));
+  CHECK(conf.warn_enabled("CCC"));
+  CHECK(!conf.box_enabled("CCC"));
+
+  // One line each, however many times they were written.
+  const std::string after = read_file(path);
+  size_t cameras = 0, boxes = 0;
+  for (size_t at = after.find("camera AAA"); at != std::string::npos;
+       at = after.find("camera AAA", at + 1)) {
+    ++cameras;
+  }
+  for (size_t at = after.find("box CCC"); at != std::string::npos;
+       at = after.find("box CCC", at + 1)) {
+    ++boxes;
+  }
+  CHECK_EQ(static_cast<int>(cameras), 1);
+  CHECK_EQ(static_cast<int>(boxes), 1);
+
+  // And a parser that has never seen this program agrees with all of it.
+  CamConf again;
+  CHECK(again.load(path, &err));
+  CHECK(!again.writes_enabled("AAA"));
+  CHECK(again.warn_enabled("AAA"));
+  CHECK(!again.box_enabled("CCC"));
+  CHECK(again.warn_enabled("CCC"));
+  ::unlink(path.c_str());
+}
+
 }  // namespace
 
 int main() {
@@ -497,5 +667,10 @@ int main() {
   test_setting_a_box_preserves_everything_else();
   test_cameras_and_boxes_round_trip_together();
   test_each_setter_only_touches_its_own_lines();
+  test_warn_is_parsed_on_both_kinds_of_line();
+  test_default_warn_on_applies_to_the_unmentioned();
+  test_setting_warn_creates_flips_and_preserves();
+  test_setting_warn_on_an_unknown_device_appends();
+  test_warn_and_the_other_setting_share_a_line();
   return octotest::report("test_camconf");
 }

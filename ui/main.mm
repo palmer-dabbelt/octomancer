@@ -229,6 +229,11 @@ struct ConfigEntry {
   std::string id;
   std::string name;
   bool enabled = false;
+  // Whether somebody asked to be told when this one is wrong. Read from the
+  // same file and drawn on the same row, because the two questions are asked
+  // about the same device and answering one usually means thinking about the
+  // other.
+  bool warn = false;
   bool present = false;  // is either daemon hearing it right now
 };
 
@@ -714,28 +719,100 @@ struct ScanHit {
   [self rebuildMenu];
 }
 
+// The one glyph in the menu bar, and the colour it is drawn in.
+//
+// An NSStatusItem's title is a plain string and renders in whatever colour the
+// menu bar is using, so a coloured blip has to be an attributed string. The
+// clock stays in the label colour and only the blip is tinted: a lone dot in
+// the menu bar says nothing about which app it belongs to, and the point of the
+// thing is to be identified at a glance from across the room.
+//
+// systemRedColor and systemYellowColor rather than literal components, because
+// the menu bar follows the appearance and a fixed yellow that reads on a dark
+// bar vanishes into a light one.
+- (void)setStatusBlip:(NSColor*)color tip:(NSString*)tip {
+  if (_statusItem == nil) return;
+  NSMutableAttributedString* title = [[NSMutableAttributedString alloc]
+      initWithString:@"◷"
+          attributes:@{NSForegroundColorAttributeName : [NSColor labelColor]}];
+  if (color != nil) {
+    [title appendAttributedString:
+               [[NSAttributedString alloc]
+                   initWithString:@" ●"
+                       attributes:@{NSForegroundColorAttributeName : color}]];
+  }
+  _statusItem.button.attributedTitle = title;
+  _statusItem.button.toolTip = tip;
+}
+
+// What the blip is about, spelled out for the place there is room to spell it.
+//
+// A colour can carry "something is wrong" and nothing else, so the names go in
+// the tooltip: "one device out of sync" only sends somebody looking, and the
+// device they are looking for is the whole answer.
+- (NSString*)warningTooltipFor:(const octo::DeviceView&)view {
+  NSMutableArray<NSString*>* lines = [NSMutableArray array];
+  for (int pass = 0; pass < 2; ++pass) {
+    const octo::WarnLevel want = pass == 0 ? octo::WarnLevel::kOutOfSync
+                                           : octo::WarnLevel::kUnsure;
+    NSMutableArray<NSString*>* names = [NSMutableArray array];
+    for (const octo::DeviceRow& r : view.rows) {
+      if (r.warn_level == want) [names addObject:ns(r.name)];
+    }
+    if (names.count == 0) continue;
+    NSString* why = pass == 0
+                        ? @"Out of sync with the bench"
+                        : @"Not heard from recently enough to say";
+    [lines addObject:[NSString stringWithFormat:@"%@: %@", why,
+                                                [names componentsJoinedByString:
+                                                           @", "]]];
+  }
+  return [lines componentsJoinedByString:@"\n"];
+}
+
+// The menu-bar item.
+//
+// It used to carry a count of the timecode boxes being heard, which looks like
+// information and is not: five boxes on the bench says 5 whether all five are
+// jammed to each other or one of them walked out of the building an hour ago.
+// The question somebody glancing up actually has is "is anything wrong", so
+// that is the only thing this answers -- and only about the devices somebody
+// asked to be warned about, which is why the blip is usually absent.
 - (void)updateStatusItem {
   if (_statusItem == nil) return;
+
+  // Neither daemon answering is kept its own shape rather than folded into the
+  // warnings. "Nobody is watching the bench" and "the bench is wrong" are
+  // different problems with different fixes, and a red dot for the first would
+  // send somebody to the cameras when the thing to restart is on this Mac.
   if (!_benchUp && !_controlUp) {
-    _statusItem.button.title = @"◷ ?";
+    _statusItem.button.attributedTitle = [[NSAttributedString alloc]
+        initWithString:@"◷ ?"
+            attributes:@{
+              NSForegroundColorAttributeName : [NSColor labelColor]
+            }];
     _statusItem.button.toolTip = @"Octomancer: no daemon answering";
     return;
   }
-  if (_benchUp && _snapshot.alerting > 0) {
-    _statusItem.button.title =
-        [NSString stringWithFormat:@"⚠ %d", _snapshot.alerting];
-    _statusItem.button.toolTip =
-        [NSString stringWithFormat:@"%d timecode box%s out of sync", _snapshot.alerting,
-                                   _snapshot.alerting == 1 ? "" : "es"];
-    return;
+
+  const octo::DeviceView view = [self deviceView];
+  NSString* detail = [self warningTooltipFor:view];
+  switch (view.worst_warning) {
+    case octo::WarnLevel::kOutOfSync:
+      [self setStatusBlip:[NSColor systemRedColor] tip:detail];
+      return;
+    case octo::WarnLevel::kUnsure:
+      [self setStatusBlip:[NSColor systemYellowColor] tip:detail];
+      return;
+    case octo::WarnLevel::kNone:
+      break;
   }
-  _statusItem.button.title =
-      [NSString stringWithFormat:@"◷ %d", _benchUp ? _snapshot.live : 0];
-  _statusItem.button.toolTip =
-      _benchUp && _snapshot.has_bench
-          ? [NSString stringWithFormat:@"bench %@ vs this Mac",
-                                       offset_text(_snapshot.bench_offset)]
-          : @"Octomancer";
+  [self setStatusBlip:nil
+                  tip:view.has_canonical
+                          ? [NSString stringWithFormat:
+                                          @"Octomancer: bench %@ vs this Mac",
+                                          offset_text(view.canonical_offset_s)]
+                          : @"Octomancer"];
 }
 
 - (NSMenuItem*)disabledItem:(NSString*)title {
@@ -782,10 +859,26 @@ struct ScanHit {
   [_menu addItemWithTitle:@"Sync Camera Now"
                    action:@selector(syncNow:)
             keyEquivalent:@""].target = self;
+  // Two ways out, because there were two things behind the one that used to be
+  // here and only one of them was "quit". This process is a window onto the
+  // daemons; closing it stops notifications and nothing else, and the clocks
+  // go on being set. Somebody who means "stop setting my cameras' clocks" has
+  // to be able to say that, and somebody who means "get this out of my menu
+  // bar" must not say the other by accident. Hence two items whose titles are
+  // each unmistakable, and a note under the harmless one.
+  //
+  // Cmd-Q stays on the harmless one. It is the reflex, and a reflex should not
+  // be able to stop the bench.
   [_menu addItem:[NSMenuItem separatorItem]];
-  [_menu addItemWithTitle:@"Quit Octomancer"
+  [_menu addItemWithTitle:@"Quit the Menu Bar App"
                    action:@selector(quit:)
             keyEquivalent:@"q"].target = self;
+  [_menu addItem:[self disabledItem:@"    The daemons keep running and keep "
+                                    @"syncing."]];
+  [_menu addItem:[NSMenuItem separatorItem]];
+  [_menu addItemWithTitle:@"Stop Octomancer and Its Daemons…"
+                   action:@selector(stopEverything:)
+            keyEquivalent:@""].target = self;
 }
 
 // ------------------------------------------------------------------- window
@@ -980,9 +1073,15 @@ struct ScanHit {
   // devices count, whether the daemons are running, and the one thing that has
   // to have happened before a camera can be talked to at all.
 
-  _configGrid = [NSGridView gridViewWithNumberOfColumns:3 rows:0];
+  // Two checkboxes per device and so two columns of them, headed, because
+  // "on" and "warn" are different questions and a row of bare boxes would make
+  // somebody count across to work out which is which. Centred under their
+  // headings for the same reason.
+  _configGrid = [NSGridView gridViewWithNumberOfColumns:4 rows:0];
   _configGrid.columnSpacing = 10;
   _configGrid.rowSpacing = 5;
+  [_configGrid columnAtIndex:0].xPlacement = NSGridCellPlacementCenter;
+  [_configGrid columnAtIndex:1].xPlacement = NSGridCellPlacementCenter;
   _configNote = wrapped_label(@"…");
 
   NSButton* pairButton = [NSButton buttonWithTitle:@"Pair Camera…"
@@ -1583,17 +1682,30 @@ struct ScanHit {
 // against. All that happens here is turning its answer into labels, and the
 // labels are what is kept: the view is rebuilt only when the list of devices
 // changes, so a two-second tick moves the numbers rather than the window.
-- (void)updateDevices {
-  if (_deviceGrid == nil) return;
-
+// The merged list, built from whatever the last poll came back with.
+//
+// Two callers want it -- this page and the menu-bar blip -- and the menu-bar
+// item exists whether or not the window has ever been opened, so it cannot be
+// a side effect of drawing the page. Cheap enough to build twice a tick: it is
+// arithmetic over two structures already in memory, with no socket and no file
+// anywhere in it.
+- (octo::DeviceView)deviceView {
   octo::DeviceSources src;
   src.bench = _benchUp ? &_snapshot : nullptr;
   src.cameras = _controlUp ? &_status : nullptr;
   // A configuration that could not be read is not a configuration that says
   // no. Null means "everything is enabled", which shows every device rather
-  // than an empty page that explains nothing.
+  // than an empty page that explains nothing. It also means nothing warns,
+  // which is the right way round: a file we could not read is not permission
+  // to light something up on somebody's behalf.
   src.conf = _confLoaded ? &_conf : nullptr;
-  const octo::DeviceView view = octo::build_device_view(src);
+  return octo::build_device_view(src);
+}
+
+- (void)updateDevices {
+  if (_deviceGrid == nil) return;
+
+  const octo::DeviceView view = [self deviceView];
 
   if (view.has_canonical) {
     _canonicalLine.stringValue =
@@ -1634,8 +1746,23 @@ struct ScanHit {
     NSColor* faint = live ? [NSColor secondaryLabelColor]
                           : [NSColor tertiaryLabelColor];
 
-    cells[0].stringValue = ns(r.name);
-    cells[0].textColor = ink;
+    // A warning is drawn on the name, in the same red and yellow as the
+    // menu-bar blip and with the same `!` and `?` the terminal uses. The
+    // marker is there as well as the colour because the blip that sent
+    // somebody to this page only carried a colour, and a row that answers
+    // "which device, and which of the two things" in text answers it for
+    // whoever cannot tell the two colours apart.
+    NSString* mark = @"";
+    NSColor* named = ink;
+    if (r.warn_level == octo::WarnLevel::kOutOfSync) {
+      mark = @" !";
+      named = [NSColor systemRedColor];
+    } else if (r.warn_level == octo::WarnLevel::kUnsure) {
+      mark = @" ?";
+      named = [NSColor systemYellowColor];
+    }
+    cells[0].stringValue = [ns(r.name) stringByAppendingString:mark];
+    cells[0].textColor = named;
 
     // A held link ages from nothing: the camera stopped advertising because we
     // are connected to it, so "now" is the honest word.
@@ -1737,6 +1864,7 @@ struct ScanHit {
       e.name = d.name.empty() ? d.id : d.name;
       e.present = d.live;
       e.enabled = _confLoaded ? _conf.box_enabled(d.id) : true;
+      e.warn = _confLoaded && _conf.warn_enabled(d.id);
       entries.push_back(e);
       known.insert("t:" + d.id);
     }
@@ -1749,6 +1877,7 @@ struct ScanHit {
       e.id = b.id;
       e.name = b.name.empty() ? b.id : b.name;
       e.enabled = b.enabled;
+      e.warn = b.warn;
       entries.push_back(e);
       known.insert("t:" + b.id);
     }
@@ -1763,6 +1892,7 @@ struct ScanHit {
       // advertising precisely because we are connected to it.
       e.present = c.present || c.connected;
       e.enabled = _confLoaded ? _conf.writes_enabled(c.id) : c.writes_enabled;
+      e.warn = _confLoaded && _conf.warn_enabled(c.id);
       entries.push_back(e);
       known.insert("c:" + c.id);
     }
@@ -1775,6 +1905,7 @@ struct ScanHit {
       e.id = c.id;
       e.name = c.name.empty() ? c.id : c.name;
       e.enabled = c.writes_enabled;
+      e.warn = c.warn;
       entries.push_back(e);
       known.insert("c:" + c.id);
     }
@@ -1796,13 +1927,22 @@ struct ScanHit {
     NSArray<NSView*>* cells = _configCells[_configKeys[i]];
     if (cells == nil) continue;
     NSButton* box = (NSButton*)cells[0];
-    NSTextField* name = (NSTextField*)cells[1];
-    NSTextField* who = (NSTextField*)cells[2];
+    NSButton* warn = (NSButton*)cells[1];
+    NSTextField* name = (NSTextField*)cells[2];
+    NSTextField* who = (NSTextField*)cells[3];
     // The tag is how a click finds its way back to a device: the checkbox
     // itself knows nothing, and the list it indexes into is rebuilt in the
     // same order every tick.
     box.tag = static_cast<NSInteger>(i);
+    warn.tag = static_cast<NSInteger>(i);
     box.state = e.enabled ? NSControlStateValueOn : NSControlStateValueOff;
+    warn.state = e.warn ? NSControlStateValueOn : NSControlStateValueOff;
+    // A switched-off device is left out of the merged view entirely, so its
+    // warning could never fire -- see build_device_view. Greyed rather than
+    // cleared: the setting is still in the file and comes back the moment the
+    // device is switched on again, and silently unticking somebody's box to
+    // represent "this has no effect right now" would lose what they asked for.
+    warn.enabled = e.enabled;
     name.stringValue = ns(e.name);
     name.textColor = e.present ? [NSColor labelColor]
                                : [NSColor secondaryLabelColor];
@@ -1821,7 +1961,11 @@ struct ScanHit {
     _configNote.stringValue =
         ns("Saved in " + _conf.path() +
            ". A camera has to be enabled before anything will write to it; a "
-           "box is heard unless it is switched off here.");
+           "box is heard unless it is switched off here. Warn puts a blip in "
+           "the menu bar -- red when that device is out of sync, yellow when "
+           "it has been quiet too long to say -- and it is off everywhere "
+           "until asked for, so that the light still means something on the "
+           "day it comes on.");
   } else {
     _configNote.stringValue =
         @"The configuration file could not be read, so everything is shown as "
@@ -1832,14 +1976,37 @@ struct ScanHit {
 - (void)rebuildConfigGrid:(NSArray<NSString*>*)keys {
   while (_configGrid.numberOfRows > 0) [_configGrid removeRowAtIndex:0];
 
+  NSArray<NSTextField*>* header = @[
+    dim_label(@"On"), dim_label(@"Warn if out of sync"), dim_label(@"Device"),
+    dim_label(@""),
+  ];
+  for (NSTextField* f in header) {
+    f.font = [NSFont systemFontOfSize:NSFont.smallSystemFontSize];
+  }
+  // The first column's heading has to cover two different things -- a camera
+  // may be written to, a timecode box is listened to -- and no single word
+  // covers both without lying about one of them. "On" is the word people use
+  // for a checkbox anyway, and the note under the grid says what it means for
+  // each kind.
+  header[0].toolTip = @"Cameras: may octomancer set this one's clock. "
+                      @"Timecode boxes: is this one listened to at all.";
+  header[1].toolTip =
+      @"Show a blip in the menu bar when this device is too far from the "
+      @"bench, or when it has not been heard from recently enough to say.";
+  [_configGrid addRowWithViews:header];
+
   for (NSString* key in keys) {
     NSArray<NSView*>* cells = _configCells[key];
     if (cells == nil) {
-      SEL toggled = @selector(deviceEnabledToggled:);
-      NSButton* box = [NSButton checkboxWithTitle:@""
-                                           target:self
-                                           action:toggled];
-      cells = @[ box, label(@""), dim_label(@"") ];
+      SEL onOff = @selector(deviceEnabledToggled:);
+      SEL warned = @selector(deviceWarnToggled:);
+      NSButton* on = [NSButton checkboxWithTitle:@"" target:self action:onOff];
+      NSButton* warn = [NSButton checkboxWithTitle:@""
+                                            target:self
+                                            action:warned];
+      on.toolTip = header[0].toolTip;
+      warn.toolTip = header[1].toolTip;
+      cells = @[ on, warn, label(@""), dim_label(@"") ];
       _configCells[key] = cells;
     }
     [_configGrid addRowWithViews:cells];
@@ -1852,18 +2019,31 @@ struct ScanHit {
   [_configCells removeObjectsForKeys:stale];
 }
 
-// A device switched on or off.
+// A device switched on or off, or asked to start warning.
 //
 // Written to the configuration file rather than sent over a socket, because
 // that file is the one a person owns and the daemons only ever read it -- see
 // camconf.h. The reload afterwards is what turns a saved line into behaviour
 // inside a quarter of a second rather than at the next restart.
+//
+// Both checkboxes come here. They set different keys on the same line and are
+// otherwise the same job -- write, complain and snap back if it did not take,
+// refresh -- and two copies of that would be two chances to get the
+// snapping-back wrong on one of them.
 - (void)deviceEnabledToggled:(id)sender {
-  NSButton* box = (NSButton*)sender;
+  [self saveDeviceFlag:(NSButton*)sender warning:NO];
+}
+
+- (void)deviceWarnToggled:(id)sender {
+  [self saveDeviceFlag:(NSButton*)sender warning:YES];
+}
+
+- (void)saveDeviceFlag:(NSButton*)box warning:(BOOL)warning {
   const NSInteger which = box.tag;
   if (which < 0 || static_cast<size_t>(which) >= _configEntries.size()) return;
   const ConfigEntry entry = _configEntries[static_cast<size_t>(which)];
   const bool wanted = box.state == NSControlStateValueOn;
+  const bool isWarn = warning == YES;
   const std::string configPath = _status.daemon.config_path.empty()
                                      ? octo::default_camera_config_path()
                                      : _status.daemon.config_path;
@@ -1874,15 +2054,22 @@ struct ScanHit {
     std::string err;
     bool ok = conf.load(configPath, &err);
     if (ok) {
-      ok = entry.camera ? conf.set_writes(entry.id, entry.name, wanted, &err)
-                        : conf.set_box_enabled(entry.id, entry.name, wanted,
-                                               &err);
+      if (isWarn) {
+        ok = entry.camera
+                 ? conf.set_camera_warn(entry.id, entry.name, wanted, &err)
+                 : conf.set_box_warn(entry.id, entry.name, wanted, &err);
+      } else {
+        ok = entry.camera ? conf.set_writes(entry.id, entry.name, wanted, &err)
+                          : conf.set_box_enabled(entry.id, entry.name, wanted,
+                                                 &err);
+      }
     }
-    // Only octomancer-sync reads this file, and only its camera lines change
-    // what it does: switching a box off is a decision about what gets counted
-    // and drawn here, and nothing on the other end of the socket has an
-    // opinion about it. Telling it anyway would break its poll for nothing.
-    if (ok && entry.camera) {
+    // Only octomancer-sync reads this file, and only its camera permissions
+    // change what it does: switching a box off is a decision about what gets
+    // counted and drawn here, and a warning is a decision about this window
+    // alone -- no daemon has ever read that key. Telling it anyway would break
+    // its poll for nothing.
+    if (ok && entry.camera && !isWarn) {
       std::string reply, ignored;
       octo::query(socketPath, "reload", &reply, &ignored, 3.0);
     }
@@ -2276,6 +2463,63 @@ struct ScanHit {
 - (void)quit:(id)sender {
   (void)sender;
   [NSApp terminate:nil];
+}
+
+// The other way out: stop the things that are actually doing the work.
+//
+// Confirmed first, and worth confirming: somebody may be shooting, and this is
+// the switch that stops their cameras' clocks from being corrected. The alert
+// says what stopping does and what it does not -- octo::agent_stop is
+// `launchctl bootout`, which unloads the agent but leaves the plist in
+// ~/Library/LaunchAgents, so an installed agent is back at the next login.
+// Taking the plist away is `agent_uninstall`, that is a different decision, and
+// the "Start at boot" checkbox on the Configuration page is where it is made.
+//
+// The daemons go down before this process does. Quitting first and stopping
+// afterwards would leave nothing on screen to say that a daemon refused.
+- (void)stopEverything:(id)sender {
+  (void)sender;
+
+  NSAlert* alert = [[NSAlert alloc] init];
+  alert.alertStyle = NSAlertStyleWarning;
+  alert.messageText = @"Stop Octomancer and its daemons?";
+  alert.informativeText =
+      @"Nothing will watch the timecode bench and no camera clock will be "
+      @"corrected until the daemons are started again — from Octomancer.app, "
+      @"or with `octomancer start`.\n\n"
+      @"They stay installed: if “Start at boot” is on they will come back the "
+      @"next time you log in.";
+  NSButton* stop = [alert addButtonWithTitle:@"Stop Everything"];
+  NSButton* cancel = [alert addButtonWithTitle:@"Cancel"];
+  // Return is Cancel rather than Stop. The default button on a destructive
+  // question should be the one that changes nothing.
+  stop.keyEquivalent = @"";
+  cancel.keyEquivalent = @"\r";
+  if ([alert runModal] != NSAlertFirstButtonReturn) return;
+
+  dispatch_async(_queue, ^{
+    std::string failure;
+    for (const octo::Agent a : {octo::Agent::kBench, octo::Agent::kSync}) {
+      std::string err;
+      if (!octo::agent_stop(a, &err) && failure.empty()) failure = err;
+    }
+    dispatch_async(dispatch_get_main_queue(), ^{
+      if (!failure.empty()) {
+        // Still running, so say so and stay up. Quitting anyway would leave
+        // somebody believing they had stopped a daemon that is at that moment
+        // connecting to a camera.
+        [self complain:@"Could not stop the daemons."
+                  info:[NSString stringWithFormat:
+                                     @"%@\n\nNothing has been quit, so this "
+                                     @"can be tried again.",
+                                     ns(failure)]];
+        [self refreshDaemonState];
+        [self refresh];
+        return;
+      }
+      [NSApp terminate:nil];
+    });
+  });
 }
 
 - (void)applicationWillTerminate:(NSNotification*)note {

@@ -86,6 +86,46 @@ std::string camera_note(const CameraStatus& c) {
 
 int kind_order(DeviceKind k) { return k == DeviceKind::kTentacle ? 0 : 1; }
 
+// The whole warning rule, in the order the questions have to be asked.
+//
+// Age comes before the reading, and that ordering is the entire point of
+// having a yellow at all. A stale offset is not evidence of being in sync --
+// it is a measurement of where the device was the last time anybody heard it
+// -- and drawing an hour-old reading as though it were current is how
+// somebody ends up shooting against a clock that walked off while they were
+// not looking. Better to say "we do not know" than to say something
+// reassuring that nothing supports.
+WarnLevel warn_level_for(const DeviceRow& r) {
+  if (!r.warn) return WarnLevel::kNone;
+  // A held link is a camera we are talking to continuously, so it is being
+  // heard by definition and the last advertisement means nothing. The row
+  // already carries age zero for that reason; this guards it a second time so
+  // the rule reads correctly on its own.
+  if (r.link != LinkState::kHeld && (!r.has_age || r.age_s > kWarnSilence)) {
+    return WarnLevel::kUnsure;
+  }
+  // No offset means either that there is no canonical time to measure this
+  // against or that the device has not said what time it thinks it is. Either
+  // way there is nothing to have an opinion about, and staying quiet here
+  // would amount to saying it is fine.
+  if (!r.has_offset) return WarnLevel::kUnsure;
+  if (std::fabs(r.offset_s) > kWarnOffset) return WarnLevel::kOutOfSync;
+  return WarnLevel::kNone;
+}
+
+// The marker a warned row carries in the DEVICE column. One character either
+// way, and the same character with colour off: the tests compare the coloured
+// output against the plain one byte for byte, and somebody piping this into a
+// file should not lose the one thing they were watching for.
+const char* warn_mark(WarnLevel w) {
+  switch (w) {
+    case WarnLevel::kOutOfSync: return " !";
+    case WarnLevel::kUnsure: return " ?";
+    case WarnLevel::kNone: break;
+  }
+  return "";
+}
+
 }  // namespace
 
 const char* link_state_name(LinkState s) {
@@ -100,6 +140,15 @@ const char* link_state_name(LinkState s) {
 
 bool link_is_live(LinkState s) {
   return s == LinkState::kHeld || s == LinkState::kOnTheAir;
+}
+
+const char* warn_level_name(WarnLevel w) {
+  switch (w) {
+    case WarnLevel::kOutOfSync: return "out of sync";
+    case WarnLevel::kUnsure: return "unsure";
+    case WarnLevel::kNone: break;
+  }
+  return "none";
 }
 
 DeviceView build_device_view(const DeviceSources& from) {
@@ -277,6 +326,27 @@ DeviceView build_device_view(const DeviceSources& from) {
                      }
                      return link_is_live(a.link) && !link_is_live(b.link);
                    });
+
+  // --- the warnings ----------------------------------------------------
+  //
+  // Done here, over `rows`, which is to say over the enabled devices only. A
+  // device somebody has switched off is one they have said they are not
+  // working with today, and it must never light anything up -- otherwise
+  // switching a box off would be no relief at all from being told about it,
+  // and the only remaining way to stop the light would be to stop looking.
+  //
+  // With no configuration at all, nothing warns: a view built without one has
+  // no way to know what anybody cares about, and guessing would mean deciding
+  // on someone's behalf that every device in range is theirs.
+  for (DeviceRow& r : v.rows) {
+    r.warn = from.conf != nullptr && from.conf->warn_enabled(r.id);
+    r.warn_level = warn_level_for(r);
+    if (r.warn_level == WarnLevel::kOutOfSync) ++v.warned_out_of_sync;
+    if (r.warn_level == WarnLevel::kUnsure) ++v.warned_unsure;
+    if (static_cast<int>(r.warn_level) > static_cast<int>(v.worst_warning)) {
+      v.worst_warning = r.warn_level;
+    }
+  }
   return v;
 }
 
@@ -327,9 +397,25 @@ std::string render_devices(const DeviceView& v, bool verbose, bool color) {
   }
 
   for (const DeviceRow& r : v.rows) {
-    const char* name_colour = r.alerting ? st.red
-                              : link_is_live(r.link) ? ""
-                                                     : st.dim;
+    // A warning outranks the alert colour and the dimming, because it is the
+    // one thing on this row somebody explicitly asked to be shown.
+    const char* name_colour =
+        r.warn_level == WarnLevel::kOutOfSync ? st.red
+        : r.warn_level == WarnLevel::kUnsure  ? st.yellow
+        : r.alerting                          ? st.red
+        : link_is_live(r.link)                ? ""
+                                              : st.dim;
+    // The marker rides inside the DEVICE column rather than in one of its
+    // own, so a table that already fills a narrow terminal does not grow two
+    // characters wider for the sake of a flag most rows do not carry. It
+    // costs a warned row two characters of name, which is the cheaper of the
+    // two prices.
+    std::string label = r.name;
+    const char* mark = warn_mark(r.warn_level);
+    if (mark[0] != '\0') {
+      if (label.size() > 12) label.resize(12);
+      label += mark;
+    }
     const std::string age =
         r.has_age ? format_age(r.age_s) : std::string("--");
     const std::string off =
@@ -340,7 +426,7 @@ std::string render_devices(const DeviceView& v, bool verbose, bool color) {
     // until somebody copies a row out of a terminal, and then they are not.
     out += fmt(verbose ? "%s%-14.14s%s %s%6s%s %s%10s%s %s%-11s%s"
                        : "%s%-14.14s%s %s%6s%s %s%10s%s %s%s%s",
-               name_colour, r.name.c_str(), st.off,
+               name_colour, label.c_str(), st.off,
                r.has_age ? "" : st.dim, age.c_str(), st.off,
                r.has_offset ? "" : st.dim, off.c_str(), st.off,
                link_colour, link_state_name(r.link), st.off);
@@ -376,6 +462,30 @@ std::string render_devices(const DeviceView& v, bool verbose, bool color) {
       const char* colour = r.alerting ? st.red : st.dim;
       out += fmt("%s%s -- %s%s\n", colour, r.name.c_str(), r.note.c_str(),
                  st.off);
+    }
+  }
+
+  // Under the table, because the marker in the column says which row and this
+  // says what it means. Names rather than a count: "one device out of sync"
+  // only sends somebody looking, and by then the table has already told them.
+  if (v.warned_out_of_sync > 0 || v.warned_unsure > 0) {
+    out += "\n";
+    for (int pass = 0; pass < 2; ++pass) {
+      const bool red = pass == 0;
+      const WarnLevel want =
+          red ? WarnLevel::kOutOfSync : WarnLevel::kUnsure;
+      std::string names;
+      for (const DeviceRow& r : v.rows) {
+        if (r.warn_level != want) continue;
+        if (!names.empty()) names += ", ";
+        names += r.name;
+      }
+      if (names.empty()) continue;
+      out += fmt("%s%s %s: %s%s\n", red ? st.red : st.yellow,
+                 red ? "!" : "?",
+                 red ? "out of sync with the bench"
+                     : "not heard from recently enough to say",
+                 names.c_str(), st.off);
     }
   }
   return out;

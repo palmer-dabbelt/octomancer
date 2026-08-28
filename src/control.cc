@@ -319,6 +319,9 @@ std::string render_status(const Status& s) {
     put(&out, "name", c.name);
     put_bool(&out, "present", c.present);
     put_bool(&out, "connected", c.connected);
+    if (c.has_last_seen) put(&out, "last_seen", c.last_seen_wall, 3);
+    if (c.has_rssi) put(&out, "rssi", static_cast<long long>(c.rssi));
+    put(&out, "sessions", static_cast<long long>(c.sessions));
     put_bool(&out, "may_write", c.writes_enabled);
     if (c.has_error) put(&out, "error", c.error_s, 4);
     if (!c.timecode.empty()) put(&out, "tc", c.timecode);
@@ -370,6 +373,11 @@ std::string render_status_json(const Status& s) {
     out += c.present ? "true" : "false";
     out += ",\"connected\":";
     out += c.connected ? "true" : "false";
+    if (c.has_last_seen) {
+      out += ",\"last_seen_wall\":" + num_json(c.last_seen_wall, 3);
+    }
+    if (c.has_rssi) out += ",\"rssi\":" + std::to_string(c.rssi);
+    out += ",\"sessions\":" + std::to_string(c.sessions);
     out += ",\"may_write\":";
     out += c.writes_enabled ? "true" : "false";
     if (c.has_error) out += ",\"error_s\":" + num_json(c.error_s, 4);
@@ -454,6 +462,14 @@ bool parse_status(const std::string& text, Status* out, std::string* err) {
       t.str("name", &c.name);
       t.flag("present", &c.present);
       t.flag("connected", &c.connected);
+      c.has_last_seen = t.real("last_seen", &c.last_seen_wall);
+      int64_t rssi = 0;
+      if (t.num("rssi", &rssi)) {
+        c.has_rssi = true;
+        c.rssi = static_cast<int>(rssi);
+      }
+      int64_t sessions = 0;
+      if (t.num("sessions", &sessions)) c.sessions = static_cast<int>(sessions);
       t.flag("may_write", &c.writes_enabled);
       c.has_error = t.real("error", &c.error_s);
       t.str("tc", &c.timecode);
@@ -563,8 +579,13 @@ void Control::set_present(const std::string& id, bool present) {
   std::lock_guard<std::mutex> lock(mu_);
   for (CameraStatus& c : cameras_) {
     if (c.id == id) {
+      // Deliberately *not* clearing `connected` when a camera goes absent.
+      // A held link is the usual reason a Blackmagic camera stops
+      // advertising, so absence is evidence for a live connection at least as
+      // often as against one. Presence is what the scanner heard; connected is
+      // what the link says. Letting one overwrite the other is precisely the
+      // conflation that made "camera off the air" mean two opposite things.
       c.present = present;
-      if (!present) c.connected = false;
       return;
     }
   }

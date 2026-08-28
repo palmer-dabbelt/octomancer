@@ -24,11 +24,18 @@ const char kHeader[] =
     "# and then run `octomancer reload` so the running daemon picks it up.\n"
     "#\n"
     "#   default writes=off\n"
+    "#   default enabled=on\n"
     "#   camera <ble-id> writes=on name=<label>\n"
+    "#   box    <ble-id> enabled=off name=<label>\n"
     "#\n"
     "# `writes` is permission to change anything on that camera: its clock,\n"
     "# and its timecode source. Off means octomancer will read it and report\n"
     "# on it, and never touch it. New cameras are off until named here.\n"
+    "#\n"
+    "# `enabled` says whether a Tentacle box is used at all. New boxes are\n"
+    "# on: listening to one is passive and costs nothing, so unlike writing\n"
+    "# to a camera it needs nobody's permission first. Turn one off here to\n"
+    "# stop seeing a box that is not part of this shoot.\n"
     "\n";
 
 std::string trim(const std::string& s) {
@@ -115,7 +122,9 @@ bool CamConf::load(const std::string& path, std::string* err) {
   loaded_ = false;
   exists_ = false;
   default_writes_ = false;
+  default_box_enabled_ = true;
   cameras_.clear();
+  boxes_.clear();
 
   if (path_.empty()) {
     loaded_ = true;  // explicitly no configuration: everything is off
@@ -156,11 +165,14 @@ bool CamConf::parse(const std::string& text, std::string* err) {
 
     if (verb == "default") {
       for (const Field& f : fields) {
-        if (f.key != "writes") continue;
-        if (!parse_bool(f.value, &default_writes_)) {
+        bool* into = nullptr;
+        if (f.key == "writes") into = &default_writes_;
+        if (f.key == "enabled") into = &default_box_enabled_;
+        if (into == nullptr) continue;
+        if (!parse_bool(f.value, into)) {
           if (err) {
-            *err = path_ + ":" + std::to_string(lineno) +
-                   ": writes must be on or off, not '" + f.value + "'";
+            *err = path_ + ":" + std::to_string(lineno) + ": " + f.key +
+                   " must be on or off, not '" + f.value + "'";
           }
           return false;
         }
@@ -199,6 +211,37 @@ bool CamConf::parse(const std::string& text, std::string* err) {
       continue;
     }
 
+    if (verb == "box") {
+      if (fields.empty()) {
+        if (err) {
+          *err = path_ + ":" + std::to_string(lineno) +
+                 ": box needs an identifier";
+        }
+        return false;
+      }
+      BoxConfig cfg;
+      cfg.id = fields[0].value.empty() ? fields[0].key : fields[0].value;
+      cfg.enabled = default_box_enabled_;
+      for (size_t i = 1; i < fields.size(); ++i) {
+        const Field& f = fields[i];
+        if (f.key == "enabled") {
+          if (!parse_bool(f.value, &cfg.enabled)) {
+            if (err) {
+              *err = path_ + ":" + std::to_string(lineno) +
+                     ": enabled must be on or off, not '" + f.value + "'";
+            }
+            return false;
+          }
+        } else if (f.key == "name") {
+          cfg.name = f.value;
+        }
+        // Unknown keys survive here for the same reason they do on a camera
+        // line: a newer version's file must still start an older daemon.
+      }
+      boxes_.push_back(cfg);
+      continue;
+    }
+
     // Same reasoning: an unknown directive is ignored, not fatal.
   }
   return true;
@@ -216,6 +259,18 @@ bool CamConf::writes_enabled(const std::string& id) const {
   return c != nullptr ? c->writes_enabled : default_writes_;
 }
 
+const BoxConfig* CamConf::find_box(const std::string& id) const {
+  for (const BoxConfig& b : boxes_) {
+    if (b.id == id) return &b;
+  }
+  return nullptr;
+}
+
+bool CamConf::box_enabled(const std::string& id) const {
+  const BoxConfig* b = find_box(id);
+  return b != nullptr ? b->enabled : default_box_enabled_;
+}
+
 bool CamConf::any_writes_enabled() const {
   if (default_writes_) return true;
   for (const CameraConfig& c : cameras_) {
@@ -226,6 +281,17 @@ bool CamConf::any_writes_enabled() const {
 
 bool CamConf::set_writes(const std::string& id, const std::string& name,
                          bool enabled, std::string* err) {
+  return set_flag("camera", "writes", id, name, enabled, err);
+}
+
+bool CamConf::set_box_enabled(const std::string& id, const std::string& name,
+                              bool enabled, std::string* err) {
+  return set_flag("box", "enabled", id, name, enabled, err);
+}
+
+bool CamConf::set_flag(const char* verb, const char* key,
+                       const std::string& id, const std::string& name,
+                       bool enabled, std::string* err) {
   if (path_.empty()) {
     if (err) *err = "no configuration file to write to";
     return false;
@@ -245,13 +311,17 @@ bool CamConf::set_writes(const std::string& id, const std::string& name,
     }
   }
 
+  const std::string value = enabled ? "on" : "off";
   bool replaced = false;
   for (std::string& line : lines) {
     const std::string t = trim(line);
     if (t.empty() || t[0] == '#') continue;
     const size_t sp = t.find_first_of(" \t");
     if (sp == std::string::npos) continue;
-    if (t.substr(0, sp) != "camera") continue;
+    // A camera line and a box line are different device classes over different
+    // id spaces, so matching the id is not enough: the verb has to match too,
+    // or turning a box off would rewrite a camera that happened to share it.
+    if (t.substr(0, sp) != verb) continue;
 
     std::vector<Field> fields = fields_of(t.substr(sp + 1));
     if (fields.empty()) continue;
@@ -260,15 +330,15 @@ bool CamConf::set_writes(const std::string& id, const std::string& name,
     if (this_id != id) continue;
 
     // Rebuild this line, keeping fields we do not own in their original
-    // order and only replacing the value of `writes`.
-    std::string rebuilt = "camera " + this_id;
-    bool wrote_writes = false;
+    // order and only replacing the value of our own key.
+    std::string rebuilt = std::string(verb) + " " + this_id;
+    bool wrote_flag = false;
     bool wrote_name = false;
     for (size_t i = 1; i < fields.size(); ++i) {
       const Field& f = fields[i];
-      if (f.key == "writes") {
-        rebuilt += std::string(" writes=") + (enabled ? "on" : "off");
-        wrote_writes = true;
+      if (f.key == key) {
+        rebuilt += " " + std::string(key) + "=" + value;
+        wrote_flag = true;
       } else if (f.key == "name") {
         rebuilt += " name=" + (name.empty() ? f.value : safe_label(name));
         wrote_name = true;
@@ -276,9 +346,7 @@ bool CamConf::set_writes(const std::string& id, const std::string& name,
         rebuilt += " " + f.key + (f.value.empty() ? "" : "=" + f.value);
       }
     }
-    if (!wrote_writes) {
-      rebuilt += std::string(" writes=") + (enabled ? "on" : "off");
-    }
+    if (!wrote_flag) rebuilt += " " + std::string(key) + "=" + value;
     if (!wrote_name && !name.empty()) rebuilt += " name=" + safe_label(name);
     line = rebuilt;
     replaced = true;
@@ -286,7 +354,8 @@ bool CamConf::set_writes(const std::string& id, const std::string& name,
   }
 
   if (!replaced) {
-    std::string added = "camera " + id + " writes=" + (enabled ? "on" : "off");
+    std::string added =
+        std::string(verb) + " " + id + " " + std::string(key) + "=" + value;
     if (!name.empty()) added += " name=" + safe_label(name);
     lines.push_back(added);
   }

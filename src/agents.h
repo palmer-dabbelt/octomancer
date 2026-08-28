@@ -49,6 +49,13 @@ struct AgentState {
   bool running = false;    // ...and it has a process right now
   int pid = 0;
   int last_exit = 0;
+
+  // When this process started, as an absolute wall clock. Taken from the
+  // kernel rather than from the daemon's own socket, so it is still there
+  // for a daemon that is running but has stopped answering -- which is
+  // exactly the daemon somebody is about to restart.
+  bool has_started = false;
+  double started_wall = 0.0;
 };
 
 AgentState agent_state(Agent a);

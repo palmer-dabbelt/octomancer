@@ -4,7 +4,12 @@
 #include <mach-o/dyld.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <sys/types.h>
 #include <sys/wait.h>
+#if defined(__APPLE__)
+#include <sys/proc.h>
+#include <sys/sysctl.h>
+#endif
 #include <unistd.h>
 
 #include <cstdio>
@@ -116,6 +121,32 @@ bool field(const std::string& text, const char* key, std::string* out) {
     out->pop_back();
   }
   return true;
+}
+
+// How long a daemon has been up, which is a question only the kernel can
+// answer: launchd's own print output does not say, and the daemon's socket is
+// no help precisely when it matters, since a wedged daemon still has a start
+// time. Returns false if the process has gone away or the kernel declines to
+// talk, because an unknown start time is a blank in the display and not a
+// failure anybody needs to hear about.
+bool process_start_time(int pid, double* out) {
+#if defined(__APPLE__)
+  int mib[4] = {CTL_KERN, KERN_PROC, KERN_PROC_PID, pid};
+  struct kinfo_proc kp;
+  size_t len = sizeof kp;
+  if (::sysctl(mib, 4, &kp, &len, nullptr, 0) != 0) return false;
+  // A pid nobody owns is not an error from sysctl's point of view; it just
+  // fills nothing in, so the short answer has to be checked for.
+  if (len == 0) return false;
+  const struct timeval& tv = kp.kp_proc.p_starttime;
+  *out = static_cast<double>(tv.tv_sec) +
+         static_cast<double>(tv.tv_usec) / 1e6;
+  return true;
+#else
+  (void)pid;
+  (void)out;
+  return false;
+#endif
 }
 
 bool copy_file(const std::string& from, const std::string& to,
@@ -239,6 +270,9 @@ AgentState agent_state(Agent a) {
   }
   if (field(out, "last exit code", &value)) {
     state.last_exit = std::atoi(value.c_str());
+  }
+  if (state.running && state.pid > 0) {
+    state.has_started = process_start_time(state.pid, &state.started_wall);
   }
   return state;
 }

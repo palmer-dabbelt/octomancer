@@ -1,4 +1,4 @@
-// The per-camera configuration file.
+// The per-device configuration file.
 //
 // The thing this file is really testing is that a permission cannot change by
 // accident. Everything else in octomancer measures, learns and adjusts; this
@@ -18,6 +18,7 @@
 #include "camconf.h"
 #include "harness.h"
 
+using octo::BoxConfig;
 using octo::CamConf;
 using octo::CameraConfig;
 
@@ -282,6 +283,195 @@ void test_no_path_means_nothing_is_permitted() {
   // ...and there is nowhere to write it, which is an error rather than a
   // silent no-op.
   CHECK(!conf.set_writes("AAA", "x", true, &err));
+  CHECK(!conf.set_box_enabled("CCC", "x", false, &err));
+}
+
+
+// --- Tentacle boxes -------------------------------------------------------
+//
+// The same file, the other device class. The interesting difference is which
+// way the default points: a box nobody has said anything about is *on*,
+// because listening to a box is passive and costs nothing, where writing to a
+// camera is an action taken on someone's equipment.
+void test_box_line_is_parsed() {
+  const std::string path = temp_path("box");
+  write_file(path,
+             "# the boxes\n"
+             "box CCC enabled=off name=Slate\n"
+             "box DDD enabled=on\n");
+
+  CamConf conf;
+  std::string err;
+  CHECK(conf.load(path, &err));
+  CHECK_EQ(static_cast<int>(conf.boxes().size()), 2);
+  CHECK(!conf.box_enabled("CCC"));
+  CHECK(conf.box_enabled("DDD"));
+
+  const BoxConfig* c = conf.find_box("CCC");
+  CHECK(c != nullptr);
+  CHECK_STR(c->name, "Slate");
+  CHECK(conf.find_box("nobody") == nullptr);
+  ::unlink(path.c_str());
+}
+
+void test_unknown_box_is_on() {
+  const std::string path = temp_path("box-missing");
+  ::unlink(path.c_str());
+
+  CamConf conf;
+  std::string err;
+  CHECK(conf.load(path, &err));
+  CHECK(conf.default_box_enabled());
+  CHECK(conf.box_enabled("never-seen"));
+  // Which is the whole point: adding this setting changed nothing for anyone
+  // who has not used it.
+  CHECK(!conf.writes_enabled("never-seen"));
+}
+
+void test_default_enabled_off_is_honoured() {
+  const std::string path = temp_path("box-default-off");
+  write_file(path,
+             "default enabled=off\n"
+             "box CCC enabled=on\n");
+
+  CamConf conf;
+  std::string err;
+  CHECK(conf.load(path, &err));
+  CHECK(!conf.default_box_enabled());
+  CHECK(!conf.box_enabled("never-seen"));
+  CHECK(conf.box_enabled("CCC"));  // an explicit on beats the default
+  // The camera default is untouched by the box default and vice versa.
+  CHECK(!conf.default_writes_enabled());
+  ::unlink(path.c_str());
+}
+
+void test_unreadable_enabled_value_is_an_error() {
+  const std::string path = temp_path("box-bad");
+  write_file(path, "box CCC enabled=sometimes\n");
+
+  CamConf conf;
+  std::string err;
+  CHECK(!conf.load(path, &err));
+  CHECK(!err.empty());
+  CHECK(err.find("enabled") != std::string::npos);
+  ::unlink(path.c_str());
+}
+
+void test_setting_a_box_creates_the_file_and_flips() {
+  const std::string path = temp_path("box-append");
+  ::unlink(path.c_str());
+
+  CamConf conf;
+  std::string err;
+  CHECK(conf.load(path, &err));
+  CHECK(conf.set_box_enabled("CCC", "Tentacle 3", false, &err));
+  CHECK(!conf.box_enabled("CCC"));
+
+  const std::string after = read_file(path);
+  CHECK(after.find("# octomancer camera configuration") != std::string::npos);
+  CHECK(after.find("box CCC enabled=off") != std::string::npos);
+  // A name with a space in it cannot become a second setting.
+  CHECK(after.find("name=Tentacle_3") != std::string::npos);
+
+  // Flipping it back rewrites the line rather than adding another one.
+  CHECK(conf.set_box_enabled("CCC", "Tentacle 3", true, &err));
+  const std::string again = read_file(path);
+  size_t count = 0;
+  for (size_t at = again.find("box CCC"); at != std::string::npos;
+       at = again.find("box CCC", at + 1)) {
+    ++count;
+  }
+  CHECK_EQ(static_cast<int>(count), 1);
+
+  CamConf reread;
+  CHECK(reread.load(path, &err));
+  CHECK(reread.box_enabled("CCC"));
+  ::unlink(path.c_str());
+}
+
+void test_setting_a_box_preserves_everything_else() {
+  const std::string path = temp_path("box-preserve");
+  write_file(path,
+             "# my notes\n"
+             "default writes=off\n"
+             "camera AAA writes=on name=Tripod lens=50mm\n"
+             "\n"
+             "# CCC is the one taped to the cart\n"
+             "box CCC enabled=on colour=orange\n");
+
+  CamConf conf;
+  std::string err;
+  CHECK(conf.load(path, &err));
+  CHECK(conf.set_box_enabled("CCC", "Cart", false, &err));
+
+  const std::string after = read_file(path);
+  CHECK(after.find("# my notes") != std::string::npos);
+  CHECK(after.find("# CCC is the one taped to the cart") != std::string::npos);
+  CHECK(after.find("camera AAA writes=on name=Tripod lens=50mm") !=
+        std::string::npos);
+  // The setting this version has never heard of is still there.
+  CHECK(after.find("colour=orange") != std::string::npos);
+  CHECK(after.find("box CCC enabled=off") != std::string::npos);
+
+  // ...and the camera it had no business touching still says what it said.
+  CHECK(conf.writes_enabled("AAA"));
+  CHECK(!conf.box_enabled("CCC"));
+  ::unlink(path.c_str());
+}
+
+// One file, two device classes, and neither one answers the other's question.
+void test_cameras_and_boxes_round_trip_together() {
+  const std::string path = temp_path("mixed");
+  write_file(path,
+             "default writes=off\n"
+             "default enabled=on\n"
+             "camera AAA writes=on name=Tripod\n"
+             "box CCC enabled=off name=Slate\n"
+             "camera BBB writes=off\n"
+             "box DDD name=Cart\n");
+
+  CamConf conf;
+  std::string err;
+  CHECK(conf.load(path, &err));
+  CHECK_EQ(static_cast<int>(conf.cameras().size()), 2);
+  CHECK_EQ(static_cast<int>(conf.boxes().size()), 2);
+  CHECK(conf.writes_enabled("AAA"));
+  CHECK(!conf.box_enabled("CCC"));
+  CHECK(conf.box_enabled("DDD"));  // no enabled=, so the default
+
+  // The id spaces are separate. Asking about a box by a camera's id gets the
+  // box default, not that camera's permission, and the other way round.
+  CHECK(conf.box_enabled("AAA"));
+  CHECK(!conf.writes_enabled("CCC"));
+  CHECK(conf.find_box("AAA") == nullptr);
+  CHECK(conf.find("CCC") == nullptr);
+  ::unlink(path.c_str());
+}
+
+// An id in both lists is not a thing that happens, but if it did, each setter
+// must rewrite its own line and leave the other alone.
+void test_each_setter_only_touches_its_own_lines() {
+  const std::string path = temp_path("both");
+  write_file(path,
+             "camera SAME writes=off\n"
+             "box SAME enabled=on\n");
+
+  CamConf conf;
+  std::string err;
+  CHECK(conf.load(path, &err));
+  CHECK(conf.set_writes("SAME", "", true, &err));
+
+  std::string after = read_file(path);
+  CHECK(after.find("camera SAME writes=on") != std::string::npos);
+  CHECK(after.find("box SAME enabled=on") != std::string::npos);
+  CHECK(conf.box_enabled("SAME"));
+
+  CHECK(conf.set_box_enabled("SAME", "", false, &err));
+  after = read_file(path);
+  CHECK(after.find("camera SAME writes=on") != std::string::npos);
+  CHECK(after.find("box SAME enabled=off") != std::string::npos);
+  CHECK(conf.writes_enabled("SAME"));
+  ::unlink(path.c_str());
 }
 
 }  // namespace
@@ -299,5 +489,13 @@ int main() {
   test_hostile_camera_name_cannot_forge_a_setting();
   test_reload_picks_up_an_edit();
   test_no_path_means_nothing_is_permitted();
+  test_box_line_is_parsed();
+  test_unknown_box_is_on();
+  test_default_enabled_off_is_honoured();
+  test_unreadable_enabled_value_is_an_error();
+  test_setting_a_box_creates_the_file_and_flips();
+  test_setting_a_box_preserves_everything_else();
+  test_cameras_and_boxes_round_trip_together();
+  test_each_setter_only_touches_its_own_lines();
   return octotest::report("test_camconf");
 }

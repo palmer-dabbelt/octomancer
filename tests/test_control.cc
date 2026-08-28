@@ -110,7 +110,12 @@ Status sample_status() {
   c.id = "09EE26AF-D630";
   c.name = "A:1EAE18A7";
   c.present = true;
-  c.connected = false;
+  c.connected = true;
+  c.has_last_seen = true;
+  c.last_seen_wall = 1787684398.75;
+  c.has_rssi = true;
+  c.rssi = -61;
+  c.sessions = 3;
   c.has_error = true;
   c.error_s = -0.0777;
   c.timecode = "12:01:17:21";
@@ -152,6 +157,13 @@ void test_status_round_trip() {
   CHECK_EQ(c.id, in.cameras[0].id);
   CHECK_EQ(c.name, in.cameras[0].name);
   CHECK(c.present);
+  // The three fields that tell a held link from a camera that has gone: when
+  // it was last heard, how loud it was, and how many times it has come back.
+  CHECK(c.has_last_seen);
+  CHECK_NEAR(c.last_seen_wall, 1787684398.75, 1e-3);
+  CHECK(c.has_rssi);
+  CHECK_EQ(c.rssi, -61);
+  CHECK_EQ(c.sessions, 3);
   CHECK(c.has_error);
   CHECK_NEAR(c.error_s, -0.0777, 1e-4);
   CHECK_EQ(c.timecode, std::string("12:01:17:21"));
@@ -185,6 +197,42 @@ void test_status_distinguishes_absent_fields() {
   CHECK(!out.cameras[0].has_error);
   CHECK(!out.cameras[0].has_lead);
   CHECK(!out.cameras[0].has_last_write);
+  // Same for the two that say how the camera is being heard. A daemon that
+  // has never seen an advertisement must not read back as one that heard a
+  // silent camera at the epoch.
+  CHECK(!out.cameras[0].has_last_seen);
+  CHECK(!out.cameras[0].has_rssi);
+  CHECK_EQ(out.cameras[0].sessions, 0);
+
+  // ...and they are absent from the wire, not merely absent from the parse:
+  // a key present with an empty or zero value would defeat the has_ flag on
+  // any other reader.
+  const std::string wire = octo::render_status(in);
+  CHECK(wire.find("last_seen=") == std::string::npos);
+  CHECK(wire.find("rssi=") == std::string::npos);
+}
+
+// `connected` is the field that separates "the link is held, so the camera
+// has stopped advertising" from "the camera is gone". Everything else in the
+// suite only ever watched it being cleared, so a rendering that dropped the
+// true case would have gone unnoticed.
+void test_connected_survives_as_true() {
+  Status in;
+  CameraStatus c;
+  c.id = "held";
+  c.present = false;  // held links stop advertising; that is the point
+  c.connected = true;
+  in.cameras.push_back(c);
+
+  const std::string wire = octo::render_status(in);
+  CHECK(wire.find("connected=1") != std::string::npos);
+
+  Status out;
+  std::string err;
+  CHECK(octo::parse_status(wire, &out, &err));
+  CHECK_EQ(static_cast<int>(out.cameras.size()), 1);
+  CHECK(out.cameras[0].connected);
+  CHECK(!out.cameras[0].present);
 }
 
 void test_hostile_camera_name_survives_rendering() {
@@ -426,9 +474,10 @@ void test_cameras_persist_but_go_absent() {
   CHECK(octo::parse_status(control.handle("status"), &s, &err));
   CHECK_EQ(static_cast<int>(s.cameras.size()), 1);
   CHECK(!s.cameras[0].present);
-  // Absent implies disconnected; a stale `connected` would have a UI offering
-  // to sync something that is not there.
-  CHECK(!s.cameras[0].connected);
+  // Absence must NOT clear `connected`. A camera with a held link stops
+  // advertising *because* the link is held, so this is the one combination a
+  // reader most needs to be able to see: not on the air, and connected anyway.
+  CHECK(s.cameras[0].connected);
 
   // Publishing the same id updates rather than duplicating.
   c.present = true;
@@ -688,6 +737,38 @@ void test_json_carries_permission() {
   CHECK(off.find("\"may_write\":false") != std::string::npos);
 }
 
+// The JSON rendering is what anything scripted reads, and it grew the same
+// three fields as the text form -- under the names the JSON side already uses,
+// which are not the keys on the wire.
+void test_json_carries_liveness() {
+  Control control;
+  CameraStatus c;
+  c.id = "id";
+  c.connected = true;
+  c.has_last_seen = true;
+  c.last_seen_wall = 1787684398.75;
+  c.has_rssi = true;
+  c.rssi = -61;
+  c.sessions = 3;
+  control.publish_camera(c);
+
+  const std::string js = control.handle("json");
+  CHECK(js.find("\"last_seen_wall\":1787684398.750") != std::string::npos);
+  CHECK(js.find("\"rssi\":-61") != std::string::npos);
+  CHECK(js.find("\"sessions\":3") != std::string::npos);
+  CHECK(js.find("\"connected\":true") != std::string::npos);
+
+  // A camera nobody has heard from carries neither optional key.
+  Control quiet;
+  CameraStatus bare;
+  bare.id = "bare";
+  quiet.publish_camera(bare);
+  const std::string none = quiet.handle("json");
+  CHECK(none.find("last_seen_wall") == std::string::npos);
+  CHECK(none.find("rssi") == std::string::npos);
+  CHECK(none.find("\"sessions\":0") != std::string::npos);
+}
+
 }  // namespace
 
 int main() {
@@ -697,6 +778,7 @@ int main() {
   test_parse_command_rejects_nonsense_numbers();
   test_status_round_trip();
   test_status_distinguishes_absent_fields();
+  test_connected_survives_as_true();
   test_hostile_camera_name_survives_rendering();
   test_reply_errors_are_reported_not_parsed();
   test_result_round_trip();
@@ -718,5 +800,6 @@ int main() {
   test_permission_can_be_restated_without_a_cycle();
   test_reload_can_be_seen_without_taking_it();
   test_json_carries_permission();
+  test_json_carries_liveness();
   return octotest::report("test_control");
 }

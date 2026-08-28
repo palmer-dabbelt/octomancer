@@ -39,6 +39,8 @@ libocto_a_SOURCES = \
 	src/control.h \
 	src/crypto.cc \
 	src/crypto.h \
+	src/devices.cc \
+	src/devices.h \
 	src/hci.cc \
 	src/hci.h \
 	src/hcilink.cc \
@@ -252,6 +254,7 @@ check_PROGRAMS = \
 	tests/test_camsync \
 	tests/test_control \
 	tests/test_crypto \
+	tests/test_devices \
 	tests/test_hci \
 	tests/test_jsonlog \
 	tests/test_logscan \
@@ -293,6 +296,9 @@ tests_test_camdb_LDADD = libocto.a
 
 tests_test_control_SOURCES = tests/test_control.cc tests/harness.h
 tests_test_control_LDADD = libocto.a
+
+tests_test_devices_SOURCES = tests/test_devices.cc tests/harness.h
+tests_test_devices_LDADD = libocto.a
 
 tests_test_proclock_SOURCES = tests/test_proclock.cc tests/harness.h
 tests_test_proclock_LDADD = libocto.a

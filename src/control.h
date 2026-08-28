@@ -103,6 +103,23 @@ struct CameraStatus {
   bool present = false;    // seen on the air recently
   bool connected = false;  // a link is open right now
 
+  // When this camera was last heard advertising, as an absolute wall clock.
+  // Absolute rather than an age because a client polls on its own schedule
+  // and an age computed by the daemon is stale by the time it is drawn.
+  bool has_last_seen = false;
+  double last_seen_wall = 0.0;
+
+  // Signal strength at the last advertisement. Worth carrying because a
+  // camera that is merely far away and one that has been switched off look
+  // identical otherwise.
+  bool has_rssi = false;
+  int rssi = 0;
+
+  // How many times this camera has come back since the daemon started. A
+  // client that remembers the previous number can tell a power cycle from a
+  // camera that never left.
+  int sessions = 0;
+
   // Whether the configuration permits changing anything on this camera. Not a
   // property of the camera: see camconf.h.
   bool writes_enabled = false;

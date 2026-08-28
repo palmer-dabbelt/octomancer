@@ -1049,20 +1049,39 @@ int run_status_command(const Options& opt, const Paint& p) {
                  " off.\n", conf_err.c_str());
   }
 
-  std::printf("%soctomancer%s %s\n", p(kBold), p(kReset),
-              sync.answering && !status.daemon.version.empty()
-                  ? status.daemon.version.c_str()
-                  : OCTO_VERSION);
-  print_agent_states(bench, sync, p, opt.verbose);
+  // The version and the two daemon lines are --verbose, because in the
+  // ordinary case they say the same four words every time: this command cannot
+  // answer at all without a daemon, and the daemons start themselves. Four
+  // lines of preamble before the thing somebody actually ran the command for
+  // is how a status page stops being read.
+  //
+  // The exception keeps its voice. A daemon that is *not* answering is
+  // precisely the fact worth having at the moment it happens -- the table
+  // above will be quietly missing half the room and nothing else on the page
+  // would say why -- so that is printed whether or not anybody asked.
+  bool said = false;
+  if (opt.verbose || !bench.answering || !sync.answering) {
+    std::printf("%soctomancer%s %s\n", p(kBold), p(kReset),
+                sync.answering && !status.daemon.version.empty()
+                    ? status.daemon.version.c_str()
+                    : OCTO_VERSION);
+    print_agent_states(bench, sync, p, opt.verbose);
+    said = true;
+  }
+  // Both of these are conditions rather than status, and both stay: one says
+  // nothing will be written to a camera however good the numbers look, and the
+  // other says an answer somebody asked for has not happened yet.
   if (sync.answering && status.daemon.dry_run) {
     std::printf("  %-16s %sDRY RUN -- no camera will be written to%s\n", "",
                 p(kYellow), p(kReset));
+    said = true;
   }
   if (sync.answering && status.queued > 0) {
     std::printf("  %-16s %d request%s waiting\n", "queued", status.queued,
                 status.queued == 1 ? "" : "s");
+    said = true;
   }
-  std::printf("\n");
+  if (said) std::printf("\n");
 
   octo::DeviceSources src;
   src.bench = bench.answering ? &snapshot : nullptr;

@@ -768,18 +768,27 @@ struct ScanHit {
 // systemRedColor and systemYellowColor rather than literal components, because
 // the menu bar follows the appearance and a fixed yellow that reads on a dark
 // bar vanishes into a light one.
+// One circle, always, and only its colour changes.
+//
+// It used to be a clock glyph that grew a second dot beside it when something
+// was wrong, which meant the icon changed width -- the menu bar shuffled
+// whenever a box went quiet -- and meant reading two symbols to learn one
+// thing. One shape that changes colour says the same thing in the space of a
+// full stop, and the eye notices a colour change in the corner of a screen far
+// better than it notices an extra character.
+//
+// `nil` is the ordinary state, and it draws in `labelColor` rather than in
+// literal white. The menu bar follows the system appearance, so white is only
+// white half the time and is invisible the other half; `labelColor` is the
+// colour that means "ordinary text here", which is exactly what is wanted.
 - (void)setStatusBlip:(NSColor*)color tip:(NSString*)tip {
   if (_statusItem == nil) return;
-  NSMutableAttributedString* title = [[NSMutableAttributedString alloc]
-      initWithString:@"◷"
-          attributes:@{NSForegroundColorAttributeName : [NSColor labelColor]}];
-  if (color != nil) {
-    [title appendAttributedString:
-               [[NSAttributedString alloc]
-                   initWithString:@" ●"
-                       attributes:@{NSForegroundColorAttributeName : color}]];
-  }
-  _statusItem.button.attributedTitle = title;
+  _statusItem.button.attributedTitle = [[NSAttributedString alloc]
+      initWithString:@"●"
+          attributes:@{
+            NSForegroundColorAttributeName : color != nil ? color
+                                                          : [NSColor labelColor]
+          }];
   _statusItem.button.toolTip = tip;
 }
 
@@ -824,12 +833,12 @@ struct ScanHit {
   // different problems with different fixes, and a red dot for the first would
   // send somebody to the cameras when the thing to restart is on this Mac.
   if (!_benchUp && !_controlUp) {
-    _statusItem.button.attributedTitle = [[NSAttributedString alloc]
-        initWithString:@"◷ ?"
-            attributes:@{
-              NSForegroundColorAttributeName : [NSColor labelColor]
-            }];
-    _statusItem.button.toolTip = @"Octomancer: no daemon answering";
+    // Grey rather than red: red is reserved for a device that is wrong, and
+    // spending it here would send somebody to the cameras when the thing to
+    // restart is on this Mac. Dimmed is the honest shape for "this program is
+    // not currently able to tell you anything".
+    [self setStatusBlip:[NSColor tertiaryLabelColor]
+                    tip:@"Octomancer: no daemon answering"];
     return;
   }
 

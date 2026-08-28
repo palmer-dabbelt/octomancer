@@ -229,7 +229,10 @@ DeviceView build_device_view(const DeviceSources& from) {
       r.resolution = d.resolution;
       r.has_drift = d.has_drift;
       r.drift_ppm = d.drift_ppm;
-      if (!d.has_drift && d.samples > 0) {
+      // A span of zero is not a short wait, it is no measurement at all --
+      // a box whose sample window has collapsed to one reading. "~0s" reads
+      // as a broken column; a dash reads as an empty one, which is the truth.
+      if (!d.has_drift && d.samples > 0 && d.drift_span > 0.0) {
         r.has_drift_span = true;
         r.drift_span_s = d.drift_span;
       }
@@ -381,36 +384,48 @@ std::string render_devices(const DeviceView& v, bool verbose, bool color) {
   const Style st = style_for(color);
   std::string out;
 
-  if (v.has_canonical) {
+  // What goes above the table, which in the ordinary case is nothing.
+  //
+  // The canonical time is the axis every OFFSET below is measured against, and
+  // stating it on every run is repeating the same true thing to somebody who
+  // came to read the table. It moves to --verbose.
+  //
+  // Its *absence* does not move, and the asymmetry is the point: a column of
+  // dashes with nothing above it is a table that looks broken, so the line
+  // explaining that there is nothing to measure against is printed whether or
+  // not anybody asked for detail. Saying why something is missing is not
+  // verbosity.
+  std::string head;
+  if (!v.has_canonical) {
+    head += fmt("%sno canonical time -- no enabled timecode box is live, so"
+                " there is nothing to measure against%s\n", st.dim, st.off);
+  } else if (verbose) {
     const char* spread_colour = v.canonical_spread_s > 0.100 ? st.yellow : "";
-    out += fmt("canonical time  %s vs this Mac,  spread %s%s%s across %d"
-               " timecode box%s on the air\n",
-               offset_text(v.canonical_offset_s).c_str(), spread_colour,
-               offset_text(v.canonical_spread_s).c_str(),
-               spread_colour[0] == '\0' ? "" : st.off, v.contributing,
-               v.contributing == 1 ? "" : "es");
-  } else {
-    out += fmt("%sno canonical time -- no enabled timecode box is live, so"
-               " there is nothing to measure against%s\n", st.dim, st.off);
+    head += fmt("canonical time  %s vs this Mac,  spread %s%s%s across %d"
+                " timecode box%s on the air\n",
+                offset_text(v.canonical_offset_s).c_str(), spread_colour,
+                offset_text(v.canonical_spread_s).c_str(),
+                spread_colour[0] == '\0' ? "" : st.off, v.contributing,
+                v.contributing == 1 ? "" : "es");
   }
   if (verbose) {
-    out += fmt("%scanonical source: %s%s\n", st.dim,
-               v.canonical_source.c_str(), st.off);
+    head += fmt("%scanonical source: %s%s\n", st.dim,
+                v.canonical_source.c_str(), st.off);
   }
-  if (v.has_canonical && v.silent > 0) {
-    // Said out loud rather than left to be inferred from the table. The count
-    // in the line above is the answer to "how many boxes agreed on this time",
-    // and without this line the only way to find out why it is smaller than
-    // the table is to count the rows and subtract.
-    out += fmt("%s%d timecode box%s off the air: listed below, but not voting"
-               " on the canonical time and not in the spread%s\n",
-               st.dim, v.silent, v.silent == 1 ? "" : "es", st.off);
+  if (verbose && v.has_canonical && v.silent > 0) {
+    // This exists to explain the count in the line above -- why fewer boxes
+    // are voting than are on the page -- so it belongs wherever that line is.
+    head += fmt("%s%d timecode box%s off the air: listed below, but not voting"
+                " on the canonical time and not in the spread%s\n",
+                st.dim, v.silent, v.silent == 1 ? "" : "es", st.off);
   }
   if (v.hidden > 0) {
-    out += fmt("%s%d device%s hidden: disabled in the configuration%s\n",
-               st.dim, v.hidden, v.hidden == 1 ? "" : "s", st.off);
+    // Kept out of --verbose for the same reason as the missing canonical time:
+    // rows are absent from the table and nothing else on the page says why.
+    head += fmt("%s%d device%s hidden: disabled in the configuration%s\n",
+                st.dim, v.hidden, v.hidden == 1 ? "" : "s", st.off);
   }
-  out += "\n";
+  if (!head.empty()) out += head + "\n";
 
   if (v.rows.empty()) {
     out += fmt("%sno devices%s\n", st.dim, st.off);
@@ -507,10 +522,18 @@ std::string render_devices(const DeviceView& v, bool verbose, bool color) {
   // Under the table, because the marker in the column says which row and this
   // says what it means. Names rather than a count: "one device out of sync"
   // only sends somebody looking, and by then the table has already told them.
-  if (v.warned_out_of_sync > 0 || v.warned_unsure > 0) {
+  //
+  // Only the red one without --verbose. Red is an alarm and an alarm that does
+  // not say what it is about is not much of one. Yellow is "we do not know
+  // where this is", which is a thing the AGE column has already said in
+  // numbers on the row itself -- the sentence underneath is a second telling,
+  // and a second telling on every run is what makes people stop reading the
+  // first.
+  if (v.warned_out_of_sync > 0 || (verbose && v.warned_unsure > 0)) {
     out += "\n";
     for (int pass = 0; pass < 2; ++pass) {
       const bool red = pass == 0;
+      if (!red && !verbose) continue;
       const WarnLevel want =
           red ? WarnLevel::kOutOfSync : WarnLevel::kUnsure;
       std::string names;

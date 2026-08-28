@@ -208,11 +208,40 @@ void test_a_silent_box_is_listed_but_left_out_of_the_arithmetic() {
   CHECK(row->has_median);
   CHECK_NEAR(row->median_offset_s, -1.778, 1e-9);
 
+  // The number that started all this, and it is nowhere on the page either
+  // way. The arithmetic that explains it is --verbose only: somebody reading
+  // the table does not need the axis restated on every run.
   const std::string text = strip_escapes(octo::render_devices(v, false, false));
-  CHECK(contains(text, "across 4 timecode boxes on the air"));
-  CHECK(contains(text, "1 timecode box off the air"));
-  // The number that started all this, and it is nowhere on the page.
   CHECK(!contains(text, "40.5ms"));
+  CHECK(!contains(text, "canonical time"));
+  CHECK(!contains(text, "off the air:"));
+
+  const std::string loud = strip_escapes(octo::render_devices(v, true, false));
+  CHECK(!contains(loud, "40.5ms"));
+  CHECK(contains(loud, "across 4 timecode boxes on the air"));
+  CHECK(contains(loud, "1 timecode box off the air"));
+}
+
+// Without --verbose there is the table and nothing above it. Pinned because
+// the header is assembled conditionally now, and the failure mode of building
+// a string that might be empty and then appending a separator to it is a file
+// that opens with a blank line nobody put there.
+void test_the_brief_view_is_the_table_and_nothing_else() {
+  Snapshot snap;
+  snap.device.push_back(box("A", "Tentacle_A", true, 0.000));
+  snap.device.push_back(box("B", "Tentacle_B", true, 0.002));
+
+  const DeviceView v = view_of(snap, nullptr);
+  const std::string text = strip_escapes(octo::render_devices(v, false, false));
+  CHECK(text.compare(0, 6, "DEVICE") == 0);
+  CHECK(!contains(text, "canonical"));
+  CHECK(!contains(text, "vs this Mac"));
+
+  // And with it, the header is back and the table is still under it.
+  const std::string loud = strip_escapes(octo::render_devices(v, true, false));
+  CHECK(loud.compare(0, 6, "DEVICE") != 0);
+  CHECK(contains(loud, "canonical time"));
+  CHECK(contains(loud, "DEVICE"));
 }
 
 void test_offsets_are_against_canonical_not_this_mac() {
@@ -235,8 +264,10 @@ void test_offsets_are_against_canonical_not_this_mac() {
   const std::string text = octo::render_devices(v, false, false);
   CHECK(contains(text, "-10.0ms"));
   CHECK(contains(text, "+10.0ms"));
-  // The header is the only place the Mac is mentioned at all.
-  CHECK(contains(text, "vs this Mac"));
+  // This Mac is not mentioned at all in the brief view, and with --verbose
+  // there is exactly one place it appears: the header.
+  CHECK(!contains(text, "vs this Mac"));
+  CHECK(contains(octo::render_devices(v, true, false), "vs this Mac"));
 }
 
 void test_no_live_boxes_means_no_offsets_at_all() {
@@ -810,7 +841,12 @@ void test_the_table_marks_and_names_the_warned() {
     CHECK(contains(plain, "Tentacle_C ?"));
     // ...and the line under the table says which is which, by name.
     CHECK(contains(plain, "out of sync with the bench: Tentacle_D"));
-    CHECK(contains(plain, "not heard from recently enough to say: Tentacle_C"));
+    // Red always explains itself: an alarm that does not say what it is about
+    // is not much of one. Yellow is named only when detail was asked for --
+    // the row already carries the marker and the age that produced it, and a
+    // second telling on every run is what stops the first from being read.
+    CHECK(contains(plain, "not heard from recently enough to say: Tentacle_C") ==
+          (verbose != 0));
     // The two that nobody asked about are not marked or named.
     CHECK(contains(plain, "Tentacle_A "));
     CHECK(!contains(plain, "Tentacle_A !"));
@@ -827,6 +863,7 @@ void test_the_table_marks_and_names_the_warned() {
 int main() {
   test_canonical_is_a_median_of_enabled_live_boxes();
   test_a_silent_box_is_listed_but_left_out_of_the_arithmetic();
+  test_the_brief_view_is_the_table_and_nothing_else();
   test_offsets_are_against_canonical_not_this_mac();
   test_no_live_boxes_means_no_offsets_at_all();
   test_a_held_camera_reads_as_held();

@@ -221,8 +221,8 @@ A:1EAE18A7 will be warned about
 saved to ~/.octomancer/cameras.conf
 ```
 
-A device with it set gets a marker in `octomancer status` and puts a blip in
-the menu bar, in one of two colours:
+A device with it set gets a marker in `octomancer status` and colours the
+menu-bar circle, in one of two ways:
 
 * **red** — it is being heard, and it is more than **100 ms** from the
   canonical time. That is past anything normal: a jammed bench sits within a
@@ -308,13 +308,6 @@ cameras. What somebody standing at the bench wants is one list, with numbers
 that mean the same thing on every line:
 
 ```
-octomancer 0.1.0
-  octomancerd      answering, up 1h01m
-  octomancer-sync  answering, up 1h01m
-
-canonical time  -1.773s vs this Mac,  spread +2.1ms across 4 timecode boxes on the air
-1 timecode box off the air: listed below, but not voting on the canonical time and not in the spread
-
 DEVICE            AGE     OFFSET LINK
 BMPCC              1s     +1.3ms on the air
 F55                2s     -0.8ms on the air
@@ -324,6 +317,21 @@ FS7             3m02s         -- off the air
 A:1EAE18A7     56m32s         -- off the air
 ```
 
+That is the whole of it, deliberately. There is no version, no pair of daemon
+lines and no arithmetic above the table, because none of that changes between
+one run and the next: the command cannot answer at all unless the daemons are
+running, and they start themselves. Four lines of preamble before the thing
+somebody ran the command for is how a status page stops being read. `--verbose`
+has all of it, and so does this page a few paragraphs down.
+
+Two things do speak without being asked, and both are exceptions rather than
+inconsistencies. A daemon that is *not* answering says so, because the table
+will then be quietly missing half the room and nothing else would explain it.
+And when no box is live at all, the line saying there is nothing to measure
+against is printed — the offsets are all dashes at that point, and a column of
+dashes with nothing above it looks like a broken program rather than an empty
+room. Saying why something is missing is not verbosity.
+
 The offsets in that table are **not** against this Mac. Everything either
 daemon measures is quoted against the Mac's clock, and the Mac's clock is the
 least interesting one in the building — it is the thing being compared with,
@@ -331,7 +339,14 @@ not the thing anybody is shooting against. So the Mac's error is stated once,
 in the header, and each row carries the device's distance from the *canonical*
 time: the median across the live, enabled timecode boxes. Four boxes nearly two
 seconds away from a laptop that has not seen an NTP server all week are still
-in millisecond agreement with each other, and this is the view that says so.
+in millisecond agreement with each other, and `--verbose` is the view that says
+so:
+
+```
+canonical time  -1.773s vs this Mac,  spread +2.1ms across 4 timecode boxes on the air
+canonical source: octomancerd
+1 timecode box off the air: listed below, but not voting on the canonical time and not in the spread
+```
 
 `OFFSET` is blank for a device nobody is hearing, and the blank is deliberate.
 A box that has gone quiet goes on free-running while the canonical time goes on
@@ -509,14 +524,26 @@ the command line has no use for it. Hidden, the app keeps running and keeps
 notifying (posting a notification needs a bundled app, so this process is the
 only thing here that can); opening Octomancer.app again brings the window back.
 
-The icon itself carries one thing: a coloured blip when a device somebody asked
-about is red or yellow, and nothing at all when none of them is. It used to
-carry a count of the boxes being heard, which looks like information and is not
-— five boxes on the bench reads as 5 whether all five are jammed to each other
-or one of them left the building an hour ago. "Is anything wrong" is the
-question somebody glancing up actually has. A question mark instead of a blip
-means neither daemon is answering, which is kept its own shape on purpose: that
-is a thing to fix on this Mac, not at the cameras.
+The icon is one circle, always, and only its colour changes: ordinary when
+nothing is wrong, **yellow** when a device somebody asked about has gone quiet
+for too long to have an opinion about, **red** when one of them is out of sync,
+and greyed when neither daemon is answering. That last one is kept a colour of
+its own rather than folded into red, because it is a thing to fix on this Mac
+rather than at the cameras.
+
+Ordinary is the system label colour rather than literally white. The menu bar
+follows the system appearance, so white is only white half the time and is
+invisible the other half.
+
+Two earlier versions of this icon are worth naming, because both looked like
+information and were not. It carried a count of the boxes being heard: five
+boxes on the bench reads as 5 whether all five are jammed to each other or one
+of them left the building an hour ago. Then it was a clock glyph that grew a
+second dot beside it when something was wrong — which changed the icon's width,
+so the menu bar shuffled every time a box went quiet, and which asked somebody
+to read two symbols to learn one thing. "Is anything wrong" is the question
+somebody glancing up actually has, and a colour answers it in the space of a
+full stop.
 
 The menu has two ways out, because there were two things behind the one that
 used to be there and only one of them was quitting. **Quit the Menu Bar App**

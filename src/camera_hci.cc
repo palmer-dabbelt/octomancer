@@ -86,7 +86,7 @@ class HciCamera : public CameraLink {
   }
 
   ScanResult scan(double seconds, const std::string& name_hint,
-                  bool want_all) override {
+                  bool want_all, const CameraSeen& on_camera) override {
     ScanResult result;
     if (!link_) return result;
 
@@ -171,7 +171,33 @@ class HciCamera : public CameraLink {
               [](const CameraDevice& a, const CameraDevice& b) {
                 return a.rssi > b.rssi;
               });
+
+    // Every camera is reported, but only once the scan is over: this backend
+    // collects advertisements and classifies them afterwards, so there is no
+    // point during the scan at which it knows it has found one. The contract
+    // is "called for each camera", not "called early", and on the dongle the
+    // two differ.
+    if (on_camera) {
+      for (const CameraDevice& dev : result.cameras) on_camera(dev);
+    }
     return result;
+  }
+
+  bool read_status(std::vector<uint8_t>* out, double timeout,
+                   std::string* err) override {
+    (void)out;
+    (void)timeout;
+    // Not wired up. The GATT client in src/att.h can read a characteristic,
+    // and pairing over this backend is meant to go through src/smp.cc with a
+    // passkey supplied rather than through an OS dialog, so this wants doing
+    // properly alongside that rather than as a stub that half works. Nothing
+    // has been run against a dongle yet; doc/dongle-notes.md says so.
+    if (err) {
+      *err =
+          "reading Camera Status is not implemented for the dongle backend"
+          " yet";
+    }
+    return false;
   }
 
   bool connect(const std::string& id, double timeout,

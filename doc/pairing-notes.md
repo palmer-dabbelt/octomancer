@@ -42,8 +42,31 @@ failure there, it is currently discarded before anything can see it.
 
 There is no CoreBluetooth call that means "bond with this peripheral". There
 are only characteristics that require encryption and an operating system that
-goes and negotiates it the moment one of them is touched. So `--pair` connects,
-subscribes, and waits.
+negotiates it when one of them is *read or written* -- and that distinction is
+the whole story here.
+
+**Subscribing is not enough.** The first version of `--pair` connected,
+subscribed, and waited, on the assumption that touching an encrypted
+characteristic in any way would make macOS go and get a key. It does not.
+Setting notify on a characteristic writes to its descriptor, and against this
+camera that completes without encryption ever being negotiated. Nothing asked,
+so nothing was offered: no dialog on the Mac, no code on the camera, and a
+connection that then sat there producing nothing for ninety seconds. That
+matched the symptom exactly and was still the wrong diagnosis.
+
+**Reading is what triggers it.** Of the four characteristics in
+`doc/protocol-notes.md`, Camera Status (`7fe8691d-...`) is the only one marked
+`read`. `CameraLink::read_status()` exists for that reason, and `--pair` calls
+it with the full deadline. It is also worth having for its own sake: the value
+is a bitfield whose `0x04` bit is the camera's own opinion of whether it is
+paired, so the question gets answered rather than inferred.
+
+A related bug this uncovered: `camera_mac.mm` discarded every error handed to
+`didUpdateValueForCharacteristic:` with a bare `if (error != nil) return;`. An
+authentication failure -- the one error that would have named the problem on
+day one -- was being thrown away before anything could see it. The status read
+now reports its errors; the notify paths still drop theirs, which is a smaller
+version of the same mistake and is worth fixing next.
 
 Two consequences that are easy to get wrong:
 
@@ -70,7 +93,10 @@ running; stopping it with `octomancer stop --daemon sync` is the fix.
 Run against real hardware, and confirmed:
 
 * `octomancer scan` and `octomancer scan --all` against a live radio: 34 to 38
-  LE devices, four of them Tentacles, the camera absent.
+  LE devices, four of them Tentacles.
+* That cameras are now printed as they are found rather than at the end of the
+  scan: two devices matching a name hint appeared at two and four seconds into
+  a twenty-second scan.
 * The `not-connected` verdict and its advice, and the warning about the sync
   daemon holding the camera.
 * The `silent` condition itself, though observed by the sync daemon rather than
@@ -83,12 +109,16 @@ What has **not** been verified, and should not be read as working:
   been returned by real hardware. Everything downstream of a passkey being
   accepted -- that encryption actually comes up, that the characteristics then
   answer, that the bond survives a reconnection -- is untested.
-* **The macOS pairing dialog has not been seen for this camera.** That it
-  appears at all when CoreBluetooth touches an encrypted Blackmagic
-  characteristic is an assumption, not an observation. If no dialog ever
-  appears, this is where the work is: `src/smp.cc` already implements legacy
-  pairing with a supplied passkey for the dongle, and the answer may be to
-  drive the bond from there rather than through CoreBluetooth.
+* **The macOS pairing dialog has still not been seen.** It is now known that
+  *subscribing* will not produce one, which is why the read exists; whether
+  *reading* produces one against this camera is the next thing to find out and
+  has not been observed. If it does not, the work is `src/smp.cc`, which
+  already implements legacy pairing with a supplied passkey for the dongle:
+  the answer would be to drive the bond from there rather than through
+  CoreBluetooth.
+* **`read_status` is not implemented for the dongle backend.** It returns an
+  error saying so. That wants doing alongside the SMP work rather than as a
+  stub that half answers.
 * **The `refused` verdict has never been produced by a radio.** Its matcher is
   tested against strings written from the documentation, not against strings a
   camera caused.

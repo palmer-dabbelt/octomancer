@@ -16,6 +16,7 @@
 #include <chrono>
 #include <condition_variable>
 #include <mutex>
+#include <set>
 #include <thread>
 #include <string>
 #include <vector>
@@ -77,11 +78,13 @@ class MacCameraLink : public CameraLink {
 
   bool ready(double timeout, std::string* err) override;
   ScanResult scan(double seconds, const std::string& name_hint,
-                  bool want_all) override;
+                  bool want_all, const CameraSeen& on_camera) override;
   bool connect(const std::string& id, double timeout, std::string* err) override;
   void disconnect() override;
   bool connected() const override;
   bool subscribe(double timeout, std::string* err) override;
+  bool read_status(std::vector<uint8_t>* out, double timeout,
+                   std::string* err) override;
   bool write_control(const std::vector<uint8_t>& packet, double timeout,
                      std::string* err) override;
   CameraView view() override;
@@ -96,6 +99,8 @@ class MacCameraLink : public CameraLink {
   void on_disconnected();
   void on_subscribed(bool is_outgoing);
   void on_written(bool ok, const std::string& err);
+  void on_status_read(bool ok, const uint8_t* data, size_t len,
+                      const std::string& err);
   void on_timecode(const uint8_t* data, size_t len);
   void on_incoming(const uint8_t* data, size_t len);
 
@@ -124,6 +129,11 @@ class MacCameraLink : public CameraLink {
   bool write_ok = false;
   std::string write_error;
 
+  bool status_done = false;
+  bool status_ok = false;
+  std::vector<uint8_t> status_value;
+  std::string status_error;
+
   CameraView live;
 
  private:
@@ -146,6 +156,8 @@ class MacCameraLink : public CameraLink {
 @property(nonatomic, strong) CBUUID* chOutgoing;
 @property(nonatomic, strong) CBUUID* chIncoming;
 @property(nonatomic, strong) CBUUID* chTimecode;
+@property(nonatomic, strong) CBUUID* chStatus;
+@property(nonatomic, strong) CBCharacteristic* status;
 @end
 
 @implementation OctoCameraDelegate
@@ -251,6 +263,11 @@ class MacCameraLink : public CameraLink {
     if ([ch.UUID isEqual:self.chOutgoing]) {
       self.outgoing = ch;
       if (self.link) self.link->on_subscribed(true);
+    } else if ([ch.UUID isEqual:self.chStatus]) {
+      // Kept for read_status. This is the only readable characteristic in the
+      // profile, and reading it is the only thing here that makes macOS
+      // negotiate encryption.
+      self.status = ch;
     } else if ([ch.UUID isEqual:self.chTimecode] ||
                [ch.UUID isEqual:self.chIncoming]) {
       [peripheral setNotifyValue:YES forCharacteristic:ch];
@@ -271,7 +288,25 @@ class MacCameraLink : public CameraLink {
     didUpdateValueForCharacteristic:(CBCharacteristic*)characteristic
                               error:(NSError*)error {
   (void)peripheral;
-  if (error != nil || characteristic.value == nil || !self.link) return;
+  if (!self.link) return;
+
+  if ([characteristic.UUID isEqual:self.chStatus]) {
+    // A read is the one operation that forces encryption, so this is where an
+    // authentication failure actually arrives. Discarding it -- which is what
+    // this method did for every characteristic until now -- is what made an
+    // unpaired camera indistinguishable from a merely silent one.
+    if (error != nil) {
+      self.link->on_status_read(false, nullptr, 0,
+                                to_std(error.localizedDescription));
+    } else if (characteristic.value != nil) {
+      self.link->on_status_read(
+          true, static_cast<const uint8_t*>(characteristic.value.bytes),
+          characteristic.value.length, "");
+    }
+    return;
+  }
+
+  if (error != nil || characteristic.value == nil) return;
   const uint8_t* bytes = static_cast<const uint8_t*>(characteristic.value.bytes);
   const size_t len = characteristic.value.length;
   if ([characteristic.UUID isEqual:self.chTimecode]) {
@@ -324,6 +359,7 @@ bool MacCameraLink::start(std::string* err) {
     delegate.chOutgoing = [CBUUID UUIDWithString:@(bmd::kCharOutgoingControl)];
     delegate.chIncoming = [CBUUID UUIDWithString:@(bmd::kCharIncomingControl)];
     delegate.chTimecode = [CBUUID UUIDWithString:@(bmd::kCharTimecode)];
+    delegate.chStatus = [CBUUID UUIDWithString:@(bmd::kCharCameraStatus)];
 
     // No power alert: this can run under launchd, where a modal asking about
     // Bluetooth has nobody to answer it.
@@ -464,8 +500,60 @@ bool MacCameraLink::ready(double timeout, std::string* err) {
   return false;
 }
 
+void MacCameraLink::on_status_read(bool ok, const uint8_t* data, size_t len,
+                                   const std::string& err) {
+  {
+    std::lock_guard<std::mutex> lock(mu);
+    status_done = true;
+    status_ok = ok;
+    status_error = err;
+    status_value.assign(data, data + (data ? len : 0));
+  }
+  cv.notify_all();
+}
+
+bool MacCameraLink::read_status(std::vector<uint8_t>* out, double timeout,
+                                std::string* err) {
+  CBCharacteristic* ch = nil;
+  @autoreleasepool {
+    ch = delegate.status;
+    if (ch == nil || delegate.peripheral == nil) {
+      if (err) {
+        *err =
+            "the camera has no Camera Status characteristic; it may not have"
+            " finished discovering services";
+      }
+      return false;
+    }
+    {
+      std::lock_guard<std::mutex> lock(mu);
+      status_done = false;
+      status_ok = false;
+      status_value.clear();
+      status_error.clear();
+    }
+    [delegate.peripheral readValueForCharacteristic:ch];
+  }
+
+  std::unique_lock<std::mutex> lock(mu);
+  if (!wait_for(lock, timeout, [this] { return status_done; })) {
+    // A read that never comes back at all is its own finding: this is where
+    // macOS sits while a person is being asked for a passkey, so the timeout
+    // has to be long enough to be answered rather than long enough to be a
+    // round trip.
+    if (err) *err = "timed out reading Camera Status";
+    return false;
+  }
+  if (!status_ok) {
+    if (err) *err = status_error;
+    return false;
+  }
+  if (out) *out = status_value;
+  return true;
+}
+
 ScanResult MacCameraLink::scan(double seconds, const std::string& name_hint,
-                               bool want_all) {
+                               bool want_all, const CameraSeen& on_camera) {
   @autoreleasepool {
     {
       std::lock_guard<std::mutex> lock(mu);
@@ -480,7 +568,39 @@ ScanResult MacCameraLink::scan(double seconds, const std::string& name_hint,
     [central scanForPeripheralsWithServices:nil options:nil];
   }
 
-  std::this_thread::sleep_for(std::chrono::duration<double>(seconds));
+  // Say what has been found while still looking. A scan is mostly waiting, and
+  // when the answer is "there it is" the waiting was the whole cost of finding
+  // out. The classification below is repeated at the end rather than shared,
+  // because the end is authoritative -- it sorts, and it counts things this
+  // loop deliberately never mentions.
+  {
+    std::set<std::string> announced;
+    const auto deadline = std::chrono::steady_clock::now() +
+                          std::chrono::duration<double>(seconds);
+    while (std::chrono::steady_clock::now() < deadline) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(200));
+      if (!on_camera) continue;
+      std::vector<CameraDevice> fresh;
+      {
+        std::lock_guard<std::mutex> lock(mu);
+        for (const auto& entry : seen) {
+          const Seen& sd = entry.second;
+          if (sd.is_tentacle) continue;
+          const bool hinted =
+              !name_hint.empty() &&
+              (lower(sd.device.name).find(lower(name_hint)) !=
+                   std::string::npos ||
+               lower(sd.device.id) == lower(name_hint));
+          if (!(sd.is_camera || looks_like_a_camera(sd.device.name) || hinted)) {
+            continue;
+          }
+          if (!announced.insert(sd.device.id).second) continue;
+          fresh.push_back(sd.device);
+        }
+      }
+      for (const CameraDevice& d : fresh) on_camera(d);
+    }
+  }
 
   @autoreleasepool {
     [central stopScan];

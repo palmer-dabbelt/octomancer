@@ -14,6 +14,7 @@
 #define OCTO_CAMERA_H
 
 #include <cstdint>
+#include <functional>
 #include <map>
 #include <memory>
 #include <string>
@@ -66,6 +67,12 @@ struct CameraView {
   std::map<std::pair<int, int>, bmd::Value> state;
 };
 
+// Called as each camera is first identified, so that a twenty-second scan can
+// say what it has found while it is still looking. A scan is mostly waiting,
+// and when the answer is "there it is" the waiting was the expensive part of
+// finding out. May be empty, and is never called for a Tentacle.
+using CameraSeen = std::function<void(const CameraDevice&)>;
+
 class CameraLink {
  public:
   virtual ~CameraLink() = default;
@@ -77,7 +84,7 @@ class CameraLink {
   virtual bool ready(double timeout, std::string* err) = 0;
 
   virtual ScanResult scan(double seconds, const std::string& name_hint,
-                          bool want_all) = 0;
+                          bool want_all, const CameraSeen& on_camera) = 0;
 
   virtual bool connect(const std::string& id, double timeout,
                        std::string* err) = 0;
@@ -88,6 +95,18 @@ class CameraLink {
   // connection: subscribing twice is an error, so the view keeps updating
   // itself and the verification pass after a write samples the same object.
   virtual bool subscribe(double timeout, std::string* err) = 0;
+
+  // Read the Camera Status characteristic -- the only readable one in the
+  // profile, per doc/protocol-notes.md. Reading is also the only operation
+  // here that makes macOS negotiate encryption: subscribing to a notify
+  // characteristic does not, which is why nothing ever asked for a passkey and
+  // no bond was ever attempted. doc/pairing-notes.md has the rest of that.
+  //
+  // The value is a bitfield -- 0x01 power on, 0x02 connected, 0x04 paired --
+  // so it answers "does the camera think it is paired" directly rather than by
+  // inference.
+  virtual bool read_status(std::vector<uint8_t>* out, double timeout,
+                           std::string* err) = 0;
 
   virtual bool write_control(const std::vector<uint8_t>& packet, double timeout,
                              std::string* err) = 0;

@@ -328,6 +328,16 @@ void seed_from_db(octo::CamDb* db, const Options& opt, octo::SyncState* state,
 // CoreBluetooth can usually connect straight to it; scanning for 20 seconds
 // every cycle would otherwise dominate the poll interval and keep the radio
 // busy for no reason.
+// One camera, one line. Shared because this is printed from inside a scan
+// callback now as well as after one, and two format strings that are meant to
+// match are two format strings that will stop matching.
+void print_camera_row(const octo::CameraDevice& dev) {
+  std::printf("  %-38s %-22s rssi=%-5d (%s)\n", dev.id.c_str(),
+              dev.name.empty() ? "(no name)" : dev.name.c_str(), dev.rssi,
+              dev.by_service_uuid ? "service uuid" : "name guess");
+  std::fflush(stdout);
+}
+
 bool connect_camera(octo::CameraLink* link, octo::SyncState* state,
                     const Options& opt, octo::CamDb* db,
                     const std::string& want, std::string* picked_name) {
@@ -347,7 +357,8 @@ bool connect_camera(octo::CameraLink* link, octo::SyncState* state,
   }
 
   say("scanning %.0fs for Blackmagic cameras...", opt.sync.scan_timeout);
-  const octo::ScanResult found = link->scan(opt.sync.scan_timeout, want, false);
+  const octo::ScanResult found =
+      link->scan(opt.sync.scan_timeout, want, false, print_camera_row);
 
   const octo::CameraDevice* pick = nullptr;
   for (const octo::CameraDevice& dev : found.cameras) {
@@ -384,10 +395,13 @@ bool connect_camera(octo::CameraLink* link, octo::SyncState* state,
     return false;
   }
 
-  std::printf("  %-38s %-22s rssi=%-5d (%s)\n", pick->id.c_str(),
-              pick->name.empty() ? "(no name)" : pick->name.c_str(), pick->rssi,
-              pick->by_service_uuid ? "service uuid" : "name guess");
-  std::fflush(stdout);
+  // The row was printed as it was found. Which one is being used is only
+  // worth saying when there was something to choose between.
+  if (found.cameras.size() > 1) {
+    std::printf("  using %s\n",
+                (pick->name.empty() ? pick->id : pick->name).c_str());
+    std::fflush(stdout);
+  }
 
   const std::string id = pick->id;
   if (picked_name != nullptr) *picked_name = pick->name;
@@ -910,8 +924,8 @@ void run_cycle(octo::CameraLink* link, octo::SyncState* state,
 int mode_scan_only(octo::CameraLink* link, const Options& opt) {
   std::printf("scanning %.0fs...\n", opt.sync.scan_timeout);
   std::fflush(stdout);
-  const octo::ScanResult found =
-      link->scan(opt.sync.scan_timeout, opt.camera, opt.show_all);
+  const octo::ScanResult found = link->scan(opt.sync.scan_timeout, opt.camera,
+                                           opt.show_all, print_camera_row);
 
   if (opt.show_all) {
     std::printf("  -- every LE device seen (%d) --\n", found.total);
@@ -923,11 +937,8 @@ int mode_scan_only(octo::CameraLink* link, const Options& opt) {
     std::printf("  -- end --\n");
   }
 
-  for (const octo::CameraDevice& d : found.cameras) {
-    std::printf("  %-38s %-22s rssi=%-5d (%s)\n", d.id.c_str(),
-                d.name.empty() ? "(no name)" : d.name.c_str(), d.rssi,
-                d.by_service_uuid ? "service uuid" : "name guess");
-  }
+  // Nothing to print for the cameras here: they were printed as they turned
+  // up, which is the point.
   if (found.cameras.empty()) {
     std::printf("  no Blackmagic cameras found (%d LE devices seen, %d of them"
                 " Tentacles).\n", found.total, found.tentacles);
@@ -977,19 +988,41 @@ int mode_pair(octo::CameraLink* link, octo::SyncState* state,
         label.empty() ? "the camera" : label.c_str(), opt.pair_seconds);
     std::fflush(stdout);
 
-    // Anything at all arriving over the encrypted characteristics is the
-    // proof wanted here -- a timecode, a transport mode, any parameter the
-    // camera volunteers. Waiting for a *complete* view would sit here for the
-    // full deadline against a camera that is bonded but parked in Clip, which
-    // is a success being reported as a failure.
-    const double deadline = octo::mono_now() + opt.pair_seconds;
-    while (octo::mono_now() < deadline && !g_stop) {
-      const octo::CameraView view = link->view();
-      if (view.has_timecode || view.has_transport || !view.state.empty()) {
-        attempt.saw_state = true;
-        break;
+    // This read is the pairing trigger, and it is the whole reason this mode
+    // exists rather than being a flag on --watch. Connecting succeeds without
+    // a bond. Subscribing succeeds without a bond. Reading does not: it is
+    // the one operation in the profile that makes macOS negotiate encryption,
+    // which is what puts a passkey on the camera's screen and a dialog on the
+    // Mac. Before this call existed nothing ever asked, so nothing was ever
+    // offered, and the camera simply stayed quiet.
+    //
+    // It blocks for the whole deadline on purpose: what it is waiting for is
+    // a person reading six digits off a camera and typing them in.
+    std::vector<uint8_t> status;
+    std::string read_err;
+    if (link->read_status(&status, opt.pair_seconds, &read_err)) {
+      attempt.saw_state = true;
+      if (!status.empty()) {
+        // The bitfield from doc/protocol-notes.md: 0x01 power on, 0x02
+        // connected, 0x04 paired. Worth printing whole, because a camera that
+        // answers a read and still says it is not paired would be a genuinely
+        // new finding rather than a failure.
+        std::printf("  camera status 0x%02x -- %s\n", status[0],
+                    (status[0] & 0x04) ? "the camera says it is paired"
+                                       : "the camera says it is NOT paired");
+        std::fflush(stdout);
       }
-      std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    } else {
+      attempt.radio_error = read_err;
+    }
+
+    // A bonded camera usually pushes something over the notify
+    // characteristics too. Cheap to check, and it covers the case where the
+    // read failed for a reason that was not about encryption at all.
+    if (!attempt.saw_state) {
+      const octo::CameraView view = link->view();
+      attempt.saw_state =
+          view.has_timecode || view.has_transport || !view.state.empty();
     }
     link->disconnect();
   }

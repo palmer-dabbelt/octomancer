@@ -94,9 +94,15 @@ void test_a_killed_holder_does_not_lock_anyone_out() {
   }
 
   // Wait for the child to actually hold it, rather than guessing at a sleep.
+  // The deadline is deliberately far longer than the wait can honestly need:
+  // a working fork gets there in milliseconds, so a generous budget costs
+  // nothing except how long a genuinely broken lock takes to say so, whereas
+  // a tight one fails on a machine that is merely busy.
+  const int kStepMs = 5;
+  const int kDeadlineMs = 30000;
   ProcLock probe;
   bool taken = false;
-  for (int i = 0; i < 400 && !taken; ++i) {
+  for (int i = 0; i < kDeadlineMs / kStepMs && !taken; ++i) {
     long h = 0;
     std::string e;
     if (!probe.acquire(path, &h, &e) && h == static_cast<long>(child)) {
@@ -104,7 +110,7 @@ void test_a_killed_holder_does_not_lock_anyone_out() {
       break;
     }
     probe.release();
-    ::usleep(5000);
+    ::usleep(kStepMs * 1000);
   }
   CHECK(taken);
 

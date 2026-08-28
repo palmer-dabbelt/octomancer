@@ -32,6 +32,17 @@ const char* agent_description(Agent a);
 // Parses "bench", "sync", or "all". Returns false on anything else.
 bool parse_agent_selection(const std::string& name, std::vector<Agent>* out);
 
+// Where to find another octomancer program. Beside the running executable
+// first, so an uninstalled build tree runs its own binaries rather than
+// whatever an earlier `make install` left on the system; then the directory
+// this build installs into. Falls back to the bare name and leaves the rest
+// to PATH.
+//
+// This exists because the front door has no radio of its own. `scan` and
+// `pair` have to hand the work to the binary that does, and it has to be the
+// one from the same build as the tool that asked.
+std::string sibling_program_path(const std::string& program);
+
 struct AgentState {
   bool installed = false;  // a plist in ~/Library/LaunchAgents
   bool loaded = false;     // launchd knows about it

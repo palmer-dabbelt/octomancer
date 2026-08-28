@@ -49,6 +49,8 @@ libocto_a_SOURCES = \
 	src/jsonlog.h \
 	src/logscan.cc \
 	src/logscan.h \
+	src/pairing.cc \
+	src/pairing.h \
 	src/proclock.cc \
 	src/proclock.h \
 	src/proto.cc \
@@ -253,6 +255,7 @@ check_PROGRAMS = \
 	tests/test_hci \
 	tests/test_jsonlog \
 	tests/test_logscan \
+	tests/test_pairing \
 	tests/test_proclock \
 	tests/test_proto \
 	tests/test_registry \
@@ -272,6 +275,9 @@ tests_test_registry_LDADD = libocto.a
 
 tests_test_proto_SOURCES = tests/test_proto.cc tests/harness.h
 tests_test_proto_LDADD = libocto.a
+
+tests_test_pairing_SOURCES = tests/test_pairing.cc tests/harness.h
+tests_test_pairing_LDADD = libocto.a
 
 tests_test_bmd_SOURCES = tests/test_bmd.cc tests/harness.h
 tests_test_bmd_LDADD = libocto.a

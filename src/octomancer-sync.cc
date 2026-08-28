@@ -35,6 +35,7 @@
 #include "camera.h"
 #include "camconf.h"
 #include "camdb.h"
+#include "pairing.h"
 #include "proclock.h"
 #include "camsync.h"
 #include "client.h"
@@ -52,7 +53,7 @@ volatile sig_atomic_t g_stop = 0;
 
 void on_signal(int) { g_stop = 1; }
 
-enum class Mode { kSync, kScanOnly, kWatch, kPacket, kRtcTest, kPoke };
+enum class Mode { kSync, kScanOnly, kWatch, kPacket, kRtcTest, kPoke, kPair };
 
 enum class Source { kTentacle, kMac };
 
@@ -71,6 +72,9 @@ struct Options {
   // poll.
   double presence_poll = 5.0;
   double watch_seconds = 20.0;
+  // Pairing waits on a person: reading a code off a camera screen and typing
+  // it into a dialog is not a twenty-second operation.
+  double pair_seconds = 90.0;
   // Hand-written packets for --poke, in the order given.
   std::vector<std::string> pokes;
   double poke_watch = 4.0;
@@ -931,6 +935,70 @@ int mode_scan_only(octo::CameraLink* link, const Options& opt) {
   return found.cameras.empty() ? 1 : 0;
 }
 
+// Pairing, which on macOS is not something a program can ask for. There is no
+// CoreBluetooth call meaning "bond with this peripheral"; there are only
+// characteristics that require encryption and an operating system that goes
+// and negotiates it the moment one of them is touched. So this connects,
+// subscribes, and then waits -- long enough for a person to read a six-digit
+// code off the camera's screen and type it into the dialog macOS puts up.
+//
+// The waiting is the easy half. The reason this is a mode of its own rather
+// than a flag on --watch is that the radio does not report which of several
+// outcomes happened, and they look alike from here; src/pairing.h is where
+// they are told apart, and why that has to be done away from the radio.
+int mode_pair(octo::CameraLink* link, octo::SyncState* state,
+              const Options& opt, octo::CamDb* db) {
+  octo::pairing::Attempt attempt;
+  std::string picked_name;
+
+  attempt.connected =
+      connect_camera(link, state, opt, db, opt.camera, &picked_name);
+
+  // Whatever the camera should be called in the sentences below: what it
+  // advertised if it got far enough to advertise, otherwise whatever was
+  // asked for, otherwise nothing and the explanations say "the camera".
+  std::string label = picked_name;
+  if (label.empty()) label = opt.camera;
+  if (label.empty()) label = state->camera_id;
+
+  if (attempt.connected) {
+    std::string err;
+    attempt.subscribed = link->subscribe(opt.sync.camera_wait, &err);
+    if (!attempt.subscribed) attempt.radio_error = err;
+
+    std::printf(
+        "\nconnected to %s.\n"
+        "\n"
+        "  If this camera is not already paired it is displaying a six-digit\n"
+        "  passkey on its own screen right now, and macOS should be asking for\n"
+        "  that number. The code is on the camera, not on the Mac.\n"
+        "\n"
+        "  waiting up to %.0fs for the camera to start answering...\n",
+        label.empty() ? "the camera" : label.c_str(), opt.pair_seconds);
+    std::fflush(stdout);
+
+    // Anything at all arriving over the encrypted characteristics is the
+    // proof wanted here -- a timecode, a transport mode, any parameter the
+    // camera volunteers. Waiting for a *complete* view would sit here for the
+    // full deadline against a camera that is bonded but parked in Clip, which
+    // is a success being reported as a failure.
+    const double deadline = octo::mono_now() + opt.pair_seconds;
+    while (octo::mono_now() < deadline && !g_stop) {
+      const octo::CameraView view = link->view();
+      if (view.has_timecode || view.has_transport || !view.state.empty()) {
+        attempt.saw_state = true;
+        break;
+      }
+      std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    }
+    link->disconnect();
+  }
+
+  const octo::pairing::Verdict verdict = octo::pairing::judge(attempt);
+  std::printf("\n%s\n", octo::pairing::explain(verdict, label).c_str());
+  return verdict == octo::pairing::Verdict::kBonded ? 0 : 1;
+}
+
 // Connect and watch, without writing anything. This is how you check that a
 // camera is reachable and that its timecode is actually running before
 // blaming the daemon for not correcting it.
@@ -1327,6 +1395,10 @@ void usage(FILE* out) {
       "instead of syncing\n"
       "  --scan-only [--all]   list what is in range and exit\n"
       "  --watch SEC           connect and watch the timecode, writing nothing\n"
+      "  --pair                bond with the camera so its encrypted control\n"
+      "                        characteristics will answer. The camera shows a\n"
+      "                        six-digit code and macOS asks for it.\n"
+      "  --pair-timeout SEC    how long to wait for that (default 90)\n"
       "  --rtc-test            write a deliberately wrong clock, to prove the\n"
       "                        write lands\n"
       "  --packet              print the RTC packet for now and exit, no"
@@ -1350,6 +1422,7 @@ bool parse_args(int argc, char** argv, Options* opt) {
     kMaxFailures, kBenchSpread, kRtcBias, kNoAdaptBias, kMaxBiasStep,
     kMaxAdapts, kLead, kVerifyWait, kCameraWait, kScanTimeout, kConnectTimeout,
     kMinDriftInterval, kFps, kScanOnly, kAll, kWatch, kRtcTest, kPacket,
+    kPair, kPairTimeout,
     kPoke, kPokeWatch,
     kMaxPoll, kPollSlices, kFixedPoll, kPresencePoll, kConsole, kLogMax,
     kLogKeep, kMinPpm, kRestartStep,
@@ -1408,6 +1481,8 @@ bool parse_args(int argc, char** argv, Options* opt) {
       {"scan-only", no_argument, nullptr, kScanOnly},
       {"all", no_argument, nullptr, kAll},
       {"watch", required_argument, nullptr, kWatch},
+      {"pair", no_argument, nullptr, kPair},
+      {"pair-timeout", required_argument, nullptr, kPairTimeout},
       {"rtc-test", no_argument, nullptr, kRtcTest},
       {"packet", no_argument, nullptr, kPacket},
       {"poke", required_argument, nullptr, kPoke},
@@ -1508,6 +1583,8 @@ bool parse_args(int argc, char** argv, Options* opt) {
         break;
       case kRtcTest: opt->mode = Mode::kRtcTest; break;
       case kPacket: opt->mode = Mode::kPacket; break;
+      case kPair: opt->mode = Mode::kPair; break;
+      case kPairTimeout: opt->pair_seconds = std::atof(optarg); break;
       case kPoke:
         opt->mode = Mode::kPoke;
         opt->pokes.push_back(optarg);
@@ -1637,6 +1714,7 @@ int main(int argc, char** argv) {
   // somebody does next to a live daemon to see what it would do.
   const bool read_only_mode = opt.mode == Mode::kScanOnly ||
                               opt.mode == Mode::kWatch ||
+                              opt.mode == Mode::kPair ||
                               opt.mode == Mode::kPoke ||
                               opt.sync.dry_run;
   if (read_only_mode && !opt.camdb_explicit) opt.camdb_path.clear();
@@ -1672,6 +1750,7 @@ int main(int argc, char** argv) {
 
   if (opt.mode == Mode::kScanOnly) return mode_scan_only(link.get(), opt);
   if (opt.mode == Mode::kWatch) return mode_watch(link.get(), &state, opt, &db);
+  if (opt.mode == Mode::kPair) return mode_pair(link.get(), &state, opt, &db);
   if (opt.mode == Mode::kPoke) return mode_poke(link.get(), &state, opt, &db);
   if (opt.mode == Mode::kRtcTest) {
     return mode_rtc_test(link.get(), &state, opt, &db);

@@ -185,12 +185,20 @@ not share a file.
 
 ## Driving it
 
-`octomancer` is the front door. It has no radio of its own: every command is a
-question or an instruction put to a running daemon over its socket.
+`octomancer` is the front door. It has no radio of its own: most commands are
+a question or an instruction put to a running daemon over its socket. The two
+that need one -- `scan` and `pair` -- hand the work to `octomancer-sync`, which
+has a radio already. A second binary asking for its own Bluetooth grant would
+be a second thing to approve, and a second thing to be quietly refused.
 
 ```
 octomancer                          # status: the daemons, the bench, the cameras
 octomancer list-cameras             # one line each
+octomancer scan                     # which Blackmagic cameras are on the air?
+octomancer scan --all               # ...and every other LE device, which is how
+                                    #    you tell a silent camera from a deaf radio
+octomancer pair                     # bond with the camera: it shows a six-digit
+                                    #    code on its own screen, macOS asks for it
 octomancer sync                     # correct the clock now, even if it looks fine
 octomancer sync --camera A:1EAE18A7 # ...that one. Repeat --camera for several.
 octomancer source                   # what is the timecode following?

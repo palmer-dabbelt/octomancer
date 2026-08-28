@@ -154,6 +154,20 @@ const char* agent_description(Agent a) {
                             : "the camera sync daemon";
 }
 
+std::string sibling_program_path(const std::string& program) {
+  // An uninstalled tree first. Running `./octomancer pair` out of a build
+  // directory and having it drive the installed daemon from three days ago
+  // is the kind of confusion that costs an afternoon.
+  const std::string dir = executable_dir();
+  if (!dir.empty()) {
+    const std::string beside = dir + "/" + program;
+    if (::access(beside.c_str(), X_OK) == 0) return beside;
+  }
+  const std::string installed = std::string(OCTO_BINDIR) + "/" + program;
+  if (::access(installed.c_str(), X_OK) == 0) return installed;
+  return program;
+}
+
 bool parse_agent_selection(const std::string& name, std::vector<Agent>* out) {
   out->clear();
   if (name.empty() || name == "all" || name == "both") {

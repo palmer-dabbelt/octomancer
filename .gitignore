@@ -47,6 +47,7 @@
 /tests/test_hci
 /tests/test_jsonlog
 /tests/test_logscan
+/tests/test_pairing
 /tests/test_proclock
 /tests/test_proto
 /tests/test_registry

@@ -11,6 +11,7 @@
 // back an id, and this program asks after it until it is finished. That keeps
 // the socket to one command, one reply, close, and it means a client that is
 // killed mid-sync does not abort the sync.
+#include <errno.h>
 #include <getopt.h>
 #include <signal.h>
 #include <unistd.h>
@@ -56,6 +57,14 @@ void usage(FILE* out) {
       "  status                what the daemon, the bench and the cameras are\n"
       "                        doing (the default)\n"
       "  list-cameras          one line per camera the daemon knows about\n"
+      "  scan                  look for Blackmagic cameras on the air. With\n"
+      "                        --all, every LE device seen, which is how you\n"
+      "                        tell a silent camera from a deaf radio.\n"
+      "  pair                  bond with a camera, so that its encrypted\n"
+      "                        control characteristics will answer. The camera\n"
+      "                        displays a six-digit code and macOS asks for\n"
+      "                        that number. Needed once, and again whenever\n"
+      "                        either side forgets the other.\n"
       "  sync                  correct the clock now, even if it looks fine\n"
       "  start | stop | restart\n"
       "                        the daemons themselves. These go through\n"
@@ -527,6 +536,48 @@ void print_agent_states(const Paint& p) {
   }
 }
 
+// `scan` and `pair` need a radio, and this program has none: Makefile.am
+// explains why the front door links no CoreBluetooth. Both are handed to
+// octomancer-sync, which has one, and which already holds the Bluetooth grant
+// a second binary would have to be given separately -- having first been
+// refused it in the silent way src/camera.h describes.
+//
+// This replaces the process rather than waiting on a child. Pairing is
+// interactive: it wants the terminal, and it wants a Ctrl-C to arrive at the
+// program doing the waiting rather than at a parent that would then have to
+// think about forwarding it.
+int exec_radio_program(std::vector<std::string> args) {
+  const std::string program = octo::sibling_program_path("octomancer-sync");
+
+  std::vector<char*> argv;
+  argv.push_back(const_cast<char*>(program.c_str()));
+  for (std::string& a : args) argv.push_back(const_cast<char*>(a.c_str()));
+  argv.push_back(nullptr);
+
+  execv(program.c_str(), argv.data());
+  // execv returns only on failure, and the one thing it will not try is PATH.
+  execvp("octomancer-sync", argv.data());
+  std::fprintf(stderr, "octomancer: could not run %s: %s\n", program.c_str(),
+               std::strerror(errno));
+  return 1;
+}
+
+// The sync daemon connects to the camera whenever it notices one, and a BLE
+// peripheral takes a single connection at a time. Pairing alongside it
+// usually works, because it spends most of its life not connected -- but when
+// it does not work it fails as "could not connect", which is the least
+// informative outcome of the four and the easiest to read as the wrong thing.
+void warn_if_sync_daemon_may_hold_the_camera() {
+  const octo::AgentState state = octo::agent_state(octo::Agent::kSync);
+  if (!state.running) return;
+  std::fprintf(stderr,
+               "note: octomancer-sync is running (pid %d) and connects to the"
+               " camera on its own.\n"
+               "      If this cannot get a connection, stop it and try again:\n"
+               "        octomancer stop --daemon sync\n\n",
+               state.pid);
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -691,6 +742,29 @@ int main(int argc, char** argv) {
     }
     std::printf("ok\n");
     return 0;
+  }
+
+  if (command == "scan") {
+    // --log '' because the default writes a JSONL file into whatever
+    // directory this was run from, and a scan is a question rather than a
+    // session worth leaving a file behind for.
+    std::vector<std::string> args = {"--scan-only", "--log", ""};
+    if (opt.all_cameras) args.push_back("--all");
+    if (!opt.cameras.empty()) {
+      args.push_back("--camera");
+      args.push_back(opt.cameras.front());
+    }
+    return exec_radio_program(args);
+  }
+
+  if (command == "pair") {
+    warn_if_sync_daemon_may_hold_the_camera();
+    std::vector<std::string> args = {"--pair", "--log", ""};
+    if (!opt.cameras.empty()) {
+      args.push_back("--camera");
+      args.push_back(opt.cameras.front());
+    }
+    return exec_radio_program(args);
   }
 
   std::fprintf(stderr, "octomancer: unknown command '%s'\n", command.c_str());

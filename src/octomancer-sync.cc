@@ -334,12 +334,16 @@ void seed_from_db(octo::CamDb* db, const Options& opt, octo::SyncState* state,
 // Let go of the camera -- unless we are holding on to it, which is the
 // default and wants explaining.
 //
-// There is no bond storage. Every reconnection pairs from scratch, and on this
-// hardware pairing means a six-digit code on the camera's screen and a person
-// to read it, so a daemon that reconnects once a cycle is a daemon that cannot
-// run unattended at all. Holding also keeps the notifications flowing, so the
-// next cycle opens with a timecode already in hand rather than waiting for
-// one -- and waiting for one is where a cycle spends most of its time.
+// Timecode only arrives over a live connection. A daemon that holds one for
+// twenty seconds an hour is blind for the remaining fifty-nine minutes, and
+// every cycle then opens by waiting for a reading it could already have had --
+// which is where a cycle spends most of its time.
+//
+// It may also be load-bearing for the bond, but that is not established and
+// should not be asserted here. doc/dongle-notes.md says a camera pairs afresh
+// on every connection; that is true of our own SMP code for the dongle, not of
+// CoreBluetooth, which keeps its keys. doc/KNOWN_ISSUES.md has the open
+// question.
 //
 // The cost is real: a connected camera stops advertising, so octomancerd stops
 // seeing it and its presence signal goes false and stays there. The main loop

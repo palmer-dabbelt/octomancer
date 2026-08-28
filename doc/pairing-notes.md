@@ -87,10 +87,20 @@ running; stopping it with `octomancer stop --daemon sync` is the fix.
 ## Holding the connection
 
 Pairing succeeded and then the camera went quiet again, because the daemon
-disconnected at the end of the cycle and there is no bond storage: the next
-connection pairs from scratch. A key that only lasts as long as one cycle is
-not much of a key, and it makes the daemon unrunnable unattended -- every
-reconnection would want somebody to read six digits off a camera.
+disconnected at the end of every cycle. Timecode only arrives over a live
+connection, so a daemon that holds one for twenty seconds an hour is a daemon
+that is blind for the rest of it.
+
+A word of care about the reason, because it is easy to overstate.
+`doc/dongle-notes.md` says there is no bond storage and that a camera pairs
+afresh on every connection: that is true of *our* SMP implementation for the
+dongle, and it is not a statement about macOS. On the Mac, CoreBluetooth holds
+the key -- that is exactly how the firmware updater's bond survived for days
+and made this program appear to work for two of them. A manual `octomancer
+sync` has since reconnected and written successfully without anything being
+re-paired, which is the same conclusion from the other direction. So holding is
+worth doing for the timecode; whether it is also load-bearing for the bond is
+an open question, and `doc/KNOWN_ISSUES.md` records it as one.
 
 So `octomancer-sync` now keeps the connection open between cycles. `--no-hold`
 restores the old behaviour. Three consequences worth knowing:

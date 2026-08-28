@@ -669,6 +669,18 @@ void Control::emit(EventKind kind, const std::string& camera_id,
   while (events_.size() > kMaxEvents) events_.pop_front();
 }
 
+std::vector<std::string> Control::take_forgotten() {
+  std::lock_guard<std::mutex> lock(mu_);
+  std::vector<std::string> out;
+  out.swap(forget_requested_);
+  return out;
+}
+
+bool Control::forget_pending() const {
+  std::lock_guard<std::mutex> lock(mu_);
+  return !forget_requested_.empty();
+}
+
 bool Control::take_reload() {
   std::lock_guard<std::mutex> lock(mu_);
   const bool wanted = reload_requested_;
@@ -733,6 +745,26 @@ std::string Control::handle_locked(const Command& cmd) {
     // trade than telling it the request landed.
     reload_requested_ = true;
     return banner() + "reloading\nend\n";
+  }
+  if (cmd.verb == "forget") {
+    if (cmd.cameras.empty()) {
+      return render_error("forget needs camera=<id or name>");
+    }
+    std::string said;
+    for (const std::string& want : cmd.cameras) {
+      // By id or by name, the same latitude every other camera= command
+      // gives, because what a person has in front of them is the name.
+      std::string id = want;
+      for (size_t i = 0; i < cameras_.size(); ++i) {
+        if (cameras_[i].id != want && cameras_[i].name != want) continue;
+        id = cameras_[i].id;
+        cameras_.erase(cameras_.begin() + static_cast<long>(i));
+        break;
+      }
+      forget_requested_.push_back(id);
+      said += "forgot " + id + "\n";
+    }
+    return banner() + said + "end\n";
   }
   if (cmd.verb == "sync" || cmd.verb == "source") {
     Request req;

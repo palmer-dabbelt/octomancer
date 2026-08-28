@@ -467,6 +467,42 @@ void test_an_empty_path_disables_it_quietly() {
   CHECK(db.note_seen("cam-a", "x", 24, true, &err));
 }
 
+// Deleting a body has to survive the reopen, and that is the whole difficulty:
+// this file is an append-only log, so there is no line meaning "disregard the
+// ones above". The record is dropped and the file rewritten from what is left.
+void test_forgetting_a_body_deletes_it_from_the_file() {
+  const std::string dir = scratch("forget");
+  const std::string path = dir + "/db.json";
+  octo::CamDbOptions dbopt;
+  std::string err;
+
+  octo::CamDb db;
+  CHECK(db.open(path, dbopt, &err));
+  for (int i = 0; i < 12; ++i) {
+    CHECK(db.record_write("gone", sample(100.0 + i, 0.05, -0.10), &err));
+    CHECK(db.record_write("stays", sample(200.0 + i, 0.05, -0.10), &err));
+  }
+  db.learn("gone", true, 3, true, 0.25, true, -4.0, 3600.0);
+  CHECK(db.find("gone") != nullptr);
+
+  CHECK(db.forget("gone", &err));
+  CHECK(db.find("gone") == nullptr);
+  CHECK(db.find("stays") != nullptr);
+
+  // Reopened from disk, which is where an append-only log would have given
+  // the record straight back.
+  db.close();
+  octo::CamDb again;
+  CHECK(again.open(path, dbopt, &err));
+  CHECK(again.find("gone") == nullptr);
+  const octo::CameraRecord* stays = again.find("stays");
+  CHECK(stays != nullptr);
+  if (stays != nullptr) CHECK_EQ(stays->samples.size(), size_t(12));
+
+  // A body that was never in it is already in the state the caller asked for.
+  CHECK(again.forget("never", &err));
+  remove_tree(dir);
+}
 }  // namespace
 
 int main() {
@@ -492,5 +528,6 @@ int main() {
   test_the_measurement_basis_survives_a_round_trip();
   test_a_missing_file_is_not_an_error();
   test_an_empty_path_disables_it_quietly();
+  test_forgetting_a_body_deletes_it_from_the_file();
   return octotest::report("test_camdb");
 }

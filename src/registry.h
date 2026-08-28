@@ -169,6 +169,18 @@ class Registry {
   Snapshot snapshot() const;
   Snapshot snapshot(double mono, double wall) const;
 
+  // Throw away everything known about one device, by id. Returns false when
+  // there was nothing to throw away.
+  //
+  // This is not "switch it off": there is no tombstone and nothing is
+  // remembered. The next advertisement from that id builds the device again
+  // from nothing -- new first_seen, an empty sample window, no drift, no alert
+  // state -- which is exactly what somebody removing a box from the list is
+  // asking for. A box wrongly removed costs an hour of drift history and
+  // nothing else, and the alternative, a list that only ever grows, costs a
+  // page full of equipment that left the building years ago.
+  bool forget(const std::string& id);
+
   // Hand the caller every alert transition since the last call.
   std::vector<AlertEvent> take_events();
 

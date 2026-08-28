@@ -769,6 +769,56 @@ void test_json_carries_liveness() {
   CHECK(none.find("\"sessions\":0") != std::string::npos);
 }
 
+// Two halves, deliberately split. The published row goes at once, because a
+// page that has just been told to remove a device should not then watch it sit
+// there; the file on disk is handed to the daemon, because writing it is the
+// daemon thread's job and doing it from a socket handler is how two writers
+// happen.
+void test_forget_drops_the_row_and_hands_over_the_id() {
+  Control control;
+  CameraStatus a;
+  a.id = "id-a";
+  a.name = "BMPCC";
+  control.publish_camera(a);
+  CameraStatus b;
+  b.id = "id-b";
+  b.name = "Ursa";
+  control.publish_camera(b);
+  Status before;
+  std::string perr;
+  CHECK(octo::parse_status(control.handle("status"), &before, &perr));
+  CHECK_EQ(before.cameras.size(), size_t(2));
+
+  CHECK(!control.forget_pending());
+  // By name, because a name is what somebody has in front of them.
+  control.handle("forget camera=BMPCC");
+  Status after;
+  CHECK(octo::parse_status(control.handle("status"), &after, &perr));
+  CHECK_EQ(after.cameras.size(), size_t(1));
+  CHECK_STR(after.cameras[0].id.c_str(), "id-b");
+
+  // Handed over as the id, never as whatever the caller happened to type:
+  // the database is keyed by body.
+  CHECK(control.forget_pending());
+  const std::vector<std::string> taken = control.take_forgotten();
+  CHECK_EQ(taken.size(), size_t(1));
+  if (!taken.empty()) CHECK_STR(taken[0].c_str(), "id-a");
+  CHECK(!control.forget_pending());
+  CHECK(control.take_forgotten().empty());
+
+  // An id nobody published is still handed on. The row is this object's, the
+  // database is not, and refusing here would leave stale learned state behind
+  // for any camera the daemon knew about and this list had already dropped.
+  control.handle("forget camera=id-z");
+  const std::vector<std::string> unknown = control.take_forgotten();
+  CHECK_EQ(unknown.size(), size_t(1));
+  if (!unknown.empty()) CHECK_STR(unknown[0].c_str(), "id-z");
+
+  // And it needs to be told which one.
+  std::string err;
+  Status ignored;
+  CHECK(!octo::parse_status(control.handle("forget"), &ignored, &err));
+}
 }  // namespace
 
 int main() {
@@ -801,5 +851,6 @@ int main() {
   test_reload_can_be_seen_without_taking_it();
   test_json_carries_permission();
   test_json_carries_liveness();
+  test_forget_drops_the_row_and_hands_over_the_id();
   return octotest::report("test_control");
 }

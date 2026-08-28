@@ -251,6 +251,14 @@ bool CamDb::should_compact() const {
          live_bytes_estimate() * opt_.compact_factor;
 }
 
+bool CamDb::forget(const std::string& id, std::string* err) {
+  if (cam_.erase(id) == 0) return true;
+  if (file_ == nullptr) return true;  // nothing on disk to rewrite
+  // compact() writes the file out of cam_, so the erase above is the deletion
+  // and this is only how it is made durable.
+  return compact(err);
+}
+
 bool CamDb::compact(std::string* err) {
   if (path_.empty()) return true;
 

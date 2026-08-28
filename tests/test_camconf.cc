@@ -644,6 +644,57 @@ void test_warn_and_the_other_setting_share_a_line() {
   ::unlink(path.c_str());
 }
 
+// Removing a device takes its line out and leaves everything else exactly
+// where it was -- comments, spacing, and the other devices' settings.
+//
+// The reason it is a deletion and not `enabled=off`: an "off" is a decision
+// somebody wants remembered, and remembering it is precisely what makes a
+// removed device keep appearing on the Configuration page forever. Nothing is
+// left behind here, so the defaults come back with it.
+void test_forgetting_a_device_removes_only_its_line() {
+  const std::string path = temp_path("forget");
+  write_file(path,
+             "# my rig\n"
+             "camera aaa writes=on warn=on name=BMPCC\n"
+             "camera bbb writes=on name=Ursa\n"
+             "\n"
+             "box aaa enabled=off name=FS7\n"
+             "box ccc warn=on name=Krysta\n");
+  CamConf conf;
+  std::string err;
+  CHECK(conf.load(path, &err));
+
+  // The verb has to match as well as the id. `aaa` is both a camera and a box
+  // here, and forgetting the camera must not touch the box.
+  CHECK(conf.forget_camera("aaa", &err));
+  const std::string after = read_file(path);
+  CHECK(after.find("camera aaa") == std::string::npos);
+  CHECK(after.find("camera bbb") != std::string::npos);
+  CHECK(after.find("box aaa enabled=off name=FS7") != std::string::npos);
+  CHECK(after.find("# my rig") != std::string::npos);
+
+  // And it is gone from the loaded view, back to the default for a camera
+  // nobody has said anything about, which is off.
+  CHECK(conf.find("aaa") == nullptr);
+  CHECK(!conf.writes_enabled("aaa"));
+  CHECK(!conf.warn_enabled("aaa"));
+  // The box of the same name is untouched, including its settings.
+  CHECK(!conf.box_enabled("aaa"));
+
+  CHECK(conf.forget_box("aaa", &err));
+  const std::string later = read_file(path);
+  CHECK(later.find("box aaa") == std::string::npos);
+  CHECK(later.find("box ccc warn=on name=Krysta") != std::string::npos);
+  // A box nobody has an opinion about is on, so removing a disabled one
+  // brings it back switched on. That is the whole difference from "off".
+  CHECK(conf.box_enabled("aaa"));
+
+  // Asking for something that was never there is a state, not an event.
+  CHECK(conf.forget_camera("nobody", &err));
+  CHECK(conf.forget_box("nobody", &err));
+  CHECK_STR(read_file(path).c_str(), later.c_str());
+  ::unlink(path.c_str());
+}
 }  // namespace
 
 int main() {
@@ -672,5 +723,6 @@ int main() {
   test_setting_warn_creates_flips_and_preserves();
   test_setting_warn_on_an_unknown_device_appends();
   test_warn_and_the_other_setting_share_a_line();
+  test_forgetting_a_device_removes_only_its_line();
   return octotest::report("test_camconf");
 }

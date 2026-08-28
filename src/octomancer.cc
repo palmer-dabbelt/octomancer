@@ -103,6 +103,13 @@ void usage(FILE* out) {
       "                        Off until asked for, so name the devices you\n"
       "                        are working with, with --box and --camera.\n"
       "                        With no argument, reports the file.\n"
+      "  remove                take a device off the list entirely: its\n"
+      "                        settings and everything either daemon has\n"
+      "                        learned about it, deleted. Not `disable`,\n"
+      "                        which is a decision that gets remembered --\n"
+      "                        this leaves nothing behind, so a device still\n"
+      "                        in range comes back at its defaults. Say which\n"
+      "                        with --box and --camera.\n"
       "  source [MODE]         report or set the camera's timecode source.\n"
       "                        MODE is `time-of-day` (the timecode follows the\n"
       "                        camera's clock, which is what lets it be\n"
@@ -824,6 +831,120 @@ int run_warn_command(const Options& opt, const std::string& argument,
   return 0;
 }
 
+// ------------------------------------------------------------------ remove
+//
+// Take a device off the list: out of the configuration file, and out of
+// whichever daemon is holding what it has learned about it.
+//
+// Deliberately not the same as `disable`, and the difference is worth being
+// clear about because they are one word apart. `disable` is a decision that
+// gets remembered -- which is exactly what keeps a switched-off device on the
+// page forever. This removes the memory instead, so nothing is left with an
+// opinion, and the next advertisement puts the device back at its defaults.
+// Somebody who wants it gone and staying gone wants `disable`.
+int run_remove_command(const Options& opt, const std::string& argument,
+                       const Paint& p) {
+  if (!argument.empty()) {
+    std::fprintf(stderr,
+                 "octomancer: name the device with --box or --camera, as in"
+                 " `octomancer remove --box %s`.\n", argument.c_str());
+    return 2;
+  }
+  if (opt.all_cameras) {
+    std::fprintf(stderr,
+                 "octomancer: --all is every *camera*, which is not the whole"
+                 " room, and this is not a command to run on a guess. Name the"
+                 " devices with --camera and --box.\n");
+    return 2;
+  }
+  if (opt.cameras.empty() && opt.boxes.empty()) {
+    std::fprintf(stderr,
+                 "octomancer: say which device -- `--box NAME|ID` or"
+                 " `--camera ID|NAME`, repeatable.\n");
+    return 2;
+  }
+
+  octo::CamConf conf;
+  std::string err;
+  if (!conf.load(octo::default_camera_config_path(), &err)) {
+    std::fprintf(stderr, "octomancer: %s\n", err.c_str());
+    return 1;
+  }
+
+  octo::Snapshot snap;
+  std::string ignored;
+  const bool have_bench =
+      opt.boxes.empty()
+          ? false
+          : octo::fetch(opt.bench_socket_path, &snap, &ignored);
+  octo::Status status;
+  const bool have_status =
+      opt.cameras.empty() ? false : fetch_status_quiet(opt, &status);
+
+  std::vector<std::pair<bool, Target>> targets;  // camera?, device
+  for (const Target& t :
+       resolve_boxes(have_bench ? &snap : nullptr, conf, opt.boxes)) {
+    targets.emplace_back(false, t);
+  }
+  for (const Target& t :
+       resolve_cameras(have_status ? &status : nullptr, conf, opt.cameras)) {
+    targets.emplace_back(true, t);
+  }
+
+  int failures = 0;
+  for (const auto& target : targets) {
+    const bool camera = target.first;
+    const Target& d = target.second;
+    const std::string label = d.second.empty() ? d.first : d.second;
+
+    // The file first. A daemon told to forget and then restarted would read
+    // the line straight back in, so the line has to go first for the two to
+    // agree however the ordering works out.
+    const bool ok = camera ? conf.forget_camera(d.first, &err)
+                           : conf.forget_box(d.first, &err);
+    if (!ok) {
+      std::fprintf(stderr, "octomancer: %s\n", err.c_str());
+      return 1;
+    }
+
+    // Then the daemon holding the history. Reported and counted, but the
+    // settings are already gone and a daemon that is not running has nothing
+    // to forget.
+    std::string reply, derr;
+    const std::string ask =
+        camera ? "forget camera=" + d.first : "forget " + d.first;
+    const std::string where =
+        camera ? opt.socket_path : opt.bench_socket_path;
+    if (octo::query(where, ask, &reply, &derr, 5.0)) {
+      std::printf("%s%s%s removed -- settings and history deleted\n",
+                  p(kGreen), label.c_str(), p(kReset));
+    } else {
+      ++failures;
+      std::printf("%s%s%s removed from %s\n", p(kYellow), label.c_str(),
+                  p(kReset), conf.path().c_str());
+      std::printf("  %s did not answer, so what it has learned about this"
+                  " device is still in memory: %s\n",
+                  camera ? "octomancer-sync" : "octomancerd", derr.c_str());
+    }
+    if (camera) {
+      // The one part of this the program cannot do, said here rather than left
+      // to be discovered when the next pairing behaves oddly.
+      std::printf("  the Bluetooth pairing is not octomancer's to undo:"
+                  " remove this Mac in the camera's setup menu, and remove"
+                  " the camera in System Settings > Bluetooth\n");
+    }
+  }
+  if (targets.empty()) {
+    std::fprintf(stderr, "octomancer: no such device\n");
+    return 1;
+  }
+  // Nothing is blacklisted, so say what will happen next rather than letting
+  // somebody find out by watching the device come back.
+  std::printf("Nothing is blocked: a device still switched on and in range"
+              " will reappear, at its defaults.\n");
+  return failures == 0 ? 0 : 1;
+}
+
 // ------------------------------------------------------------------ status
 //
 // The one command that talks to both daemons. Neither knows what the other can
@@ -1114,6 +1235,10 @@ int main(int argc, char** argv) {
       return 2;
     }
     return run_boxes_command(opt, command == "enable", paint);
+  }
+
+  if (command == "remove" || command == "forget") {
+    return run_remove_command(opt, argument, paint);
   }
 
   if (command == "reload") {

@@ -24,13 +24,18 @@ std::string default_socket_path();
 using Handler = std::function<std::string(const std::string&)>;
 
 // The handler octomancerd has always had: status, json, ping, over a registry.
-Handler registry_handler(const Registry& registry);
+//
+// Not const any more, and the reason is worth stating: `forget` throws a
+// device away, which is the first thing a client has ever been able to ask
+// this daemon to *do* rather than to report. Everything else here is still a
+// read.
+Handler registry_handler(Registry& registry);
 
 class Server {
  public:
   explicit Server(Handler handler, std::string path);
   // The tentacle daemon's shorthand for the above.
-  Server(const Registry& registry, std::string path);
+  Server(Registry& registry, std::string path);
   ~Server();
 
   Server(const Server&) = delete;

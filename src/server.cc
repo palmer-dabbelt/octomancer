@@ -58,7 +58,7 @@ std::string default_socket_path() {
   return base + "/Library/Application Support/octomancer/octomancerd.sock";
 }
 
-Handler registry_handler(const Registry& registry) {
+Handler registry_handler(Registry& registry) {
   return [&registry](const std::string& command) -> std::string {
     if (command == "status" || command.empty()) {
       return render_text(registry.snapshot());
@@ -69,6 +69,23 @@ Handler registry_handler(const Registry& registry) {
     if (command == "ping") {
       return "octomancer " + std::to_string(kProtocolVersion) + "\npong\n";
     }
+    // `forget <id>` -- the id verbatim, because that is what the snapshot
+    // hands a client and asking it to quote or escape its own way back would
+    // invent a second spelling of the same thing.
+    if (command.compare(0, 7, "forget ") == 0) {
+      const std::string id = command.substr(7);
+      if (id.empty()) {
+        return "octomancer " + std::to_string(kProtocolVersion) +
+               "\nerror forget needs a device id\n";
+      }
+      // "Not here" is reported as success. The caller asked for the device to
+      // be gone, and it is; making them tell the difference between "removed"
+      // and "was never here" would only invite them to treat one of the two
+      // as a failure worth showing somebody.
+      const bool had = registry.forget(id);
+      return "octomancer " + std::to_string(kProtocolVersion) + "\nforgot " +
+             escape(id) + (had ? "" : " (was not listed)") + "\n";
+    }
     return "octomancer " + std::to_string(kProtocolVersion) +
            "\nerror unknown command: " + escape(command) + "\n";
   };
@@ -77,7 +94,7 @@ Handler registry_handler(const Registry& registry) {
 Server::Server(Handler handler, std::string path)
     : handler_(std::move(handler)), path_(std::move(path)) {}
 
-Server::Server(const Registry& registry, std::string path)
+Server::Server(Registry& registry, std::string path)
     : handler_(registry_handler(registry)), path_(std::move(path)) {}
 
 Server::~Server() { shutdown(); }

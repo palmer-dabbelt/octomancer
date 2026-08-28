@@ -145,6 +145,14 @@ class CamConf {
   // rewrite the same line the two above do, changing only `warn=`.
   bool set_camera_warn(const std::string& id, const std::string& name,
                        bool warn, std::string* err);
+  // Drop every line about one device, so the file has no opinion about it at
+  // all. Switching a device off is remembered; this is not remembered, which
+  // is the difference -- a removed device comes back at its defaults the next
+  // time it is heard. Both return true when there was nothing to remove: the
+  // caller asked for a state, not for an event.
+  bool forget_camera(const std::string& id, std::string* err);
+  bool forget_box(const std::string& id, std::string* err);
+
   bool set_box_warn(const std::string& id, const std::string& name, bool warn,
                     std::string* err);
 
@@ -154,6 +162,11 @@ class CamConf {
   // Both setters are the same rewrite with two words changed -- the verb that
   // starts the line and the key that carries the flag -- so they share it
   // rather than each keeping their own copy of the preserve-everything rules.
+  bool read_lines(std::vector<std::string>* lines, bool* had_file,
+                  std::string* err);
+  bool write_lines(const std::vector<std::string>& lines, bool had_file,
+                   std::string* err);
+  bool forget_device(const char* verb, const std::string& id, std::string* err);
   bool set_flag(const char* verb, const char* key, const std::string& id,
                 const std::string& name, bool enabled, std::string* err);
 

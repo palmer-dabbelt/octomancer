@@ -268,6 +268,16 @@ class Control {
   // a second rather than whenever the next cycle happened to be due.
   bool reload_pending() const;
 
+  // Camera ids somebody has asked to be forgotten since this was last called.
+  //
+  // The row is dropped from the published status the moment the command
+  // arrives -- that half is this object's own state and a page asking to
+  // remove a device should not watch it sit there afterwards. What is on disk
+  // is the daemon's, written on the daemon's thread, so it is handed over
+  // here instead of being reached for from the socket.
+  std::vector<std::string> take_forgotten();
+  bool forget_pending() const;
+
   // Queue from inside the daemon rather than from a socket, which is how the
   // command line's one-shot modes reach the same code path.
   int64_t queue(const Request& req);
@@ -299,6 +309,7 @@ class Control {
   int64_t next_request_id_ = 1;
   int64_t next_event_seq_ = 1;
   bool reload_requested_ = false;
+  std::vector<std::string> forget_requested_;
 };
 
 // Where the camera daemon listens. Deliberately a different socket from

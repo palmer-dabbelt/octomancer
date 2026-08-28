@@ -2271,6 +2271,32 @@ int main(int argc, char** argv) {
     // than on the socket thread: the values are consulted halfway through
     // deciding things, and swapping them out underneath that would make a
     // cycle act on two different configurations.
+    // Somebody removed a device. The published row went the moment the
+    // command landed; what is left is the learned state on disk, which is
+    // this thread's file to rewrite.
+    for (const std::string& gone : control.take_forgotten()) {
+      std::string derr;
+      if (!db.forget(gone, &derr)) {
+        say("could not delete %s from the camera database: %s", gone.c_str(),
+            derr.c_str());
+      } else {
+        say("forgot %s -- every learned figure for that body is deleted",
+            gone.c_str());
+      }
+      // If it is the body we are holding measurements for, drop those too.
+      // Leaving them would have the next cycle write the camera's old RTC
+      // bias straight back into the file it was just deleted from.
+      if (state.camera_id == gone) {
+        state = octo::SyncState();
+        state.rtc_bias = opt.sync.rtc_bias;
+      }
+      std::string cferr;
+      if (!conf.forget_camera(gone, &cferr)) {
+        say("could not remove %s from %s: %s", gone.c_str(),
+            conf.path().c_str(), cferr.c_str());
+      }
+    }
+
     if (control.take_reload()) {
       std::string cerr_msg;
       if (!conf.reload(&cerr_msg)) {
@@ -2481,7 +2507,7 @@ int main(int argc, char** argv) {
       // A reload is somebody waiting at a terminal for an answer, so it is
       // worth cutting the wait short for. Taking it is still the loop's job,
       // at the top, where nothing is halfway through being decided.
-      if (control.reload_pending()) break;
+      if (control.reload_pending() || control.forget_pending()) break;
       std::this_thread::sleep_for(std::chrono::milliseconds(250));
     }
   }

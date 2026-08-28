@@ -262,6 +262,53 @@ void test_never_seen_is_reported_as_such() {
   CHECK(!snap.camera.present);
   CHECK_EQ(snap.camera.sessions, 0u);
 }
+// Removing a box is not switching it off. Nothing is remembered, so the very
+// next advertisement builds it again from nothing -- which is what somebody
+// clearing a decade of hired-in kit off the list is asking for, and also the
+// price: an hour of drift history goes with it.
+void test_forget_takes_the_whole_device_with_it() {
+  Registry reg({}, 0.0);
+  for (int i = 0; i < 40; ++i) {
+    feed(&reg, "a", -6.231, i, wall_at(i));
+    feed(&reg, "b", -6.230, i, wall_at(i));
+  }
+  CHECK_EQ(reg.snapshot(40, wall_at(40)).devices, 2);
+
+  CHECK(reg.forget("a"));
+  const Snapshot after = reg.snapshot(40, wall_at(40));
+  CHECK_EQ(after.devices, 1);
+  CHECK_STR(after.device[0].id.c_str(), "b");
+
+  // Asking twice is not an error. The caller wanted it gone, and it is.
+  CHECK(!reg.forget("a"));
+  CHECK(!reg.forget("never-here"));
+
+  // Heard again, and it is a new box: no samples behind it, so no median
+  // worth quoting and certainly no drift.
+  feed(&reg, "a", -6.231, 41, wall_at(41));
+  const Snapshot again = reg.snapshot(41, wall_at(41));
+  CHECK_EQ(again.devices, 2);
+  for (const DeviceSnapshot& d : again.device) {
+    if (d.id != "a") continue;
+    CHECK_EQ(d.samples, 1);
+    CHECK(!d.has_drift);
+  }
+}
+
+// The camera is a single slot rather than a row in the map, and forgetting it
+// has to work through the same door -- a person looking at one list should not
+// have to know this daemon stores one of them differently.
+void test_forget_reaches_the_camera_too() {
+  Registry reg({}, 0.0);
+  reg.observe_camera("cam-1", "A:1EAE18A7", -70, 1.0, wall_at(1));
+  CHECK(reg.snapshot(1, wall_at(1)).camera.seen);
+
+  CHECK(reg.forget("cam-1"));
+  const Snapshot after = reg.snapshot(1, wall_at(1));
+  CHECK(!after.camera.seen);
+  CHECK(!after.camera.present);
+  CHECK_EQ(after.camera.sessions, 0u);
+}
 }  // namespace
 
 int main() {
@@ -276,5 +323,7 @@ int main() {
   test_power_cycle_counts_a_new_session();
   test_a_second_camera_is_ignored();
   test_never_seen_is_reported_as_such();
+  test_forget_takes_the_whole_device_with_it();
+  test_forget_reaches_the_camera_too();
   return octotest::report("test_registry");
 }

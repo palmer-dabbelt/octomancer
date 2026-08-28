@@ -173,6 +173,13 @@ class CamDb {
   // exposed for tests and for a caller that wants to tidy up before exit.
   bool compact(std::string* err);
 
+  // Delete everything learned about one body: its record, its bias, its lead,
+  // its drift, and every write sample taken against it. Done by dropping it
+  // and rewriting the file, because this database is an append-only log and
+  // there is no line that means "and disregard the ones above". Returns true
+  // when the body was not in it, which is the state the caller asked for.
+  bool forget(const std::string& id, std::string* err);
+
   uint64_t compactions() const { return compactions_; }
   double bytes() const { return static_cast<double>(bytes_); }
 

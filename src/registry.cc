@@ -298,6 +298,20 @@ Snapshot Registry::snapshot(double mono, double wall) const {
   return snap;
 }
 
+bool Registry::forget(const std::string& id) {
+  std::lock_guard<std::mutex> lock(mu_);
+  bool gone = devices_.erase(id) > 0;
+  // The camera is a single slot rather than a map, so forgetting it is
+  // resetting it. Kept in the same call because a person looking at one list
+  // of devices should not have to know which of them this daemon stores
+  // differently.
+  if (camera_.seen && camera_.id == id) {
+    camera_ = Camera();
+    gone = true;
+  }
+  return gone;
+}
+
 std::vector<AlertEvent> Registry::take_events() {
   std::lock_guard<std::mutex> lock(mu_);
   std::vector<AlertEvent> out;

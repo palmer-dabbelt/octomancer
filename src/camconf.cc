@@ -339,27 +339,110 @@ bool CamConf::set_box_warn(const std::string& id, const std::string& name,
   return set_flag("box", "warn", id, name, warn, err);
 }
 
-bool CamConf::set_flag(const char* verb, const char* key,
-                       const std::string& id, const std::string& name,
-                       bool enabled, std::string* err) {
+// Read what is there, so a rewrite can put back every line it has no reason
+// to touch. This file belongs to a person: comments, spacing and settings from
+// a version that has not been written yet all survive being edited from here.
+bool CamConf::read_lines(std::vector<std::string>* lines, bool* had_file,
+                         std::string* err) {
   if (path_.empty()) {
     if (err) *err = "no configuration file to write to";
     return false;
   }
   if (!make_parents(path_, err)) return false;
+  *had_file = false;
+  std::ifstream in(path_);
+  if (in) {
+    *had_file = true;
+    std::string line;
+    while (std::getline(in, line)) lines->push_back(line);
+  }
+  return true;
+}
 
-  // Read what is there, so the rewrite can put back every line it has no
-  // reason to touch.
-  std::vector<std::string> lines;
-  bool had_file = false;
+// Written to a temporary and renamed, so an interrupted write cannot leave a
+// half-file that the daemon would then refuse to parse.
+bool CamConf::write_lines(const std::vector<std::string>& lines, bool had_file,
+                          std::string* err) {
+  const std::string tmp = path_ + ".tmp";
   {
-    std::ifstream in(path_);
-    if (in) {
-      had_file = true;
-      std::string line;
-      while (std::getline(in, line)) lines.push_back(line);
+    std::ofstream out(tmp, std::ios::trunc);
+    if (!out) {
+      if (err) *err = "cannot write " + tmp + ": " + strerror(errno);
+      return false;
+    }
+    if (!had_file) out << kHeader;
+    for (const std::string& line : lines) out << line << "\n";
+    if (!out) {
+      if (err) *err = "short write to " + tmp;
+      return false;
     }
   }
+  if (::rename(tmp.c_str(), path_.c_str()) != 0) {
+    if (err) *err = "cannot replace " + path_ + ": " + strerror(errno);
+    ::unlink(tmp.c_str());
+    return false;
+  }
+  std::string ignored;
+  return load(path_, &ignored);
+}
+
+// Drop every line this file holds about one device.
+//
+// Not the same operation as switching it off, and the difference is the whole
+// point of having both. `enabled=off` is a decision somebody made and wants
+// remembered; this is somebody saying they never want to be asked about the
+// device again, and a remembered "off" would be exactly that -- a row on the
+// device page, forever, for a box sold years ago. So the line goes.
+//
+// Which also means the defaults come back. A box removed here reappears the
+// next time one advertises, switched on, because that is what a box nobody
+// has an opinion about does. Somebody who wants it gone and staying gone
+// wants it switched off instead, and that is the honest answer to give them.
+bool CamConf::forget_camera(const std::string& id, std::string* err) {
+  return forget_device("camera", id, err);
+}
+
+bool CamConf::forget_box(const std::string& id, std::string* err) {
+  return forget_device("box", id, err);
+}
+
+bool CamConf::forget_device(const char* verb, const std::string& id,
+                            std::string* err) {
+  std::vector<std::string> lines;
+  bool had_file = false;
+  if (!read_lines(&lines, &had_file, err)) return false;
+  if (!had_file) return true;  // nothing on file to forget
+
+  std::vector<std::string> kept;
+  kept.reserve(lines.size());
+  for (const std::string& line : lines) {
+    const std::string t = trim(line);
+    bool drop = false;
+    if (!t.empty() && t[0] != '#') {
+      const size_t sp = t.find_first_of(" \t");
+      if (sp != std::string::npos && t.substr(0, sp) == verb) {
+        // Same rule as set_flag: a camera line and a box line are different
+        // id spaces, so the verb has to match before the id means anything.
+        std::vector<Field> fields = fields_of(t.substr(sp + 1));
+        if (!fields.empty()) {
+          const std::string this_id =
+              fields[0].value.empty() ? fields[0].key : fields[0].value;
+          drop = this_id == id;
+        }
+      }
+    }
+    if (!drop) kept.push_back(line);
+  }
+  if (kept.size() == lines.size()) return true;  // nothing matched
+  return write_lines(kept, had_file, err);
+}
+
+bool CamConf::set_flag(const char* verb, const char* key,
+                       const std::string& id, const std::string& name,
+                       bool enabled, std::string* err) {
+  std::vector<std::string> lines;
+  bool had_file = false;
+  if (!read_lines(&lines, &had_file, err)) return false;
 
   const std::string value = enabled ? "on" : "off";
   bool replaced = false;
@@ -414,30 +497,7 @@ bool CamConf::set_flag(const char* verb, const char* key,
     lines.push_back(added);
   }
 
-  // Written to a temporary and renamed, so an interrupted write cannot leave
-  // a half-file that the daemon would then refuse to parse.
-  const std::string tmp = path_ + ".tmp";
-  {
-    std::ofstream out(tmp, std::ios::trunc);
-    if (!out) {
-      if (err) *err = "cannot write " + tmp + ": " + strerror(errno);
-      return false;
-    }
-    if (!had_file) out << kHeader;
-    for (const std::string& line : lines) out << line << "\n";
-    if (!out) {
-      if (err) *err = "short write to " + tmp;
-      return false;
-    }
-  }
-  if (::rename(tmp.c_str(), path_.c_str()) != 0) {
-    if (err) *err = "cannot replace " + path_ + ": " + strerror(errno);
-    ::unlink(tmp.c_str());
-    return false;
-  }
-
-  std::string ignored;
-  return load(path_, &ignored);
+  return write_lines(lines, had_file, err);
 }
 
 }  // namespace octo

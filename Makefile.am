@@ -51,6 +51,11 @@ libocto_a_SOURCES = \
 	src/jsonlog.h \
 	src/logscan.cc \
 	src/logscan.h \
+	src/loop.cc \
+	src/loop.h \
+	src/loop_posix.cc \
+	src/loopfake.cc \
+	src/loopfake.h \
 	src/pairing.cc \
 	src/pairing.h \
 	src/proclock.cc \
@@ -261,6 +266,7 @@ check_PROGRAMS = \
 	tests/test_hci \
 	tests/test_jsonlog \
 	tests/test_logscan \
+	tests/test_loop \
 	tests/test_pairing \
 	tests/test_proclock \
 	tests/test_proto \
@@ -315,6 +321,11 @@ tests_test_jsonlog_LDADD = libocto.a
 
 tests_test_logscan_SOURCES = tests/test_logscan.cc tests/harness.h
 tests_test_logscan_LDADD = libocto.a
+
+# The event loop, driven on a clock that is a variable. Nothing here waits on
+# the wall clock, which is the whole reason the backend is abstract.
+tests_test_loop_SOURCES = tests/test_loop.cc tests/harness.h
+tests_test_loop_LDADD = libocto.a
 
 # The dongle's codecs. All four run on a machine with no dongle in it, which is
 # the whole argument for having written them as portable C++ rather than as

@@ -1,8 +1,9 @@
 # The dongle
 
-*Written 2026-08-27, before the hardware arrived. Everything below is either
-built and tested without a radio, or explicitly marked as unverified. Nothing
-here has yet been run against an nRF52840.*
+*Written 2026-08-27, before the hardware arrived; first touched by a real
+dongle on 2026-08-29. Everything below is either built and tested without a
+radio, or explicitly marked as unverified. What the hardware has actually
+answered so far is one paragraph, at the end.*
 
 ## Why there is a second radio
 
@@ -35,10 +36,10 @@ shape — `make_ble_scanner()` and `make_camera_link()` kept their names and
 their signatures, and `src/radio.cc` is the only thing that had to learn there
 were two possibilities.
 
-It is also not custom firmware. The dongle runs a stock Zephyr `hci_usb` image,
-so there is no embedded code in this repository to maintain, and every decision
-worth making is made in portable C++ that `make check` can exercise on a
-machine with no radio in it.
+It is also not custom firmware. The dongle runs a stock Zephyr `hci_uart`
+image, so there is no embedded code in this repository to maintain, and every
+decision worth making is made in portable C++ that `make check` can exercise on
+a machine with no radio in it.
 
 ## Getting an image onto it
 
@@ -49,16 +50,26 @@ missing.
 tools/flash-dongle.sh --check
 tools/flash-dongle.sh --build                     # needs a Zephyr SDK
 tools/flash-dongle.sh --package build-hci/zephyr/zephyr.hex
-tools/flash-dongle.sh --flash  build-hci/hci_usb_dfu.zip
+tools/flash-dongle.sh --flash  build-hci/hci_uart_dfu.zip
 ```
 
 DFU mode is the small side button (SW1, next to the USB connector — not the one
 on the end) held while plugging in. The red LED pulses slowly when the
 bootloader is listening.
 
-If you would rather not install a Zephyr toolchain, any prebuilt `hci_usb`
+If you would rather not install a Zephyr toolchain, any prebuilt `hci_uart`
 image for the `nrf52840dongle` board works; skip `--build` and start at
 `--package`.
+
+**It has to be `hci_uart` and not `hci_usb`, which is a trap, because the
+wrong one is the one with the better name.** `hci_usb` builds a USB Bluetooth
+class device -- `CONFIG_SERIAL=n`, `CONFIG_USBD_BT_HCI=y` -- with no serial
+port on it anywhere. Linux binds that with `btusb` and hands you an `hci0`;
+macOS has no driver for the class and hands you nothing at all. This project
+talks to a serial port on both systems, so `hci_usb` yields a dongle nothing
+here can reach. `hci_uart` carries the same raw HCI over a UART, and the
+dongle's own board file in Zephyr aims that UART at CDC ACM -- an ordinary
+serial port with H:4 packets on it, which is what `hcilink.cc` is expecting.
 
 ## Using it
 
@@ -200,9 +211,9 @@ What none of them can check is whether real hardware agrees. In particular:
   controller's `LE Read Local P-256 Public Key` and `LE Generate DHKey`
   commands wired through `hcilink`. If a Blackmagic camera turns out to insist
   on it, that is the work.
-* **Nothing has been run against an nRF52840.** The first thing to try is
-  `octomancer-zoom --scan 10`; if that lists devices, the transport, the
-  framing, the event parsing and the AD decoder are all working.
+* **Almost nothing has been run against an nRF52840.** See below for the one
+  thing that has. The framing, the event parsing and the AD decoder have still
+  never seen a packet from a real controller.
 
 ## Notes for when the hardware arrives
 
@@ -218,3 +229,41 @@ What none of them can check is whether real hardware agrees. In particular:
   whose absence made the Zoom investigation so slow; use it early.
 * An initiator left running blocks every later scan with a bare "command
   disallowed". `Link::connect()` cancels on timeout for this reason.
+
+## What the hardware has actually said
+
+A dongle was plugged into a Mac on 2026-08-29 and `octomancer-zoom --scan 10
+--trace` was run against it. The trace is the whole result:
+
+```
+hci -> 01030c00
+octomancer-zoom: Reset: no answer from the controller
+```
+
+That is a `Reset` going out and nothing coming back, and it is the expected
+answer for this dongle, because this dongle has never been flashed. It came up
+as `/dev/cu.usbmodemC499F7F00D5B1`, and `ioreg` gives its USB product string as
+`nRF52 USB CDC BLE Demo` from vendor `0x1915` -- Nordic's own demonstration
+application, which offers a serial port and does not speak HCI over it.
+
+So what this proves is smaller than it looks, and worth stating exactly:
+
+| Verified against hardware | How |
+|---|---|
+| A dongle is found without being named | `list_candidate_ports()` picked the port out of `/dev` unaided |
+| The port opens and is written | the `Reset` reached the wire; `--trace` printed it |
+| Silence is reported as silence | the timeout said which command went unanswered, rather than hanging |
+
+Everything past the first byte remains unverified. Nothing has yet parsed an
+event, because nothing has yet sent us one.
+
+The next step is flashing, and until that happens, a dongle in this state is
+indistinguishable at the port from a broken one -- both are a serial device
+that will not answer a `Reset`. If you meet that message, check the USB product
+string before suspecting the code:
+
+```
+ioreg -l -w 0 | grep -A4 'Nordic'
+```
+
+`Zephyr HCI UART sample` is a flashed dongle. Anything else is not.

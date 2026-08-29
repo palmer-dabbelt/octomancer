@@ -7,7 +7,7 @@
 // decisions. HCI is the layer underneath all of that: a controller does what
 // the host tells it, and the host is this file.
 //
-// The dongle runs a stock Zephyr `hci_usb` image, so there is no firmware in
+// The dongle runs a stock Zephyr `hci_uart` image, so there is no firmware in
 // this project to maintain. It presents a USB CDC serial port carrying H4
 // framing, and every decision worth making is made up here in portable C++
 // that tests/test_hci.cc can check on a machine with no dongle in it. That is

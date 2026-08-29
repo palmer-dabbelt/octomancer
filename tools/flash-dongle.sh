@@ -2,9 +2,9 @@
 #
 # Put an HCI firmware on an nRF52840 dongle.
 #
-# The dongle needs to speak raw HCI over USB for anything in this project to
-# talk to it. Nordic ships it with a DFU bootloader and no application, so the
-# job is to build (or fetch) a Zephyr `hci_usb` image and push it over that
+# The dongle needs to speak raw HCI over a serial port for anything in this
+# project to talk to it. Nordic ships it with a DFU bootloader, so the job is
+# to build (or fetch) a Zephyr `hci_uart` image and push it over that
 # bootloader -- no debugger, no soldering, nothing but the USB port.
 #
 # Deliberately not part of `make install`. Flashing a device is not something a
@@ -53,11 +53,11 @@ check() {
     fi
 
     if command -v west >/dev/null 2>&1; then
-        echo "found: west ($(command -v west)) -- you can build hci_usb yourself"
+        echo "found: west ($(command -v west)) -- you can build hci_uart yourself"
     else
         echo "note:  no west, so no Zephyr build here."
         echo "    Either install the Zephyr SDK, or download a prebuilt"
-        echo "    hci_usb image for the nrf52840dongle board and use --package."
+        echo "    hci_uart image for the nrf52840dongle board and use --package."
     fi
 
     echo
@@ -76,16 +76,29 @@ ports() {
     [ "$found" = 1 ] || echo "    (none)"
 }
 
-# Zephyr's hci_usb sample is the reference HCI-over-USB application. Building
-# it here rather than shipping a binary keeps this project free of somebody
-# else's compiled code.
+# hci_uart, not hci_usb, and the difference is the whole thing.
+#
+# hci_usb builds a USB Bluetooth *class* device: its prj.conf sets
+# CONFIG_SERIAL=n and CONFIG_USBD_BT_HCI=y, so there is no serial port on it
+# at all. Linux binds such a device with btusb and gives you an hci0; macOS
+# has no driver for the class and gives you nothing. This project's transport
+# is a serial port either way -- src/hciport_posix.cc opens /dev/cu.usbmodem*
+# or /dev/ttyACM* -- so hci_usb produces a dongle nothing here can reach.
+#
+# hci_uart carries the same raw HCI over a UART, and the dongle's board file
+# in Zephyr points that UART at CDC ACM. The dongle then enumerates as an
+# ordinary serial port with H:4 packets flowing over it, which is exactly what
+# hcilink.cc expects to find.
+#
+# Building it here rather than shipping a binary keeps this project free of
+# somebody else's compiled code.
 build() {
     command -v west >/dev/null 2>&1 || die "west is not installed; see --check"
     [ -n "$ZEPHYR_BASE" ] || die "ZEPHYR_BASE is not set; source your Zephyr env first"
     out=${1:-build-hci}
-    echo "building hci_usb for nrf52840dongle into $out ..."
+    echo "building hci_uart for nrf52840dongle into $out ..."
     west build -b nrf52840dongle/nrf52840 -d "$out" \
-        "$ZEPHYR_BASE/samples/bluetooth/hci_usb"
+        "$ZEPHYR_BASE/samples/bluetooth/hci_uart"
     echo "built: $out/zephyr/zephyr.hex"
     echo "next:  $0 --package $out/zephyr/zephyr.hex"
 }
@@ -99,7 +112,7 @@ package() {
     [ -f "$hex" ] || die "$hex: no such file"
     command -v nrfutil >/dev/null 2>&1 || die "nrfutil is not installed; see --check"
 
-    out=$(dirname "$hex")/hci_usb_dfu.zip
+    out=$(dirname "$hex")/hci_uart_dfu.zip
     rm -f "$out"
     nrfutil pkg generate \
         --hw-version 52 \

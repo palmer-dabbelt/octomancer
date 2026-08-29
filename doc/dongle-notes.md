@@ -69,14 +69,28 @@ of them is megabytes of silicon this project will never run on -- and the
 there is nothing to do. Nothing it fetches is tracked; `.gitignore` has the
 list.
 
-Pushing the package over the bootloader needs a tool that speaks Nordic's DFU
-protocol, and on a current macOS that is not `nrfutil`. `pip install nrfutil`
-still resolves and still installs -- and then `pkg generate` dies inside
-`dict.iteritems`, because what it installed is Python 2. The modern nrfutil is
-a prebuilt binary whose Homebrew cask was deprecated for failing Gatekeeper
-and is disabled from 2026-09-01. `pip install adafruit-nrfutil` is a Python 3
-fork of the old tool, speaking the same protocol over the same transport; the
-script takes whichever of the two it finds.
+Pushing the package over the bootloader needs a tool that speaks Nordic's
+*secure* DFU -- a protobuf init packet and an acknowledged transport -- and on
+a current macOS neither pip package will do it.
+
+`pip install nrfutil` resolves, installs, and is Python 2 all the way down:
+`iteritems`, then `xrange`, then integer division returning floats. Patching
+the first two only reveals the third.
+
+`pip install adafruit-nrfutil` installs cleanly and runs, and speaks the
+*older* nRF5 SDK protocol. Against this bootloader it sends a legacy init
+packet, waits, times out -- **and then exits 0, printing "done"**. That was
+the worst hour of this: a tool reporting success on a device it had not
+touched. It is no longer accepted, and `--flash` now warns if no
+`Open DFU Bootloader` is on the bus before it starts.
+
+What works is Nordic's current `nrfutil`, a native binary fetched from Nordic;
+`nrfutil install nrf5sdk-tools` adds the DFU commands, which turn out to be
+pc-nrfutil 6.1.7 -- the Python 3 release pip declines to offer because it
+predates the interpreter. `--setup` fetches it, so none of this has to be
+found out twice. The tell for which protocol a package uses is the init packet
+inside the zip: 69 bytes is secure DFU, 14 bytes is the legacy one that will
+be ignored.
 
 DFU mode is the small side button (SW1, next to the USB connector — not the one
 on the end) held while plugging in. The red LED pulses slowly when the

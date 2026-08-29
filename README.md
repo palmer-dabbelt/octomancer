@@ -866,6 +866,64 @@ Two differences are real and cannot be papered over:
   everything worked immediately. The dongle arrives as a stranger, so the
   camera displays a six-digit passkey — pass it with `--passkey`.
 
+### Which dongle to buy
+
+The one this was developed against is a **Raytac MDBT50Q-CX-40**, bought from
+[Amazon](https://www.amazon.com/dp/B0DP6MVDZQ), listed as "MDBT50Q-CX Nordic
+nRF52840 Dongle Development Kit for Bluetooth Zigbee Thread (USB Type
+C/Open Bootloader Pre-Loaded) BT5.4 FCC IC CE Pre-Certified". Other nRF52840
+dongles should work; nothing here is Raytac-specific. Three things in that
+listing are the ones that matter:
+
+* **nRF52840.** The firmware is built for Zephyr's `nrf52840dongle` board. An
+  nRF52832 is a different chip and will not take this image.
+* **Open Bootloader pre-loaded.** This is the line to look for, and the one
+  most easily skimmed past. It is what lets you program the dongle over the
+  USB port with nothing but a cable. A dongle without it needs an SWD debug
+  probe and a soldering iron before it will accept anything at all.
+* **A button.** Entering firmware-update mode needs one. Dongles with no
+  button exist and are not usable here.
+
+USB-A or USB-C makes no difference to anything but which port it goes in.
+
+What to avoid is a dongle carrying a **UF2 bootloader** — the Adafruit and
+Makerdiary boards ship this way. UF2 is a perfectly good bootloader, but it is
+a different mechanism: the dongle appears as a disk and you copy a `.uf2` file
+onto it, which is not what `tools/flash-dongle.sh` does.
+
+### Getting firmware onto it
+
+The dongle has to be put into DFU mode by hand, and **the procedure depends on
+the board**, which is worth knowing before you spend an afternoon pressing the
+wrong thing:
+
+* **One button (Raytac, and most third-party dongles).** Unplug it. Press and
+  hold the button, plug it in while still holding, keep holding for about a
+  second after it seats, then release. The last step is the one that gets
+  missed -- letting go as it goes in just starts the existing firmware again.
+* **Two buttons (Nordic's own PCA10059).** Press the small sideways-mounted
+  RESET button while it stays plugged in.
+
+Either way the LED starts a slow organic pulse -- a breath rather than a blink
+-- and the dongle re-enumerates as `Open DFU Bootloader`. You can confirm it
+without guessing:
+
+```
+ioreg -l -w 0 | grep -A4 Nordic     # "Open DFU Bootloader" means ready
+```
+
+Then:
+
+```
+tools/flash-dongle.sh --setup                  # once; fetches Zephyr and a compiler
+tools/flash-dongle.sh --build
+tools/flash-dongle.sh --package third_party/build-hci/zephyr/zephyr.hex
+tools/flash-dongle.sh --flash  third_party/build-hci/zephyr/hci_uart_dfu.zip
+```
+
+Unplug and replug it afterwards. It comes back as `Zephyr HCI UART sample`,
+and `octomancer-zoom --scan 10` is the test that everything works.
+
 `doc/dongle-notes.md` covers flashing the dongle, what is tested without
 hardware and what is not, and `octomancer-zoom`, the Zoom BTA-1 bench.
 

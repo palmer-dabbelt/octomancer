@@ -72,4 +72,6 @@
 /third_party/.venv-dfu/
 /third_party/modules/
 /third_party/zephyr-sdk-*/
+/third_party/bin/
+/third_party/.nrfutil/
 /third_party/build-*/

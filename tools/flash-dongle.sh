@@ -38,54 +38,74 @@ usage() {
     exit "${1:-0}"
 }
 
-# Two different programs can speak Nordic's DFU protocol, and on a current macOS
-# neither of them is simply "install nrfutil":
+# Nordic's own nrfutil is the only thing here that works, and finding that out
+# cost an afternoon, so it is written down.
 #
-#   nrfutil           Nordic's own. `pip install nrfutil` still resolves and
-#                     still installs, which is the trap -- what it installs is
-#                     Python 2 code, and `pkg generate` dies inside
-#                     `dict.iteritems` on any modern interpreter. The current
-#                     nrfutil is a prebuilt binary instead; the Homebrew cask
-#                     for it was deprecated for failing macOS's Gatekeeper
-#                     check and is disabled from 2026-09-01.
+# The dongle's Open Bootloader speaks Nordic's *secure* DFU: a protobuf init
+# packet, and a transport that acknowledges each step. There is an older,
+# simpler Nordic DFU protocol from the nRF5 SDK days, and the tools that speak
+# it are the ones that are easy to install:
 #
-#   adafruit-nrfutil  A Python 3 fork of that same tool, speaking the same
-#                     nRF5 SDK DFU protocol over the same serial transport.
-#                     It installs and it runs. The commands are spelled
-#                     differently, which is all this script has to absorb.
+#   pip install nrfutil            resolves, installs, and is Python 2 all the
+#                                  way down -- iteritems, xrange, integer
+#                                  division. Patching the first two only gets
+#                                  you to the third.
 #
-# So take whichever is present rather than insisting on a name. Preferring
-# nrfutil when both exist keeps Nordic's own tool authoritative.
+#   pip install adafruit-nrfutil   installs cleanly and runs, and speaks the
+#                                  *old* protocol. Against this bootloader it
+#                                  sends a legacy init packet, gets no
+#                                  acknowledgement, times out -- and then exits
+#                                  0, printing "done". A tool that reports
+#                                  success when the device was not programmed
+#                                  is worse than one that does not run, so it
+#                                  is not accepted here at all.
+#
+#   nrfutil (the binary)           Nordic's current one, a native arm64 binary
+#                                  fetched straight from Nordic. `nrfutil
+#                                  install nrf5sdk-tools` adds the DFU
+#                                  commands, which are pc-nrfutil 6.1.7 -- the
+#                                  Python 3 release pip will not give you
+#                                  because it predates your interpreter. This
+#                                  one programs the dongle.
+#
+# --setup fetches it into third_party/bin, so none of the above has to be
+# rediscovered.
+NRFUTIL_URL=https://files.nordicsemi.com/artifactory/swtools/external/nrfutil/executables/aarch64-apple-darwin/nrfutil
+
 dfu_tool() {
-    if command -v nrfutil >/dev/null 2>&1; then
-        echo nrfutil
-    elif command -v adafruit-nrfutil >/dev/null 2>&1; then
-        echo adafruit-nrfutil
+    if [ -x "$TP/bin/nrfutil" ]; then
+        echo "$TP/bin/nrfutil"
+    elif command -v nrfutil >/dev/null 2>&1; then
+        command -v nrfutil
     else
         echo none
     fi
+}
+
+# Every nrfutil invocation needs this, or it scatters its downloaded commands
+# through the user's home directory.
+nrfutil_env() {
+    NRFUTIL_HOME=$TP/.nrfutil
+    export NRFUTIL_HOME
 }
 
 check() {
     ok=0
     tool=$(dfu_tool)
     if [ "$tool" = none ]; then
-        echo "missing: a DFU tool -- no nrfutil, no adafruit-nrfutil"
-        echo "    pip install adafruit-nrfutil"
-        echo "  (pip install nrfutil also resolves, but installs Python 2"
-        echo "   code that cannot generate a package on a modern interpreter)"
+        echo "missing: nrfutil"
+        echo "    $0 --setup   (fetches it; see the note above about the"
+        echo "                  pip packages, which do not work)"
         ok=1
     else
-        echo "found: $tool ($(command -v "$tool"))"
+        echo "found: nrfutil ($tool)"
     fi
 
-    if command -v west >/dev/null 2>&1; then
-        echo "found: west ($(command -v west)) -- you can build hci_uart yourself"
+    if [ -x "$TP/.venv/bin/west" ]; then
+        echo "found: west ($TP/.venv/bin/west) -- hci_uart can be built here"
     else
-        echo "note:  no west on PATH."
-        echo "    third_party/.venv/bin/west is the one this tree builds with;"
-        echo "    see doc/dongle-notes.md. Failing that, download a prebuilt"
-        echo "    hci_uart image for the nrf52840dongle board and use --package."
+        echo "missing: west -- run: $0 --setup"
+        ok=1
     fi
 
     echo
@@ -153,6 +173,15 @@ setup() {
         (cd "$TP" && "$WEST" sdk install -b "$TP" -t arm-zephyr-eabi)
     fi
 
+    if [ ! -x "$TP/bin/nrfutil" ]; then
+        echo "fetching nrfutil ..."
+        mkdir -p "$TP/bin"
+        curl -sSL --fail -o "$TP/bin/nrfutil" "$NRFUTIL_URL"
+        chmod +x "$TP/bin/nrfutil"
+        nrfutil_env
+        "$TP/bin/nrfutil" install nrf5sdk-tools
+    fi
+
     echo
     echo "ready. next: $0 --build"
 }
@@ -191,38 +220,25 @@ build() {
 # The dongle's bootloader will not take a bare hex file: it wants a DFU
 # package. No signing key is passed, because the Open Bootloader the dongle
 # ships with accepts an unsigned application -- that is the standard procedure
-# for this board and is not a security measure being worked around.
+# for this board, and nrfutil prints its own warning saying so.
 package() {
     hex=$1
     [ -n "$hex" ] || die "--package needs a .hex file"
     [ -f "$hex" ] || die "$hex: no such file"
     tool=$(dfu_tool)
-    [ "$tool" = none ] && die "no DFU tool installed; see --check"
+    [ "$tool" = none ] && die "no nrfutil; run: $0 --setup"
+    nrfutil_env
 
     out=$(dirname "$hex")/hci_uart_dfu.zip
     rm -f "$out"
-    case $tool in
-        nrfutil)
-            nrfutil pkg generate \
-                --hw-version 52 \
-                --sd-req 0x00 \
-                --application "$hex" \
-                --application-version 1 \
-                "$out"
-            ;;
-        adafruit-nrfutil)
-            # 0x0052 is the nRF52840; --sd-req has no equivalent here and is
-            # not needed, since the image carries no SoftDevice.
-            adafruit-nrfutil dfu genpkg \
-                --dev-type 0x0052 \
-                --application "$hex" \
-                --application-version 1 \
-                "$out"
-            ;;
-    esac
+    "$tool" nrf5sdk-tools pkg generate \
+        --hw-version 52 \
+        --sd-req 0x00 \
+        --application "$hex" \
+        --application-version 1 \
+        "$out"
     echo "packaged: $out"
-    echo "next:  put the dongle in DFU mode (hold SW1 while plugging in),"
-    echo "       then: $0 --flash $out"
+    echo "next:  put the dongle in DFU mode, then: $0 --flash $out"
 }
 
 flash() {
@@ -230,7 +246,8 @@ flash() {
     [ -n "$pkg" ] || die "--flash needs a .zip package"
     [ -f "$pkg" ] || die "$pkg: no such file"
     tool=$(dfu_tool)
-    [ "$tool" = none ] && die "no DFU tool installed; see --check"
+    [ "$tool" = none ] && die "no nrfutil; run: $0 --setup"
+    nrfutil_env
 
     # In DFU mode the dongle appears as its own serial port. Which one it is
     # depends on what else is plugged in, so the first candidate is a guess
@@ -244,19 +261,26 @@ flash() {
         done
     fi
     [ -n "$port" ] || die "no serial port found; is the dongle in DFU mode?"
-    echo "flashing $pkg to $port with $tool ..."
-    case $tool in
-        nrfutil)
-            nrfutil dfu usb-serial -pkg "$pkg" -p "$port"
-            ;;
-        adafruit-nrfutil)
-            adafruit-nrfutil dfu serial -pkg "$pkg" -p "$port" -b 115200
-            ;;
-    esac
+
+    # Worth checking rather than discovering halfway through a write: a dongle
+    # that is not in DFU mode still has a serial port, and it will simply not
+    # answer.
+    if command -v ioreg >/dev/null 2>&1; then
+        if ! ioreg -l -w 0 | grep -q "Open DFU Bootloader"; then
+            echo "warning: no 'Open DFU Bootloader' on the USB bus." >&2
+            echo "         The dongle is probably running its application," >&2
+            echo "         not its bootloader. See README.md for the button." >&2
+        fi
+    fi
+
+    echo "flashing $pkg to $port ..."
+    "$tool" nrf5sdk-tools dfu usb-serial -pkg "$pkg" -p "$port"
 
     echo
-    echo "done. Unplug and replug the dongle -- it will come back as a plain"
-    echo "serial port with no DFU button pressed. Then check it with:"
+    echo "done. Unplug and replug the dongle -- it does not come back on its"
+    echo "own after programming. It should return as 'Zephyr HCI UART sample';"
+    echo "check with:"
+    echo "    ioreg -l -w 0 | grep -A4 Nordic"
     echo "    octomancer-zoom --scan 10"
 }
 

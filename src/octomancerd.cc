@@ -28,6 +28,7 @@
 #include "registry.h"
 #include "render.h"
 #include "radio.h"
+#include "scanbridge.h"
 #include "scanner.h"
 #include "server.h"
 #include "timeutil.h"
@@ -358,19 +359,30 @@ int main(int argc, char** argv) {
     return 1;
   }
 
-  auto scanner = octo::make_ble_scanner(
+  // Everything the radio says arrives here on CoreBluetooth's own queue and
+  // is replayed on this thread. The registry has no lock any more -- it cannot
+  // have one and still be compiled for the box -- so the handoff is the
+  // bridge's job rather than the registry's. See src/scanbridge.h.
+  octo::ScanBridge bridge(&octo::default_loop());
+  if (!bridge.ok()) {
+    std::fprintf(stderr, "octomancerd: %s\n", bridge.error().c_str());
+    return 1;
+  }
+  bridge.on_advert(
       [&registry](const octo::Advert& a) {
         registry.observe(a.id, a.name, a.rssi, a.data.data(), a.data.size(),
                          a.mono, a.wall);
-      },
-      // A camera in range is worth knowing about even though this program will
-      // never touch one: it is the cheap half of the question octomancer-sync
-      // would otherwise answer with a twenty-second scan every minute. The
-      // radio is already listening, so noticing costs nothing.
+      });
+  // A camera in range is worth knowing about even though this program will
+  // never touch one: it is the cheap half of the question octomancer-sync
+  // would otherwise answer with a twenty-second scan every minute. The radio
+  // is already listening, so noticing costs nothing.
+  bridge.on_camera(
       [&registry](const octo::Sighting& seen) {
         registry.observe_camera(seen.id, seen.name, seen.rssi, seen.mono,
                                 seen.wall);
-      },
+      });
+  bridge.on_state(
       [&registry, &log, &opt](const std::string& state) {
         registry.set_radio(state);
         if (log.enabled()) {
@@ -386,6 +398,9 @@ int main(int argc, char** argv) {
           }
         }
       });
+
+  auto scanner = octo::make_ble_scanner(
+      bridge.advert_sink(), bridge.camera_sink(), bridge.state_sink());
   if (!scanner || !scanner->start(&err)) {
     std::fprintf(stderr, "octomancerd: cannot start the radio: %s\n",
                  err.empty() ? "unsupported on this host" : err.c_str());
@@ -403,7 +418,12 @@ int main(int argc, char** argv) {
     while (!g_stop && octo::mono_now() < until) {
       struct timespec ts = {0, 200 * 1000 * 1000};
       nanosleep(&ts, nullptr);
+      bridge.drain();
     }
+    // Once more after the last sleep, so the report includes whatever arrived
+    // during it. A probe that listens for ten seconds and then reports on nine
+    // of them would be measuring its own bookkeeping.
+    bridge.drain();
     const octo::Snapshot snap = registry.snapshot();
     std::fputs(octo::render_human(snap, isatty(1)).c_str(), stdout);
     scanner->stop();
@@ -441,6 +461,11 @@ int main(int argc, char** argv) {
   double next_log = octo::mono_now() + opt.log_interval;
   while (!g_stop) {
     server.serve(200);
+    // Before anything reads the registry, and after the wait that is where
+    // the time goes. This program still runs its own loop rather than the
+    // one in src/loop.h, so it drains the bridge by hand; the sync daemon
+    // lets the loop do it.
+    bridge.drain();
     console.maybe_rotate();
 
     {

@@ -42,6 +42,7 @@
 #include "control.h"
 #include "jsonlog.h"
 #include "registry.h"
+#include "scanbridge.h"
 #include "radio.h"
 #include "scanner.h"
 #include "server.h"
@@ -261,18 +262,28 @@ Bench listen_for_bench(const Options& opt, const octo::CamConf& conf) {
   policy.window = std::max(opt.sync.listen * 2.0, 30.0);
   octo::Registry registry(policy, octo::mono_now());
 
-  auto scanner = octo::make_ble_scanner(
-      [&registry](const octo::Advert& a) {
-        registry.observe(a.id, a.name, a.rssi, a.data.data(), a.data.size(),
-                         a.mono, a.wall);
-      },
+  // The radio answers on its own thread and the registry no longer has a lock
+  // to protect it, so the adverts are queued and replayed here. See
+  // src/scanbridge.h. Nothing in this function runs a loop, so the bridge is
+  // drained by hand once the listening is over.
+  octo::ScanBridge bridge(&octo::default_loop());
+  if (!bridge.ok()) return bench;
+  bridge.on_advert([&registry](const octo::Advert& a) {
+    registry.observe(a.id, a.name, a.rssi, a.data.data(), a.data.size(),
+                     a.mono, a.wall);
+  });
+  bridge.on_state(
       [&registry](const std::string& state) { registry.set_radio(state); });
+
+  auto scanner =
+      octo::make_ble_scanner(bridge.advert_sink(), bridge.state_sink());
   if (!scanner) return bench;
 
   std::string err;
   if (!scanner->start(&err)) return bench;
   std::this_thread::sleep_for(std::chrono::duration<double>(opt.sync.listen));
   scanner->stop();
+  bridge.drain();
 
   const octo::Snapshot snap = registry.snapshot(octo::mono_now(), octo::wall_now());
   return bench_from(snap, conf, "scan");

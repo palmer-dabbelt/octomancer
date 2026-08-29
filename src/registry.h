@@ -1,16 +1,29 @@
 // What the daemon knows about the boxes in the room.
 //
-// The registry is the only mutable state in the service. The radio delivers
-// advertisements on a dispatch queue while the socket loop serves clients from
-// another thread, so every entry point here takes a lock and every read hands
-// back a self-contained snapshot rather than a pointer into live state.
+// The registry is the only mutable state in the service, and it belongs to one
+// thread: the loop's. It used to take a lock on every entry point, because
+// CoreBluetooth delivers advertisements on a private dispatch queue while the
+// socket was served from somewhere else. That lock is gone, and its absence is
+// a requirement rather than an economy -- the Zephyr SDK's libstdc++ has no
+// std::mutex in any multilib, so a registry that holds one cannot be compiled
+// for the box at all. See src/loop.h.
+//
+// What replaces it is src/scanbridge.h, which takes whatever the radio hands
+// it on whatever thread, and replays it on the loop's thread. So the rule for
+// callers is: touch this from the loop, or from a program that has only one
+// thread to touch it from. Nothing here will notice if you break that rule,
+// which is why it is written down here rather than left to be inferred from
+// the absence of a lock.
+//
+// Reads still hand back a self-contained snapshot rather than a pointer into
+// live state. That was never about threads: a snapshot is what a client is
+// entitled to see and a live pointer is what it would go stale holding.
 #ifndef OCTO_REGISTRY_H
 #define OCTO_REGISTRY_H
 
 #include <cstdint>
 #include <deque>
 #include <map>
-#include <mutex>
 #include <string>
 #include <vector>
 
@@ -226,7 +239,6 @@ class Registry {
   // nothing at all -- there is no event to notice, only a silence to time.
   void age_camera(double mono) const;
 
-  mutable std::mutex mu_;
   Policy policy_;
   std::map<std::string, Device> devices_;
   mutable Camera camera_;

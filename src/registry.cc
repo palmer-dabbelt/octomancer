@@ -59,7 +59,6 @@ Registry::Registry(Policy policy, double start_mono)
     : policy_(policy), started_mono_(start_mono) {}
 
 void Registry::set_radio(const std::string& state) {
-  std::lock_guard<std::mutex> lock(mu_);
   radio_ = state;
 }
 
@@ -113,8 +112,6 @@ void Registry::update_alert(Device* dev, double mono, double wall) {
 void Registry::observe(const std::string& id, const std::string& name, int rssi,
                        const uint8_t* data, size_t len, double mono,
                        double wall) {
-  std::lock_guard<std::mutex> lock(mu_);
-
   // If the host clock has been stepped -- NTP correcting it, or the user
   // changing timezone -- every offset moves at once and the jump would be
   // recorded as a spectacular drift. Monotonic time does not step, so
@@ -177,8 +174,6 @@ void Registry::observe(const std::string& id, const std::string& name, int rssi,
 
 void Registry::observe_camera(const std::string& id, const std::string& name,
                               int rssi, double mono, double wall) {
-  std::lock_guard<std::mutex> lock(mu_);
-
   // A second camera in the room is not something octomancer has an answer for,
   // and picking one arbitrarily every advertisement would flap the presence
   // flag between them. Keep the first one heard and ignore the rest; the sync
@@ -214,8 +209,6 @@ void Registry::age_camera(double mono) const {
 Snapshot Registry::snapshot() const { return snapshot(mono_now(), wall_now()); }
 
 Snapshot Registry::snapshot(double mono, double wall) const {
-  std::lock_guard<std::mutex> lock(mu_);
-
   Snapshot snap;
   snap.wall = wall;
   snap.uptime = mono - started_mono_;
@@ -299,7 +292,6 @@ Snapshot Registry::snapshot(double mono, double wall) const {
 }
 
 bool Registry::forget(const std::string& id) {
-  std::lock_guard<std::mutex> lock(mu_);
   bool gone = devices_.erase(id) > 0;
   // The camera is a single slot rather than a map, so forgetting it is
   // resetting it. Kept in the same call because a person looking at one list
@@ -313,7 +305,6 @@ bool Registry::forget(const std::string& id) {
 }
 
 std::vector<AlertEvent> Registry::take_events() {
-  std::lock_guard<std::mutex> lock(mu_);
   std::vector<AlertEvent> out;
   out.swap(events_);
   return out;

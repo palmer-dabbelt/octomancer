@@ -73,6 +73,8 @@ libocto_a_SOURCES = \
 	src/registry.h \
 	src/render.cc \
 	src/render.h \
+	src/scanbridge.cc \
+	src/scanbridge.h \
 	src/server.cc \
 	src/server.h \
 	src/smp.cc \

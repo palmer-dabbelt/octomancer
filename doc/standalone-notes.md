@@ -4,6 +4,17 @@
 the reasoning behind it, and the things already checked. Where something is a
 recollection rather than a verified fact it is marked **(unverified)**.*
 
+> **Superseded in part, 2026-08-29.** `doc/box-notes.md` is now the design:
+> two daemons split by tempo rather than by capability, one control protocol
+> over USB, BLE and a unix socket, and a single-threaded event loop with no
+> blocking in it. Three things below have since been *measured* and the
+> answers were not the ones guessed here — the portable core is 115 KB of ARM
+> `.text` and not 250–350 KB, the toolchain's libstdc++ has no `std::thread`
+> at all so the shim is mandatory rather than "safer", and the A/B flash map
+> did not need designing because the board already ships one. The research
+> below on the ESP32 fallback, the hardware question and what gets reused all
+> still stands.
+
 The goal: a box that does what the Mac does — read Tentacle timecode off the
 air, decide whether a Blackmagic camera's clock needs setting, and set it —
 with no Mac present. USB-C for power, for writing flash images, and for

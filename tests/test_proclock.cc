@@ -10,6 +10,7 @@
 #include <csignal>
 
 #include <fcntl.h>
+#include <poll.h>
 #include <sys/file.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
@@ -82,37 +83,55 @@ void test_a_killed_holder_does_not_lock_anyone_out() {
   const std::string path = scratch("killed") + ".lock";
   ::unlink(path.c_str());
 
+  // The child tells us when it holds the lock, down a pipe. It used to be the
+  // other way round -- the parent polled by trying to acquire, and took "it
+  // failed, and the holder is the child" as the signal. That races with the
+  // child, and loses rarely: if the parent's probe wins the very first
+  // attempt, the child's own acquire fails, the child exits, and the parent
+  // then spins out its whole thirty-second deadline waiting for a holder that
+  // is never coming. Roughly one run in fifty on a busy machine.
+  int ready[2];
+  CHECK_EQ(::pipe(ready), 0);
+
   const pid_t child = ::fork();
   CHECK(child >= 0);
   if (child == 0) {
+    ::close(ready[0]);
     ProcLock lock;
     long h = 0;
     std::string e;
     if (!lock.acquire(path, &h, &e)) _exit(2);
+    // Only now is the lock definitely held.
+    const char one = 'y';
+    if (::write(ready[1], &one, 1) != 1) _exit(4);
     ::pause();   // hold it until killed
     _exit(3);
   }
+  ::close(ready[1]);
 
-  // Wait for the child to actually hold it, rather than guessing at a sleep.
-  // The deadline is deliberately far longer than the wait can honestly need:
-  // a working fork gets there in milliseconds, so a generous budget costs
-  // nothing except how long a genuinely broken lock takes to say so, whereas
-  // a tight one fails on a machine that is merely busy.
-  const int kStepMs = 5;
-  const int kDeadlineMs = 30000;
-  ProcLock probe;
-  bool taken = false;
-  for (int i = 0; i < kDeadlineMs / kStepMs && !taken; ++i) {
-    long h = 0;
-    std::string e;
-    if (!probe.acquire(path, &h, &e) && h == static_cast<long>(child)) {
-      taken = true;
-      break;
-    }
-    probe.release();
-    ::usleep(kStepMs * 1000);
-  }
+  // Wait for that byte rather than guessing at a sleep. The deadline is
+  // deliberately far longer than the wait can honestly need: a working fork
+  // gets there in milliseconds, so a generous budget costs nothing except how
+  // long a genuinely broken lock takes to say so, whereas a tight one fails on
+  // a machine that is merely busy.
+  struct pollfd pfd;
+  pfd.fd = ready[0];
+  pfd.events = POLLIN;
+  pfd.revents = 0;
+  char got = 0;
+  bool taken = ::poll(&pfd, 1, 30000) == 1 && ::read(ready[0], &got, 1) == 1;
+  ::close(ready[0]);
   CHECK(taken);
+
+  // And the lock really is the child's: an attempt to take it now fails, and
+  // says who has it.
+  if (taken) {
+    ProcLock probe;
+    long holder_pid = 0;
+    std::string probe_err;
+    CHECK(!probe.acquire(path, &holder_pid, &probe_err));
+    CHECK_EQ(holder_pid, static_cast<long>(child));
+  }
 
   ::kill(child, SIGKILL);
   int status = 0;

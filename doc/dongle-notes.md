@@ -271,38 +271,68 @@ What none of them can check is whether real hardware agrees. In particular:
 
 ## What the hardware has actually said
 
-A dongle was plugged into a Mac on 2026-08-29 and `octomancer-zoom --scan 10
---trace` was run against it. The trace is the whole result:
+The dongle is a **Raytac MDBT50Q-CX** (see `README.md` for what to look for
+when buying one). It arrived carrying Raytac's factory demonstration firmware
+-- `nRF52 USB CDC BLE Demo`, `1915:521a` -- which offers a serial port and does
+not speak HCI over it, so the first run said exactly what it should:
 
 ```
 hci -> 01030c00
 octomancer-zoom: Reset: no answer from the controller
 ```
 
-That is a `Reset` going out and nothing coming back, and it is the expected
-answer for this dongle, because this dongle has never been flashed. It came up
-as `/dev/cu.usbmodemC499F7F00D5B1`, and `ioreg` gives its USB product string as
-`nRF52 USB CDC BLE Demo` from vendor `0x1915` -- Nordic's own demonstration
-application, which offers a serial port and does not speak HCI over it.
+That verified three small things, and it is worth being precise about how
+small: `list_candidate_ports()` found the port out of `/dev` without being
+told, the port opened and took a write, and the silence afterwards was
+reported as silence rather than becoming a hang.
 
-So what this proves is smaller than it looks, and worth stating exactly:
+Then the dongle was flashed, and that is where it stands.
 
 | Verified against hardware | How |
 |---|---|
-| A dongle is found without being named | `list_candidate_ports()` picked the port out of `/dev` unaided |
+| A dongle is found without being named | `list_candidate_ports()` picked it out of `/dev` unaided |
 | The port opens and is written | the `Reset` reached the wire; `--trace` printed it |
-| Silence is reported as silence | the timeout said which command went unanswered, rather than hanging |
+| Silence is reported as silence | the timeout named the unanswered command instead of hanging |
+| The bootloader works | enters DFU on the button, enumerates as `1915:521f`, accepts a package |
+| The image transfers intact | 123736 bytes, CRC checked by the bootloader at offset 0x1E358, execute acknowledged |
 
-Everything past the first byte remains unverified. Nothing has yet parsed an
-event, because nothing has yet sent us one.
+**And then nothing runs.** After a successful `Device programmed.` the dongle
+disappears from the USB bus and does not come back -- not as
+`Zephyr HCI UART sample`, not as anything. An nRF52840 whose firmware never
+starts USB is invisible to the host, so this looks identical to an empty port;
+it is not a case of the image being rejected.
 
-The next step is flashing, and until that happens, a dongle in this state is
-indistinguishable at the port from a broken one -- both are a serial device
-that will not answer a `Reset`. If you meet that message, check the USB product
-string before suspecting the code:
+The obvious suspects have been eliminated one at a time:
 
-```
-ioreg -l -w 0 | grep -A4 'Nordic'
-```
+* **Not the HCI firmware.** Zephyr's plain `samples/subsys/usb/cdc_acm` -- 60 KB,
+  no Bluetooth in it at all -- was built, flashed and replugged, and behaves
+  identically. Whatever this is, it is not about `hci_uart`.
+* **Not a bad write.** The DFU trace shows every byte transferred and the
+  bootloader's own CRC agreeing at the end.
+* **Not the procedure.** Zephyr's board documentation for `nrf52840dongle`
+  gives exactly the commands used, down to `--hw-version 52 --sd-req=0x00
+  --application-version 1`.
+* **Not a memory conflict.** The image occupies 0x1000 to 0x1F358; the
+  bootloader lives at 0xE0000.
+* **Not an invalid application.** A bootloader that rejected the image would
+  stay in DFU and enumerate as `Open DFU Bootloader`. It does not: it hands
+  over to something, and that something dies before it reaches USB.
 
-`Zephyr HCI UART sample` is a flashed dongle. Anything else is not.
+The open question is **what address the bootloader actually starts an
+application at**. Our images are linked for 0x1000, which is right if the only
+thing ahead of them is Nordic's MBR. If this dongle also carries a SoftDevice
+-- and its factory firmware was a *BLE* demo, which needs one -- then the
+application region begins well above 0x1000, every image so far has been
+running from the wrong address, and the fix is a rebuild with a matching
+`CONFIG_FLASH_LOAD_OFFSET`.
+
+`tools/flash-dongle.sh --info` asks the bootloader directly rather than
+guessing: it reports the chip, and the type, address and length of each
+installed image. It writes nothing and leaves the dongle in DFU mode, so the
+answer can be acted on in the same session. That is the next thing to run, and
+it needs somebody to hold the button.
+
+A note for whoever picks this up: `max_size` in the DFU trace is *not* the
+size of the application region -- it is the protocol's chunk size, 4096 bytes,
+and it says nothing about where the application begins. An hour went into
+inferring the layout from it before that became clear.

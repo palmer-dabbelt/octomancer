@@ -18,6 +18,7 @@
 #   tools/flash-dongle.sh --package IMAGE.hex  wrap a hex file for DFU
 #   tools/flash-dongle.sh --flash PACKAGE.zip  push it to a dongle in DFU mode
 #   tools/flash-dongle.sh --ports              list serial ports that look right
+#   tools/flash-dongle.sh --info               ask a bootloader what is on it
 #
 # Putting the dongle into DFU mode: press the small side button (SW1, next to
 # the USB connector, not the one on the end) and hold it while plugging in --
@@ -288,6 +289,7 @@ case "${1:-}" in
     --check)   shift; check ;;
     --setup)   shift; setup ;;
     --ports)   shift; ports ;;
+    --info)    shift; exec "$(dirname "$0")/dfu-info.py" "$@" ;;
     --build)   shift; build "$@" ;;
     --package) shift; package "$@" ;;
     --flash)   shift; flash "$@" ;;

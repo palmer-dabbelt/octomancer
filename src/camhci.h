@@ -150,6 +150,11 @@ class HciCamera : public AsyncCamera {
   void finish_pairing(bool ok, const std::string& err);
 
   static bool needs_encryption(uint8_t att_error);
+  // Tell whoever is listening what the camera has just said. Always the last
+  // thing its caller does, and that is a requirement rather than a
+  // coincidence: the handler is entitled to disconnect -- the sync daemon
+  // does exactly that when a cycle ends -- which clears `live_` and `conn_`
+  // out from under anything that ran afterwards.
   void note(const CameraView& v);
 
   Loop* loop_ = nullptr;

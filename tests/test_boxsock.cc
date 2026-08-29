@@ -114,6 +114,7 @@ class Peer {
 struct Rig {
   explicit Rig(const char* tag)
       : path(temp_path(tag)), loop(make_loop()), server(loop.get(), path) {
+    // Declaration order matters here; see the comment on `server`.
     ::unlink(path.c_str());
     server.on_open([this](MsgPeer* peer) {
       opened.push_back(peer);
@@ -136,10 +137,13 @@ struct Rig {
 
   std::string path;
   std::unique_ptr<Loop> loop;
-  LineServer server;
   std::vector<MsgPeer*> opened;
   std::vector<MsgPeer*> closed;
   std::vector<std::string> lines;
+  // Last, so it is destroyed first: its teardown can reach the vectors above
+  // through the handlers, and members are destroyed in reverse order of
+  // declaration.
+  LineServer server;
 };
 
 void test_a_client_connects_and_is_greeted() {

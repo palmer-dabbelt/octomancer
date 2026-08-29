@@ -876,9 +876,33 @@ void SyncDaemon::drain_events() {
   }
 }
 
+void SyncDaemon::update_camera_presence(const Snapshot& snap) {
+  const bool connected = camera_ != nullptr && camera_->connected();
+  const bool present = connected || snap.camera.present;
+  if (present == camera_present_) return;
+  camera_present_ = present;
+
+  Message msg;
+  msg.verb = "cam";
+  msg.set_bool("up", present);
+  const std::string id =
+      snap.camera.id.empty() ? state_.camera_id : snap.camera.id;
+  if (!id.empty()) msg.set("id", id);
+  if (present) {
+    if (!snap.camera.name.empty()) msg.set("name", snap.camera.name);
+    msg.set_int("rssi", snap.camera.rssi);
+  }
+  announce(msg);
+}
+
 void SyncDaemon::tick_announce() {
   drain_events();
   const Snapshot snap = registry_->snapshot(mono(), wall());
+  // A camera that has been switched off sends nothing at all: there is no
+  // event to notice, only a silence to time, and this is where it is timed.
+  // Doing it per advertisement instead would mean building a whole snapshot
+  // once a second to learn something that changes twice a day.
+  update_camera_presence(snap);
   const BenchView bench = measure_bench(snap, conf_);
   Message msg;
   msg.verb = "bench";

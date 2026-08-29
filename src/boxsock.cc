@@ -168,6 +168,19 @@ LineServer::LineServer(Loop* loop, std::string path)
 
 LineServer::~LineServer() {
   *alive_ = false;
+  // Forget the handlers before closing the connections, so that tearing this
+  // down never calls back into the object that owns it. That object is very
+  // likely being destroyed too -- it declared this one as a member -- and
+  // whichever of its fields the handler touches may already be gone. A
+  // caller that wants to hear about the connections closing calls stop()
+  // while it is still alive, which is what the daemon does.
+  //
+  // Found by a test that crashed about one run in three: the fixture's
+  // on_close handler appended to a vector its own destructor had already
+  // run.
+  on_open_ = nullptr;
+  on_line_ = nullptr;
+  on_close_ = nullptr;
   stop();
 }
 

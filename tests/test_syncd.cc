@@ -267,9 +267,14 @@ struct Rig {
     return policy;
   }
 
+  // False builds a daemon with no camera backend at all, which is what a Mac
+  // with no dongle really has and is not a degraded state: it still hears
+  // boxes, still serves the roster, and still says why it is not syncing.
+  bool with_camera = true;
+
   void build() {
     daemon.reset(new SyncDaemon(&loop, &registry, opt));
-    daemon->set_camera(&camera);
+    if (with_camera) daemon->set_camera(&camera);
     daemon->set_wall_clock([this]() { return wall(); });
     daemon->on_cycle([this](const CycleReport& report, SyncState*) {
       cycles.push_back(report);
@@ -817,6 +822,37 @@ void test_a_peer_can_ask_not_to_be_announced_to() {
   CHECK_EQ(quiet.count("pong"), 1);
 }
 
+void test_a_camera_that_goes_off_the_air_is_announced_once() {
+  Rig rig;
+  rig.opt.announce_period = 5.0;  // a heartbeat, so silence gets timed
+  // No camera backend, so nothing here holds a connection: a held connection
+  // counts as presence, and would rightly stop the camera ever being reported
+  // as gone.
+  rig.with_camera = false;
+  rig.build();
+  FakePeer peer;
+  rig.daemon->peer_opened(&peer);
+  rig.daemon->start();
+  rig.see_camera();
+  CHECK_EQ(peer.count("cam"), 1);
+
+  // Still advertising: nothing new to say, however many times it is heard.
+  rig.loop.advance(6.0);
+  rig.see_camera();
+  rig.loop.advance(6.0);
+  CHECK_EQ(peer.count("cam"), 1);
+
+  // Now switched off. There is no event for that -- a camera that is off
+  // sends nothing -- so it is a silence that has to be timed out.
+  rig.loop.advance(rig.registry.policy().camera_gone_after + 10.0);
+  CHECK_EQ(peer.count("cam"), 2);
+  Message cam;
+  CHECK(peer.last("cam", &cam));
+  bool up = true;
+  CHECK(cam.get_bool("up", &up));
+  CHECK(!up);
+}
+
 void test_a_closed_peer_is_not_written_to() {
   Rig rig;
   rig.build();
@@ -972,6 +1008,7 @@ int main() {
   test_status_says_what_the_bench_is();
   test_devices_streams_and_says_when_it_is_done();
   test_a_peer_can_ask_not_to_be_announced_to();
+  test_a_camera_that_goes_off_the_air_is_announced_once();
   test_a_closed_peer_is_not_written_to();
   test_the_cycle_outcome_is_announced();
   test_a_sync_request_runs_a_cycle_now();

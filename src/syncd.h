@@ -365,6 +365,12 @@ class SyncDaemon {
   void handle(MsgPeer* peer, const Message& msg);
   void drain_events();
   void tick_announce();
+  // Announce the camera appearing or going away, once per change. A held
+  // connection counts as present: a camera stops advertising while something
+  // is connected to it, so the radio's silence about it is this daemon's own
+  // doing and reporting it as absence would be reporting our own behaviour as
+  // the camera's.
+  void update_camera_presence(const Snapshot& snap);
   Message device_message(const DeviceSnapshot& dev) const;
 
   double wall() const;

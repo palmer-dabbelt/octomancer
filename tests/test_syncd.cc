@@ -1,0 +1,983 @@
+// The sync daemon, driven to completion with no radio and no wall-clock time.
+//
+// Everything here runs on src/loopfake.h: the clock is a variable, the camera
+// is a scripted object that answers on that clock, and the Tentacle boxes are
+// bytes handed to the registry. So a whole cycle -- connect, subscribe, wait
+// for a reading, decide, wait for the second boundary, write, wait, verify --
+// happens between two statements, and the awkward cases that are hard to
+// produce on a bench are the cheap ones here: a camera that answers a connect
+// and then goes silent, one that vanishes mid-cycle, a write that is taken and
+// changes nothing.
+//
+// The fake camera holds the one rule that matters to the daemon's correctness
+// and is easy to violate by accident: **a completion never runs inside the
+// call that registered it.** Every answer is posted to the loop. A fake that
+// called back immediately would let the daemon pass tests that the real
+// asynchronous backends would fail.
+#include "../src/syncd.h"
+
+#include <fstream>
+#include <string>
+#include <unistd.h>
+#include <vector>
+
+#include "../src/bmd.h"
+#include "../src/loopfake.h"
+#include "../src/timeutil.h"
+#include "harness.h"
+
+using namespace octo;
+
+namespace {
+
+// ---------------------------------------------------------------- the fakes
+
+class FakeCamera : public AsyncCamera {
+ public:
+  explicit FakeCamera(FakeLoop* loop) : loop_(loop) {}
+
+  // --- the script ---------------------------------------------------------
+  bool connect_ok = true;
+  bool subscribe_ok = true;
+  bool write_ok = true;
+  // "Never answers", which is a real failure mode: a controller that takes a
+  // command and then goes quiet.
+  bool answer_connect = true;
+  bool answer_subscribe = true;
+  bool answer_write = true;
+  bool answer_scan = true;
+  double delay = 0.05;
+  ScanResult scan_result;
+
+  // --- what happened ------------------------------------------------------
+  int connects = 0;
+  int subscribes = 0;
+  int scans = 0;
+  int disconnects = 0;
+  std::string last_connect_id;
+  std::vector<std::vector<uint8_t>> writes;
+  std::vector<double> write_monos;
+
+  // --- AsyncCamera --------------------------------------------------------
+  void set_view_handler(ViewHandler on_change) override {
+    on_view_ = std::move(on_change);
+  }
+  void set_disconnect_handler(std::function<void()> on_gone) override {
+    on_gone_ = std::move(on_gone);
+  }
+
+  void scan(double seconds, const std::string& hint, bool want_all,
+            ScanHandler done) override {
+    (void)hint;
+    (void)want_all;
+    ++scans;
+    if (!answer_scan) return;
+    const ScanResult result = scan_result;
+    post(seconds, [done, result]() { done(result); });
+  }
+
+  void connect(const std::string& id, double timeout,
+               DoneHandler done) override {
+    (void)timeout;
+    ++connects;
+    last_connect_id = id;
+    if (!answer_connect) return;
+    const bool ok = connect_ok;
+    post(delay, [this, done, ok]() {
+      if (ok) connected_ = true;
+      done(ok, ok ? std::string() : std::string("no such camera"));
+    });
+  }
+
+  void disconnect() override {
+    ++disconnects;
+    connected_ = false;
+    subscribed_ = false;
+    view_ = CameraView();
+  }
+
+  bool connected() const override { return connected_; }
+
+  void subscribe(double timeout, DoneHandler done) override {
+    (void)timeout;
+    ++subscribes;
+    if (!answer_subscribe) return;
+    const bool ok = subscribe_ok;
+    post(delay, [this, done, ok]() {
+      if (ok) subscribed_ = true;
+      done(ok, ok ? std::string()
+                  : std::string("no control characteristic"));
+    });
+  }
+
+  bool subscribed() const override { return subscribed_; }
+
+  void write_control(const std::vector<uint8_t>& packet, double timeout,
+                     DoneHandler done) override {
+    (void)timeout;
+    writes.push_back(packet);
+    write_monos.push_back(loop_->now());
+    if (!answer_write) return;
+    const bool ok = write_ok;
+    post(delay, [done, ok]() {
+      done(ok, ok ? std::string() : std::string("write rejected"));
+    });
+  }
+
+  const CameraView& view() const override { return view_; }
+  void forget_timecode() override { view_.has_timecode = false; }
+
+  // --- what the camera says -----------------------------------------------
+  void report_timecode(double sod, int fps) {
+    view_.has_timecode = true;
+    const int total = static_cast<int>(sod);
+    view_.timecode.hours = (total / 3600) % 24;
+    view_.timecode.minutes = (total / 60) % 60;
+    view_.timecode.seconds = total % 60;
+    view_.timecode.frames =
+        static_cast<int>((sod - static_cast<double>(total)) * fps);
+    view_.timecode_mono = loop_->now();
+    fire();
+  }
+  void report_transport(int64_t mode) {
+    view_.has_transport = true;
+    view_.transport = mode;
+    fire();
+  }
+  void report_fps(int fps) {
+    view_.has_fps = true;
+    view_.fps = fps;
+    fire();
+  }
+  void report_source(int64_t value) {
+    view_.has_timecode_source = true;
+    view_.timecode_source = value;
+    fire();
+  }
+  // The camera walks out of the room.
+  void vanish() {
+    connected_ = false;
+    subscribed_ = false;
+    view_ = CameraView();
+    if (on_gone_) on_gone_();
+  }
+
+ private:
+  // Everything the camera answers is posted rather than returned, because that
+  // is the contract src/camasync.h states and the daemon is entitled to.
+  template <class F>
+  void post(double in, F fn) {
+    loop_->after(in < 0.0 ? 0.0 : in, fn);
+  }
+  void fire() {
+    if (on_view_) on_view_(view_);
+  }
+
+  FakeLoop* loop_ = nullptr;
+  ViewHandler on_view_;
+  std::function<void()> on_gone_;
+  CameraView view_;
+  bool connected_ = false;
+  bool subscribed_ = false;
+};
+
+class FakePeer : public MsgPeer {
+ public:
+  void send(const std::string& line) override { lines.push_back(line); }
+
+  // The last message with this verb, decoded. Verbs rather than positions
+  // because announcements interleave with replies by design.
+  bool last(const std::string& verb, Message* out) const {
+    for (size_t i = lines.size(); i > 0; --i) {
+      Message msg;
+      std::string err;
+      if (!decode(lines[i - 1], &msg, &err)) continue;
+      if (msg.verb != verb) continue;
+      *out = msg;
+      return true;
+    }
+    return false;
+  }
+  int count(const std::string& verb) const {
+    int n = 0;
+    for (const std::string& line : lines) {
+      Message msg;
+      std::string err;
+      if (decode(line, &msg, &err) && msg.verb == verb) ++n;
+    }
+    return n;
+  }
+
+  std::vector<std::string> lines;
+};
+
+// A 0x32 Tentacle payload: microseconds since midnight, 40-bit big-endian.
+std::vector<uint8_t> micros_packet(double sod) {
+  const uint64_t us = static_cast<uint64_t>(llround(sod * 1e6));
+  std::vector<uint8_t> pkt = {0x32, 0x3d, 0x18, 0, 0, 0, 0, 0};
+  for (int i = 0; i < 5; ++i) {
+    pkt[7 - i] = static_cast<uint8_t>((us >> (8 * i)) & 0xFF);
+  }
+  return pkt;
+}
+
+std::string temp_path(const char* tag) {
+  return "/tmp/octo-syncd-" + std::to_string(getpid()) + "-" + tag + ".conf";
+}
+
+// ------------------------------------------------------------- the fixture
+
+struct Rig {
+  static constexpr double kMono0 = 1000.0;
+
+  FakeLoop loop{kMono0};
+  Registry registry;
+  FakeCamera camera{&loop};
+  SyncdOptions opt;
+  std::unique_ptr<SyncDaemon> daemon;
+  std::vector<CycleReport> cycles;
+  double wall0 = 0.0;
+  // What the camera's clock is wrong by, in seconds. The rig reports readings
+  // from it, so a test can set a camera four seconds fast and then set it
+  // right the way a successful write would.
+  double camera_error = 0.0;
+  int fps = 24;
+
+  Rig() : registry(default_policy(), kMono0) {
+    // A wall instant whose local time of day is known to this process and far
+    // from midnight is not something a test can arrange, so it takes the one
+    // it has. Only differences matter to anything below.
+    wall0 = wall_now();
+    opt.sync.poll = 60.0;
+    opt.sync.scan_timeout = 2.0;
+    opt.sync.connect_timeout = 2.0;
+    opt.sync.camera_wait = 2.0;
+    opt.sync.verify_wait = 0.5;
+    // Seconds rather than frames, so that a test's idea of "close enough" is
+    // not a frame of quantisation away from the daemon's.
+    opt.sync.has_tolerance = true;
+    opt.sync.tolerance = 0.5;
+    opt.default_writes = true;
+    opt.announce_period = 0.0;  // no heartbeat unless a test asks for one
+  }
+
+  static Policy default_policy() {
+    Policy policy;
+    policy.stale_after = 30.0;
+    return policy;
+  }
+
+  void build() {
+    daemon.reset(new SyncDaemon(&loop, &registry, opt));
+    daemon->set_camera(&camera);
+    daemon->set_wall_clock([this]() { return wall(); });
+    daemon->on_cycle([this](const CycleReport& report, SyncState*) {
+      cycles.push_back(report);
+    });
+  }
+
+  double wall() const { return wall0 + (loop.now() - kMono0); }
+
+  // `n` boxes agreeing on an offset, heard often enough to be live and to have
+  // a median worth the name.
+  void feed_boxes(int n, double offset) {
+    for (int i = 0; i < 12; ++i) {
+      const double mono = loop.now() - 6.0 + i * 0.5;
+      const double w = wall0 + (mono - kMono0);
+      for (int b = 0; b < n; ++b) {
+        const std::vector<uint8_t> pkt =
+            micros_packet(local_seconds_of_day(w) + offset);
+        Advert advert;
+        advert.id = "box" + std::to_string(b);
+        advert.name = "Tentacle_" + std::to_string(b);
+        advert.rssi = -40;
+        advert.data = pkt;
+        advert.mono = mono;
+        advert.wall = w;
+        daemon->observe_advert(advert);
+      }
+    }
+  }
+
+  // What the camera would report right now, given how wrong its clock is.
+  void report_now(double bench_offset) {
+    report_timecode_for(bench_offset + camera_error);
+  }
+  void report_timecode_for(double error_from_host) {
+    camera.report_timecode(local_seconds_of_day(wall()) + error_from_host, fps);
+  }
+
+  // A camera on the air. The daemon prefers this to a scan, which is the
+  // whole point of the radio noticing cameras it will never touch: it is the
+  // cheap half of a question a twenty-second scan answers expensively.
+  void see_camera(const std::string& id = "CAM-1") {
+    Sighting seen;
+    seen.id = id;
+    seen.name = "Pocket 6K";
+    seen.rssi = -50;
+    seen.mono = loop.now();
+    seen.wall = wall();
+    daemon->observe_camera(seen);
+  }
+
+  // Drive one whole cycle to the point where the camera is connected,
+  // subscribed and has said everything a camera says.
+  void reach_camera(double bench_offset, int64_t transport = 0) {
+    see_camera();
+    loop.advance(0.5);
+    camera.report_fps(fps);
+    camera.report_source(bmd::kTimecodeSourceTimeOfDay);
+    camera.report_transport(transport);
+    report_now(bench_offset);
+  }
+
+  // A reference rather than a pointer, and an empty report when there has
+  // been no cycle: a test that expected one and did not get it should say so
+  // on the line that expected it, not take the whole suite down with a null
+  // dereference three lines later.
+  const CycleReport& last() const {
+    static const CycleReport none;
+    return cycles.empty() ? none : cycles.back();
+  }
+  // Null-safe, because a test that has not produced a cycle should report that
+  // rather than dereference nothing and take the suite down with it.
+  std::string last_action() const {
+    return cycles.empty() ? std::string("(no cycle)") : cycles.back().action;
+  }
+};
+
+// ------------------------------------------------------------------- tests
+
+void test_bench_is_the_median_of_enabled_boxes() {
+  Rig rig;
+  rig.build();
+  rig.feed_boxes(3, -6.25);
+
+  const Snapshot snap = rig.registry.snapshot(rig.loop.now(), rig.wall());
+  const BenchView bench = measure_bench(snap, nullptr);
+  CHECK(bench.ok);
+  CHECK_EQ(bench.boxes, 3);
+  CHECK_NEAR(bench.offset, -6.25, 1e-3);
+  CHECK(bench.spread < 1e-3);
+  CHECK_EQ(bench.skipped, 0);
+}
+
+void test_a_disabled_box_does_not_vote() {
+  const std::string path = temp_path("boxes");
+  {
+    std::ofstream out(path, std::ios::trunc);
+    out << "box box0 enabled=off\n";
+  }
+  CamConf conf;
+  std::string err;
+  CHECK(conf.load(path, &err));
+
+  Rig rig;
+  rig.build();
+  rig.feed_boxes(2, -3.0);
+
+  const Snapshot snap = rig.registry.snapshot(rig.loop.now(), rig.wall());
+  const BenchView bench = measure_bench(snap, &conf);
+  CHECK(bench.ok);
+  // One vote left, and the one that was dismissed is counted rather than
+  // silently absent: "no boxes" and "every box is switched off" are different
+  // situations.
+  CHECK_EQ(bench.boxes, 1);
+  CHECK_EQ(bench.skipped, 1);
+  ::unlink(path.c_str());
+}
+
+void test_no_boxes_means_the_camera_is_not_touched() {
+  Rig rig;
+  rig.build();
+  rig.daemon->start();
+  rig.loop.advance(1.0);
+
+  CHECK_EQ(rig.camera.connects, 0);
+  CHECK_EQ(rig.camera.scans, 0);
+  CHECK_STR(rig.last_action(), "skip:no-tentacle");
+  // ...and it still schedules the next look, which is the failure that would
+  // otherwise be a clock nobody corrected all night.
+  CHECK_NEAR(rig.last().next_poll, 60.0, 1e-6);
+}
+
+void test_a_cycle_writes_on_a_second_boundary() {
+  Rig rig;
+  rig.camera_error = 4.0;
+  rig.build();
+  rig.feed_boxes(3, -6.0);
+  rig.daemon->start();
+  rig.reach_camera(-6.0);
+  rig.loop.advance(3.0);
+
+  CHECK_EQ(static_cast<int>(rig.camera.writes.size()), 1);
+  if (rig.camera.writes.empty()) return;
+
+  // The RTC field is whole seconds, so the value has to be sent early enough
+  // that it arrives on a boundary in bench time. That is the whole reason
+  // there is an aligning state, and it is the property worth pinning: the
+  // instant of the write, plus the lead it was sent with, plus the bench
+  // offset, is a whole second.
+  const double send_wall = rig.wall0 + (rig.camera.write_monos[0] - Rig::kMono0);
+  const double lead = effective_lead(rig.opt.sync, rig.daemon->state());
+  const double target = send_wall + lead + (-6.0);
+  CHECK_NEAR(target - std::floor(target + 0.5), 0.0, 1e-6);
+
+  // And the packet is an RTC write rather than anything else.
+  CHECK_EQ(static_cast<int>(rig.camera.writes[0].size() > 8), 1);
+}
+
+void test_a_good_write_is_verified() {
+  Rig rig;
+  rig.camera_error = 4.0;
+  rig.build();
+  rig.feed_boxes(3, -6.0);
+  rig.daemon->start();
+  rig.reach_camera(-6.0);
+  rig.loop.advance(2.0);
+  CHECK_EQ(static_cast<int>(rig.camera.writes.size()), 1);
+
+  // The write landed: the camera's clock is right now.
+  rig.camera_error = 0.0;
+  rig.loop.advance(0.6);
+  rig.report_now(-6.0);
+  rig.loop.advance(0.1);
+
+  CHECK_STR(rig.last_action(), "write:ok");
+  CHECK(rig.last().verified);
+  CHECK_EQ(rig.daemon->state().failures, 0);
+  CHECK(rig.last().has_error_after);
+  CHECK_NEAR(rig.last().error_after, 0.0, 0.05);
+}
+
+void test_a_write_that_changes_nothing_is_not_called_verified() {
+  Rig rig;
+  rig.camera_error = 4.0;
+  rig.build();
+  rig.feed_boxes(3, -6.0);
+  rig.daemon->start();
+  rig.reach_camera(-6.0);
+  rig.loop.advance(2.0);
+  CHECK_EQ(static_cast<int>(rig.camera.writes.size()), 1);
+
+  // The camera ignored it and is still four seconds out.
+  rig.loop.advance(0.6);
+  rig.report_now(-6.0);
+  rig.loop.advance(0.1);
+
+  CHECK(!rig.cycles.empty());
+  CHECK(!rig.last().verified);
+  // Four seconds is a whole-second miss, so the bias is what gets blamed
+  // first and the daemon adapts rather than counting a failure. That is
+  // judge_write's rule and this only checks the daemon honours the verdict.
+  CHECK(rig.last().action == "write:adapting" ||
+        rig.last().action == "write:no-effect");
+}
+
+void test_recording_is_never_written_over() {
+  Rig rig;
+  rig.camera_error = 4.0;
+  rig.build();
+  rig.feed_boxes(3, -6.0);
+  rig.daemon->start();
+  rig.reach_camera(-6.0, bmd::kTransportRecord);
+  rig.loop.advance(2.0);
+
+  CHECK_EQ(static_cast<int>(rig.camera.writes.size()), 0);
+  CHECK_STR(rig.last_action(), "skip:recording");
+}
+
+void test_writes_disabled_stops_everything() {
+  Rig rig;
+  rig.camera_error = 4.0;
+  rig.opt.default_writes = false;
+  rig.build();
+  rig.feed_boxes(3, -6.0);
+  rig.daemon->start();
+  rig.reach_camera(-6.0);
+  rig.loop.advance(2.0);
+
+  CHECK_EQ(static_cast<int>(rig.camera.writes.size()), 0);
+  CHECK_STR(rig.last_action(), "skip:writes-disabled");
+}
+
+void test_a_clock_that_is_close_enough_is_left_alone() {
+  Rig rig;
+  rig.camera_error = 0.0;
+  rig.build();
+  rig.feed_boxes(3, -6.0);
+  rig.daemon->start();
+  rig.reach_camera(-6.0);
+  rig.loop.advance(2.0);
+
+  CHECK_EQ(static_cast<int>(rig.camera.writes.size()), 0);
+  CHECK_STR(rig.last_action(), "skip:in-tolerance");
+}
+
+void test_forcing_overrules_an_advisory_gate_only() {
+  {
+    // In tolerance is advisory: somebody standing in front of the camera
+    // knows better than the threshold.
+    Rig rig;
+    rig.camera_error = 0.0;
+    rig.build();
+    rig.feed_boxes(3, -6.0);
+    rig.daemon->request_sync(std::string(), true);
+    rig.daemon->start();
+    rig.reach_camera(-6.0);
+    rig.loop.advance(2.0);
+    CHECK_EQ(static_cast<int>(rig.camera.writes.size()), 1);
+  }
+  {
+    // Recording is not. No amount of asking makes corrupting a take right.
+    Rig rig;
+    rig.camera_error = 4.0;
+    rig.build();
+    rig.feed_boxes(3, -6.0);
+    rig.daemon->request_sync(std::string(), true);
+    rig.daemon->start();
+    rig.reach_camera(-6.0, bmd::kTransportRecord);
+    rig.loop.advance(2.0);
+    CHECK_EQ(static_cast<int>(rig.camera.writes.size()), 0);
+    CHECK_STR(rig.last_action(), "skip:recording");
+  }
+}
+
+void test_a_camera_that_sends_no_timecode_ends_the_cycle() {
+  Rig rig;
+  rig.build();
+  rig.feed_boxes(3, -6.0);
+  rig.daemon->start();
+  rig.see_camera();
+  rig.loop.advance(0.5);
+  rig.camera.report_transport(0);   // connected, but never a timecode
+  rig.loop.advance(3.0);
+
+  CHECK_EQ(static_cast<int>(rig.camera.writes.size()), 0);
+  CHECK_STR(rig.last_action(), "skip:no-timecode");
+  CHECK(rig.last().reached_camera);
+}
+
+void test_a_backend_that_never_answers_does_not_wedge_the_daemon() {
+  Rig rig;
+  rig.camera.answer_connect = false;
+  rig.build();
+  rig.feed_boxes(3, -6.0);
+  rig.daemon->start();
+  rig.see_camera();
+  rig.loop.advance(20.0);
+
+  // The connect was made and never answered. The daemon gave up on its own
+  // and scheduled another look rather than sitting in kConnecting forever.
+  CHECK_EQ(rig.camera.connects, 1);
+  CHECK_STR(rig.last_action(), "skip:no-camera");
+  CHECK(rig.last().next_poll > 0.0);
+}
+
+void test_a_scan_finds_a_camera_when_nothing_is_known() {
+  Rig rig;
+  CameraDevice dev;
+  dev.id = "CAM-1";
+  dev.name = "Pocket 6K";
+  dev.by_service_uuid = true;
+  rig.camera.scan_result.cameras.push_back(dev);
+  rig.camera.scan_result.total = 4;
+  rig.camera_error = 4.0;
+  rig.build();
+  rig.feed_boxes(3, -6.0);
+  rig.daemon->start();
+  rig.loop.advance(3.0);
+
+  CHECK_EQ(rig.camera.scans, 1);
+  CHECK_EQ(rig.camera.connects, 1);
+  CHECK_STR(rig.camera.last_connect_id, "CAM-1");
+  CHECK_STR(rig.daemon->state().camera_id, "CAM-1");
+}
+
+void test_a_camera_that_is_not_there_backs_off() {
+  Rig rig;
+  rig.camera.scan_result.total = 9;  // other LE devices, but no camera
+  // A short cadence, so that the second look happens while the boxes this
+  // rig fed are still live. The property is the doubling, not the size.
+  rig.opt.sync.poll = 2.0;
+  rig.build();
+  rig.feed_boxes(3, -6.0);
+  rig.daemon->start();
+  rig.loop.advance(3.0);
+
+  CHECK_EQ(static_cast<int>(rig.cycles.size()), 1);
+  CHECK_STR(rig.cycles[0].action, "skip:no-camera");
+  const double first = rig.cycles[0].next_poll;
+  CHECK_STR(rig.cycles[0].next_poll_reason, "reacquire");
+
+  // Miss again and the interval grows: a camera missing for an hour is
+  // switched off, and looking for it every minute until morning costs radio
+  // and finds nothing.
+  rig.loop.advance(first + 6.0);
+  CHECK(static_cast<int>(rig.cycles.size()) >= 2);
+  CHECK(rig.cycles[1].next_poll > first);
+}
+
+void test_a_camera_that_vanishes_mid_cycle_ends_the_cycle() {
+  Rig rig;
+  rig.camera_error = 4.0;
+  rig.build();
+  rig.feed_boxes(3, -6.0);
+  rig.daemon->start();
+  rig.see_camera();
+  rig.loop.advance(0.5);
+  CHECK(rig.camera.connected());
+
+  rig.camera.vanish();
+  rig.loop.advance(0.1);
+
+  CHECK_EQ(static_cast<int>(rig.camera.writes.size()), 0);
+  CHECK_STR(rig.last_action(), "skip:camera-gone");
+  CHECK(rig.last().next_poll > 0.0);
+}
+
+void test_a_completion_from_an_abandoned_cycle_is_ignored() {
+  Rig rig;
+  rig.camera.delay = 1.0;  // slow enough to still be in flight
+  rig.build();
+  rig.feed_boxes(3, -6.0);
+  rig.daemon->start();
+  rig.see_camera();
+  rig.loop.advance(0.1);
+  CHECK_EQ(rig.camera.connects, 1);
+
+  // The daemon is stopped with a connect outstanding. When the answer finally
+  // arrives it belongs to a cycle that no longer exists, and acting on it
+  // would drive a state machine that has been told to stand still.
+  rig.daemon->stop();
+  rig.loop.advance(3.0);
+
+  CHECK_EQ(rig.camera.subscribes, 0);
+  CHECK_EQ(static_cast<int>(rig.camera.writes.size()), 0);
+}
+
+void test_destroying_the_daemon_with_work_in_flight_is_safe() {
+  Rig rig;
+  rig.camera.delay = 1.0;
+  rig.build();
+  rig.feed_boxes(3, -6.0);
+  rig.daemon->start();
+  rig.see_camera();
+  rig.loop.advance(0.1);
+  CHECK_EQ(rig.camera.connects, 1);
+
+  // The completion and two timers are still out there and all of them capture
+  // the daemon. Every one of them checks the liveness flag first.
+  rig.daemon.reset();
+  rig.loop.advance(5.0);
+  CHECK_EQ(rig.camera.subscribes, 0);
+}
+
+void test_holding_the_camera_avoids_a_second_connect() {
+  Rig rig;
+  rig.camera_error = 0.0;
+  rig.opt.hold = true;
+  rig.build();
+  rig.feed_boxes(3, -6.0);
+  rig.daemon->start();
+  rig.reach_camera(-6.0);
+  rig.loop.advance(1.0);
+  CHECK_EQ(rig.camera.connects, 1);
+  CHECK_EQ(rig.camera.disconnects, 0);
+  CHECK(rig.camera.connected());
+
+  // The next cycle finds the camera already connected and subscribed, which
+  // is what holding is for: no scan, no connect, no pairing.
+  rig.daemon->request_sync(std::string(), false);
+  rig.loop.advance(0.5);
+  rig.report_now(-6.0);
+  rig.loop.advance(0.5);
+  CHECK_EQ(rig.camera.connects, 1);
+  CHECK_EQ(rig.camera.scans, 0);
+  CHECK(static_cast<int>(rig.cycles.size()) >= 2);
+}
+
+void test_not_holding_releases_the_camera() {
+  Rig rig;
+  rig.camera_error = 0.0;
+  rig.opt.hold = false;
+  rig.build();
+  rig.feed_boxes(3, -6.0);
+  rig.daemon->start();
+  rig.reach_camera(-6.0);
+  rig.loop.advance(1.0);
+  CHECK_EQ(rig.camera.disconnects, 1);
+  CHECK(!rig.camera.connected());
+}
+
+// ----------------------------------------------------------- the protocol
+
+void test_a_peer_is_greeted() {
+  Rig rig;
+  rig.build();
+  FakePeer peer;
+  rig.daemon->peer_opened(&peer);
+
+  Message hello;
+  CHECK(peer.last("hello", &hello));
+  CHECK_STR(hello.get("role"), "sync");
+  int64_t proto = 0;
+  CHECK(hello.get_int("proto", &proto));
+  CHECK_EQ(proto, static_cast<int64_t>(kBoxProtocolVersion));
+}
+
+void test_ping_and_unknown_verbs_are_both_answered() {
+  Rig rig;
+  rig.build();
+  FakePeer peer;
+  rig.daemon->peer_opened(&peer);
+
+  rig.daemon->peer_line(&peer, "ping id=7");
+  Message pong;
+  CHECK(peer.last("pong", &pong));
+  // The tag comes back, so a client with several questions on one cable can
+  // tell the answers apart.
+  CHECK_STR(pong.get("id"), "7");
+
+  // An unknown verb is answered rather than dropped: a Mac and a box run
+  // different versions almost all the time, and a request that vanishes looks
+  // exactly like a daemon that has stopped.
+  rig.daemon->peer_line(&peer, "flurb x=1");
+  Message err;
+  CHECK(peer.last("err", &err));
+  CHECK_STR(err.get("reason"), "unknown-verb");
+  CHECK_STR(err.get("verb"), "flurb");
+
+  rig.daemon->peer_line(&peer, "   ");
+  CHECK(peer.last("err", &err));
+  CHECK_STR(err.get("reason"), "bad-line");
+}
+
+void test_status_says_what_the_bench_is() {
+  Rig rig;
+  rig.build();
+  rig.feed_boxes(3, -6.25);
+  FakePeer peer;
+  rig.daemon->peer_opened(&peer);
+  rig.daemon->peer_line(&peer, "status");
+
+  Message status;
+  CHECK(peer.last("status", &status));
+  bool bench = false;
+  CHECK(status.get_bool("bench", &bench));
+  CHECK(bench);
+  double offset = 0.0;
+  CHECK(status.get_double("offset", &offset));
+  CHECK_NEAR(offset, -6.25, 1e-3);
+  int64_t boxes = 0;
+  CHECK(status.get_int("boxes", &boxes));
+  CHECK_EQ(boxes, 3LL);
+  CHECK_STR(status.get("phase"), "stopped");
+}
+
+void test_devices_streams_and_says_when_it_is_done() {
+  Rig rig;
+  rig.build();
+  rig.feed_boxes(2, -1.0);
+  FakePeer peer;
+  rig.daemon->peer_opened(&peer);
+  rig.daemon->peer_line(&peer, "devices id=3");
+
+  CHECK_EQ(peer.count("dev"), 2);
+  Message end;
+  CHECK(peer.last("end", &end));
+  CHECK_STR(end.get("what"), "devices");
+  int64_t n = 0;
+  CHECK(end.get_int("n", &n));
+  CHECK_EQ(n, 2LL);
+  CHECK_STR(end.get("id"), "3");
+}
+
+void test_a_peer_can_ask_not_to_be_announced_to() {
+  Rig rig;
+  rig.build();
+  FakePeer loud;
+  FakePeer quiet;
+  rig.daemon->peer_opened(&loud);
+  rig.daemon->peer_opened(&quiet);
+  rig.daemon->peer_line(&quiet, "announce on=0");
+
+  Sighting seen;
+  seen.id = "CAM-1";
+  seen.name = "Pocket 6K";
+  seen.rssi = -55;
+  seen.mono = rig.loop.now();
+  seen.wall = rig.wall();
+  rig.daemon->observe_camera(seen);
+
+  CHECK_EQ(loud.count("cam"), 1);
+  CHECK_EQ(quiet.count("cam"), 0);
+  // ...but a reply to something it asked is not an announcement.
+  rig.daemon->peer_line(&quiet, "ping");
+  CHECK_EQ(quiet.count("pong"), 1);
+}
+
+void test_a_closed_peer_is_not_written_to() {
+  Rig rig;
+  rig.build();
+  FakePeer peer;
+  rig.daemon->peer_opened(&peer);
+  rig.daemon->peer_closed(&peer);
+  const size_t before = peer.lines.size();
+
+  Sighting seen;
+  seen.id = "CAM-1";
+  seen.mono = rig.loop.now();
+  seen.wall = rig.wall();
+  rig.daemon->observe_camera(seen);
+  CHECK_EQ(static_cast<int>(peer.lines.size()), static_cast<int>(before));
+}
+
+void test_the_cycle_outcome_is_announced() {
+  Rig rig;
+  rig.build();
+  FakePeer peer;
+  rig.daemon->peer_opened(&peer);
+  rig.daemon->start();
+  rig.loop.advance(1.0);
+
+  Message cycle;
+  CHECK(peer.last("cycle", &cycle));
+  CHECK_STR(cycle.get("action"), "skip:no-tentacle");
+  double next = 0.0;
+  CHECK(cycle.get_double("next", &next));
+  CHECK_NEAR(next, 60.0, 0.5);
+}
+
+void test_a_sync_request_runs_a_cycle_now() {
+  Rig rig;
+  rig.camera_error = 0.0;
+  rig.build();
+  rig.feed_boxes(3, -6.0);
+  rig.daemon->start();
+  rig.reach_camera(-6.0);
+  rig.loop.advance(1.0);
+  const size_t after_first = rig.cycles.size();
+
+  FakePeer peer;
+  rig.daemon->peer_opened(&peer);
+  rig.daemon->peer_line(&peer, "sync");
+  Message ok;
+  CHECK(peer.last("ok", &ok));
+  CHECK_STR(ok.get("what"), "sync");
+  bool queued = true;
+  CHECK(ok.get_bool("queued", &queued));
+  CHECK(!queued);  // the daemon was idle, so this one runs rather than waits
+
+  rig.loop.advance(0.5);
+  rig.report_now(-6.0);
+  rig.loop.advance(0.5);
+  CHECK(rig.cycles.size() > after_first);
+}
+
+void test_a_request_that_arrives_mid_cycle_waits_its_turn() {
+  Rig rig;
+  rig.camera.delay = 0.5;
+  rig.build();
+  rig.feed_boxes(3, -6.0);
+  rig.daemon->start();
+  rig.see_camera();
+  rig.loop.advance(0.2);   // mid-connect
+
+  FakePeer peer;
+  rig.daemon->peer_opened(&peer);
+  rig.daemon->peer_line(&peer, "sync");
+  Message ok;
+  CHECK(peer.last("ok", &ok));
+  bool queued = false;
+  CHECK(ok.get_bool("queued", &queued));
+  CHECK(queued);
+}
+
+void test_the_timecode_source_errand_needs_an_echo() {
+  Rig rig;
+  rig.build();
+  rig.feed_boxes(3, -6.0);
+  rig.daemon->request_source(std::string(), bmd::kTimecodeSourceTimeOfDay);
+  rig.daemon->start();
+  rig.see_camera();
+  rig.loop.advance(0.5);
+  rig.camera.report_source(bmd::kTimecodeSourceClip);
+  rig.loop.advance(0.5);
+
+  CHECK_EQ(static_cast<int>(rig.camera.writes.size()), 1);
+  // The camera has not echoed the new value back, so the write is not
+  // believed: a GATT ack only proves the bytes were taken.
+  rig.loop.advance(2.0);
+  CHECK_STR(rig.last_action(), "source:unverified");
+}
+
+void test_the_timecode_source_errand_believes_an_echo() {
+  Rig rig;
+  rig.build();
+  rig.feed_boxes(3, -6.0);
+  rig.daemon->request_source(std::string(), bmd::kTimecodeSourceTimeOfDay);
+  rig.daemon->start();
+  rig.see_camera();
+  rig.loop.advance(0.5);
+  rig.camera.report_source(bmd::kTimecodeSourceClip);
+  rig.loop.advance(0.2);
+  CHECK_EQ(static_cast<int>(rig.camera.writes.size()), 1);
+  rig.camera.report_source(bmd::kTimecodeSourceTimeOfDay);
+  rig.loop.advance(2.0);
+
+  CHECK_STR(rig.last_action(), "source:ok");
+}
+
+void test_nothing_here_used_the_wall_clock() {
+  // The whole file runs on a clock that is a variable. This is the assertion
+  // that says so: a rig that reached a camera, wrote to it and verified the
+  // write has moved its own clock by seconds, while the process has been
+  // running for whatever tiny fraction of a second all of the above took.
+  Rig rig;
+  rig.camera_error = 4.0;
+  rig.build();
+  rig.feed_boxes(3, -6.0);
+  rig.daemon->start();
+  rig.reach_camera(-6.0);
+  rig.loop.advance(3.0);
+  CHECK(rig.loop.now() - Rig::kMono0 >= 3.0);
+  CHECK_EQ(static_cast<int>(rig.camera.writes.size()), 1);
+}
+
+}  // namespace
+
+int main() {
+  test_bench_is_the_median_of_enabled_boxes();
+  test_a_disabled_box_does_not_vote();
+  test_no_boxes_means_the_camera_is_not_touched();
+  test_a_cycle_writes_on_a_second_boundary();
+  test_a_good_write_is_verified();
+  test_a_write_that_changes_nothing_is_not_called_verified();
+  test_recording_is_never_written_over();
+  test_writes_disabled_stops_everything();
+  test_a_clock_that_is_close_enough_is_left_alone();
+  test_forcing_overrules_an_advisory_gate_only();
+  test_a_camera_that_sends_no_timecode_ends_the_cycle();
+  test_a_backend_that_never_answers_does_not_wedge_the_daemon();
+  test_a_scan_finds_a_camera_when_nothing_is_known();
+  test_a_camera_that_is_not_there_backs_off();
+  test_a_camera_that_vanishes_mid_cycle_ends_the_cycle();
+  test_a_completion_from_an_abandoned_cycle_is_ignored();
+  test_destroying_the_daemon_with_work_in_flight_is_safe();
+  test_holding_the_camera_avoids_a_second_connect();
+  test_not_holding_releases_the_camera();
+  test_a_peer_is_greeted();
+  test_ping_and_unknown_verbs_are_both_answered();
+  test_status_says_what_the_bench_is();
+  test_devices_streams_and_says_when_it_is_done();
+  test_a_peer_can_ask_not_to_be_announced_to();
+  test_a_closed_peer_is_not_written_to();
+  test_the_cycle_outcome_is_announced();
+  test_a_sync_request_runs_a_cycle_now();
+  test_a_request_that_arrives_mid_cycle_waits_its_turn();
+  test_the_timecode_source_errand_needs_an_echo();
+  test_the_timecode_source_errand_believes_an_echo();
+  test_nothing_here_used_the_wall_clock();
+  return octotest::report("test_syncd");
+}

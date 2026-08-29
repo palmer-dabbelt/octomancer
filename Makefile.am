@@ -29,6 +29,7 @@ libocto_a_SOURCES = \
 	src/bmd.h \
 	src/boxmsg.cc \
 	src/boxmsg.h \
+	src/camasync.h \
 	src/camconf.cc \
 	src/camconf.h \
 	src/camdb.cc \
@@ -77,6 +78,8 @@ libocto_a_SOURCES = \
 	src/scanbridge.h \
 	src/server.cc \
 	src/server.h \
+	src/syncd.cc \
+	src/syncd.h \
 	src/smp.cc \
 	src/smp.h \
 	src/tentacle.cc \
@@ -280,6 +283,7 @@ check_PROGRAMS = \
 	tests/test_proto \
 	tests/test_registry \
 	tests/test_smp \
+	tests/test_syncd \
 	tests/test_tentacle \
 	tests/test_timeutil \
 	tests/test_tui
@@ -358,3 +362,11 @@ tests_test_crypto_LDADD = libocto.a
 
 tests_test_smp_SOURCES = tests/test_smp.cc tests/harness.h
 tests_test_smp_LDADD = libocto.a
+
+# The sync daemon, driven to completion with no radio and no wall-clock time:
+# the camera is a scripted object, the boxes are bytes, and the clock is a
+# variable. The cases worth having are the ones a bench cannot produce on
+# demand -- a camera that answers a connect and then goes silent, one that
+# walks out mid-cycle, a write that is taken and changes nothing.
+tests_test_syncd_SOURCES = tests/test_syncd.cc tests/harness.h
+tests_test_syncd_LDADD = libocto.a

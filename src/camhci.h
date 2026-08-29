@@ -39,6 +39,7 @@
 #include <vector>
 
 #include "att.h"
+#include "camasync.h"
 #include "camera.h"
 #include "hci.h"
 #include "hcilink.h"
@@ -47,13 +48,14 @@
 
 namespace octo {
 
-class HciCamera {
+// The interface is src/camasync.h's, so that the sync daemon can be driven by
+// a fake camera in a test and by this one on a rig without knowing which it
+// has. Everything below that is not in AsyncCamera -- opening the dongle,
+// supplying a passkey -- is here because it has no counterpart on any other
+// backend: CoreBluetooth has no dongle to open and pairs by putting a panel on
+// the screen.
+class HciCamera : public AsyncCamera {
  public:
-  using DoneHandler = std::function<void(bool ok, const std::string& err)>;
-  using ScanHandler = std::function<void(const ScanResult& result)>;
-  // Called every time the camera volunteers something: a timecode, a transport
-  // mode, a frame rate. This is what replaces waiting for a state to arrive.
-  using ViewHandler = std::function<void(const CameraView& view)>;
   // Asked for the six-digit number the camera is displaying. Returning false
   // abandons the pairing, which is the honest outcome when there is nobody to
   // ask -- under launchd there is not.
@@ -64,46 +66,47 @@ class HciCamera {
   // trips later and arrives at `on_ready`.
   static std::unique_ptr<HciCamera> open(Loop* loop, DoneHandler on_ready,
                                          std::string* err);
-  ~HciCamera();
+  ~HciCamera() override;
 
   HciCamera(const HciCamera&) = delete;
   HciCamera& operator=(const HciCamera&) = delete;
 
   void set_passkey_provider(PasskeyProvider provider);
-  void set_view_handler(ViewHandler on_change);
+  void set_view_handler(ViewHandler on_change) override;
   // Called when the camera goes away by itself, which it does whenever it is
   // switched off or walks out of range mid-sync.
-  void set_disconnect_handler(std::function<void()> on_gone);
+  void set_disconnect_handler(std::function<void()> on_gone) override;
 
   // Listen for `seconds`, then report. Unlike the CoreBluetooth backend this
   // one cannot say "there it is" during the scan: it collects advertisements
   // and classifies them afterwards, so there is no moment during the scan at
   // which it knows it has found a camera.
   void scan(double seconds, const std::string& name_hint, bool want_all,
-            ScanHandler done);
+            ScanHandler done) override;
 
   // Over the dongle a camera is named by its Bluetooth address, not by the
   // opaque per-host identifier CoreBluetooth invents. Connecting includes
   // negotiating an MTU and discovering the control service, so `done` means
   // "ready to be used", not "the radio link is up".
-  void connect(const std::string& id, double timeout, DoneHandler done);
-  void disconnect();
-  bool connected() const;
+  void connect(const std::string& id, double timeout,
+               DoneHandler done) override;
+  void disconnect() override;
+  bool connected() const override;
 
   // Subscribe to the Timecode and Incoming Control characteristics. Once per
   // connection: subscribing twice is an error. This is also where pairing
   // happens, because those characteristics are encrypted and the subscription
   // is what first demands an encrypted link.
-  void subscribe(double timeout, DoneHandler done);
-  bool subscribed() const;
+  void subscribe(double timeout, DoneHandler done) override;
+  bool subscribed() const override;
 
   void write_control(const std::vector<uint8_t>& packet, double timeout,
-                     DoneHandler done);
+                     DoneHandler done) override;
 
-  const CameraView& view() const;
+  const CameraView& view() const override;
   // Drop the timecode so the next reading observed is a fresh one rather than
   // the one that arrived before a write landed.
-  void forget_timecode();
+  void forget_timecode() override;
 
  private:
   // Where a characteristic lives once discovery has found it.

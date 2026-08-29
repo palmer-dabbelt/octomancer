@@ -7,13 +7,26 @@ recollection rather than a verified fact it is marked **(unverified)**.*
 > **Superseded in part, 2026-08-29.** `doc/box-notes.md` is now the design:
 > two daemons split by tempo rather than by capability, one control protocol
 > over USB, BLE and a unix socket, and a single-threaded event loop with no
-> blocking in it. Three things below have since been *measured* and the
-> answers were not the ones guessed here — the portable core is 115 KB of ARM
-> `.text` and not 250–350 KB, the toolchain's libstdc++ has no `std::thread`
-> at all so the shim is mandatory rather than "safer", and the A/B flash map
-> did not need designing because the board already ships one. The research
-> below on the ESP32 fallback, the hardware question and what gets reused all
-> still stands.
+> blocking in it. Four things below have since been *measured*, and the answers
+> were not the ones guessed here.
+>
+> * **Size.** The set the firmware links is about 99 KB, not 250–350 KB. See
+>   the sizing block in `doc/box-notes.md`, which also gives the exact command
+>   — the figures are the `size` *text* column, `.text` plus `.rodata`, and
+>   mixing that up with the `.text` section alone moves everything by a third.
+> * **Threads.** The toolchain's libstdc++ has no `std::thread` in any
+>   multilib, so the shim below is not "the safer route", it is the only route
+>   — and in the end it was not taken either. The radio was de-threaded
+>   instead, which is why the item at "`hcilink.cc` uses `std::thread`" below
+>   no longer describes the tree.
+> * **The A/B flash map** did not need designing; the board already ships one.
+> * **The port abstraction paid off somewhere unplanned.** `hciport.h` was
+>   written to make the HCI host testable and never was, because the host
+>   needed its reader thread to make progress. Removing the thread is what
+>   finally made `tests/test_hcilink.cc` possible.
+>
+> The research below on the ESP32 fallback, the hardware question and what gets
+> reused all still stands.
 
 The goal: a box that does what the Mac does — read Tentacle timecode off the
 air, decide whether a Blackmagic camera's clock needs setting, and set it —
@@ -236,9 +249,10 @@ refuse unsigned ones; MCUboot does the verification.
 * **256 KB of RAM, shared with the controller.** The C++ core leans on
   `std::string`, `std::map` and `std::vector`. This is the single most likely
   thing to force a rewrite of otherwise-portable code. Measure early.
-* **`hcilink.cc` uses `std::thread`.** Zephyr's C++ support can provide it,
-  but the safer route is a thin `octo::Thread` / `octo::Mutex` shim so the
-  same file can sit on pthreads or on `k_thread`.
+* ~~**`hcilink.cc` uses `std::thread`.**~~ **Done differently, 2026-08-29.**
+  It no longer uses one: there is no shim and no thread, only the event loop.
+  Zephyr's C++ support could not have provided `std::thread` anyway — see the
+  note at the top.
 * **Identifiers are addresses**, as with the dongle on the Mac — see
   `doc/dongle-notes.md`. A bench learned on the Mac is not recognised by the
   firmware.

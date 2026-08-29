@@ -196,8 +196,52 @@ uses, so a failure has somewhere to arrive.
 
 ## The dongle backend
 
-* `read_status()` returns an error saying it is not implemented. It wants doing
-  alongside the SMP passkey work rather than as a stub that half answers.
+### No tool drives the dongle's camera half any more
+
+The dongle's camera path used to implement `CameraLink` in `src/camera.h`,
+which blocks by contract. It cannot any more: blocking there meant waiting on
+the HCI reader thread, and that thread is gone because the box cannot have one.
+The logic moved to `octo::HciCamera` in `src/camhci.h` -- the same work with
+completion handlers instead of return values -- and the sync daemon that will
+call it is not written.
+
+So `octomancer --set` and `octomancer-sync` under `--radio=dongle` now print
+that the camera half moved and return no link, instead of returning one that
+would hang. Scanning over the dongle is unaffected and still goes through
+`make_hci_scanner`.
+
+Nothing that ever worked was lost: `doc/dongle-notes.md` records that
+connecting, pairing and writing a clock over a dongle have never been run
+against hardware. But this is a real reduction in what the *tools* can be asked
+to do, and it lasts until the sync daemon exists.
+
+**What would settle it:** the sync daemon, or a small `--radio=dongle` path in
+`octomancer` that drives `HciCamera` directly. The second is a couple of
+hundred lines and would also be the first end-to-end exercise `HciCamera` has
+ever had.
+
+### `read_status()` is gone rather than stubbed
+
+`HciCamera` has no `read_status()` at all. The old backend had one that
+returned "not implemented"; carrying a stub across a rewrite dresses a gap up
+as a feature, so it was left out. It still wants doing alongside the SMP
+passkey work.
+
+### Discovery was rewritten and has never run
+
+`HciCamera::discover` walks the primary services, then the characteristics,
+then the descriptors, exactly as the blocking version did -- but as a chain of
+continuations rather than two nested loops. That is precisely the sort of
+rewrite that compiles and is wrong, and unlike the HCI host underneath it, it
+has no test. The round limits (16 services, 24 characteristic batches, 8
+descriptor batches) are carried over unchanged.
+
+**What would settle it:** point it at any BLE device with a GATT table and
+compare what it finds against `octomancer-zoom --dump`, which walks the same
+table by a different route.
+
+### Other things
+
 * `scan()` accepts the streaming callback but only calls it once the scan is
   over -- this backend classifies advertisements afterwards, so there is no
   moment during the scan when it knows it has found something. Truly streaming
@@ -209,11 +253,22 @@ uses, so a failure has somewhere to arrive.
 
 ## Tests
 
-* **`test_proclock` is flaky.** It forks a child and polls for about two
-  seconds for it to take a lock. Under a seventeen-way parallel `make check` on
-  a loaded machine the child does not always get scheduled in time. Observed
-  failing twice on 2026-08-27 and passing alone both times. Widening the window
-  would fix it; the test is not wrong, it is just impatient.
+* ~~**`test_proclock` is flaky.**~~ **Fixed 2026-08-29, and the diagnosis
+  above was wrong.** It was not impatience and widening the window did not fix
+  it -- the window had already been widened to thirty seconds and it still
+  failed. The parent polled by *trying to acquire the lock itself*, and read
+  "that failed, and the holder is the child" as the signal to proceed. That
+  races with the child: when the parent's first probe wins, the child's own
+  acquire is the one that fails, and the child does not retry, it exits. The
+  parent then waits out its entire deadline for a holder that is never coming.
+  The child now says when it holds the lock, down a pipe, and the parent waits
+  for that byte. Measured across 120 runs started at once: two failures before,
+  none after.
+
+  Worth keeping as a cautionary entry rather than deleting. "The test is just
+  impatient" is the comfortable diagnosis for every flaky test, it was written
+  here in good faith, and it was wrong -- the test was genuinely broken and the
+  first fix made the failure rarer and slower instead of removing it.
 * **The `refused` verdict has never been produced by a radio.** Its matcher in
   `src/pairing.cc` is tested against strings written from documentation rather
   than strings a camera caused, so the words it looks for are a guess at how

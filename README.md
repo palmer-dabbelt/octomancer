@@ -866,6 +866,15 @@ Two differences are real and cannot be papered over:
   everything worked immediately. The dongle arrives as a stranger, so the
   camera displays a six-digit passkey — pass it with `--passkey`.
 
+**Today the dongle can watch but not act.** Scanning over it works and is what
+the daemon and the window use. Setting a clock over it does not: that half was
+rebuilt on the event loop for the standalone box — see `doc/box-notes.md` — and
+the program that drives it is not written yet, so `--radio=dongle` with
+`octomancer --set` says so and stops rather than appearing to work. Use
+`--radio=corebluetooth` to write a clock. Nothing is lost that ever worked;
+`doc/dongle-notes.md` records that writing a clock over a dongle has never been
+run against hardware at all.
+
 ### Which dongle to buy
 
 The one this was developed against is a **Raytac MDBT50Q-CX-40**, bought from

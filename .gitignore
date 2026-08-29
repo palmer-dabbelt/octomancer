@@ -40,6 +40,7 @@
 /tests/test_att
 /tests/test_bmd
 /tests/test_boxmsg
+/tests/test_boxsock
 /tests/test_camconf
 /tests/test_camdb
 /tests/test_camsync
@@ -56,6 +57,7 @@
 /tests/test_proto
 /tests/test_registry
 /tests/test_smp
+/tests/test_syncd
 /tests/test_tentacle
 /tests/test_timeutil
 /tests/test_tui

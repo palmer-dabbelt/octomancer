@@ -48,10 +48,35 @@ missing.
 
 ```
 tools/flash-dongle.sh --check
-tools/flash-dongle.sh --build                     # needs a Zephyr SDK
-tools/flash-dongle.sh --package build-hci/zephyr/zephyr.hex
-tools/flash-dongle.sh --flash  build-hci/hci_uart_dfu.zip
+tools/flash-dongle.sh --setup                     # ~2 GB, once
+tools/flash-dongle.sh --build
+tools/flash-dongle.sh --package third_party/build-hci/zephyr/zephyr.hex
+tools/flash-dongle.sh --flash  third_party/build-hci/zephyr/hci_uart_dfu.zip
 ```
+
+`third_party/zephyr` is a submodule pinned at a Zephyr release, so the image
+is a function of this repository's commit and nothing else: west reads every
+module revision out of that pinned tree's own manifest, and the compiler is a
+released Zephyr SDK identified by the version the tree asks for. Two builds of
+one commit produce the same bytes, which is the only reason it is worth
+building rather than downloading.
+
+`--setup` does the parts that are easy to get wrong, once: a virtualenv with
+west in it, a workspace filtered down to the modules an nRF52840 actually
+needs -- the full manifest carries every vendor HAL there is, and all but one
+of them is megabytes of silicon this project will never run on -- and the
+`arm-zephyr-eabi` toolchain. It is safe to re-run and takes a second when
+there is nothing to do. Nothing it fetches is tracked; `.gitignore` has the
+list.
+
+Pushing the package over the bootloader needs a tool that speaks Nordic's DFU
+protocol, and on a current macOS that is not `nrfutil`. `pip install nrfutil`
+still resolves and still installs -- and then `pkg generate` dies inside
+`dict.iteritems`, because what it installed is Python 2. The modern nrfutil is
+a prebuilt binary whose Homebrew cask was deprecated for failing Gatekeeper
+and is disabled from 2026-09-01. `pip install adafruit-nrfutil` is a Python 3
+fork of the old tool, speaking the same protocol over the same transport; the
+script takes whichever of the two it finds.
 
 DFU mode is the small side button (SW1, next to the USB connector — not the one
 on the end) held while plugging in. The red LED pulses slowly when the

@@ -64,3 +64,12 @@
 
 # Editor leavings.
 .*.swp
+
+# The firmware side. third_party/zephyr is a submodule and is tracked; every
+# other thing under there is fetched or built and must not be.
+/third_party/.west/
+/third_party/.venv/
+/third_party/.venv-dfu/
+/third_party/modules/
+/third_party/zephyr-sdk-*/
+/third_party/build-*/

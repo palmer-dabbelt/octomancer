@@ -172,6 +172,11 @@ struct CycleReport {
   bool has_timecode_source = false;
   int64_t timecode_source = 0;
 
+  // Whether the residual after the write is a fair measurement of the apply
+  // delay. A write that missed by more than half a second missed because the
+  // whole-second bias was wrong, and feeding that into a sub-second lead has
+  // it chasing a whole second it can never reach.
+  bool timing_usable = false;
   bool has_write = false;
   bmd::Civil wrote_value;
   int bias = 0;

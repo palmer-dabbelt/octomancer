@@ -41,8 +41,12 @@
 #include "client.h"
 #include "control.h"
 #include "jsonlog.h"
+#include "boxsock.h"
+#include "camhci.h"
+#include "hciport.h"
 #include "registry.h"
 #include "scanbridge.h"
+#include "syncd.h"
 #include "radio.h"
 #include "scanner.h"
 #include "server.h"
@@ -54,7 +58,12 @@ volatile sig_atomic_t g_stop = 0;
 
 void on_signal(int) { g_stop = 1; }
 
-enum class Mode { kSync, kScanOnly, kWatch, kPacket, kRtcTest, kPoke, kPair };
+enum class Mode {
+  kSync, kScanOnly, kWatch, kPacket, kRtcTest, kPoke, kPair,
+  // The event-based daemon: one loop, no threads, and the same object the
+  // box will run. See src/syncd.h.
+  kDaemon,
+};
 
 enum class Source { kTentacle, kMac };
 
@@ -65,6 +74,11 @@ struct Options {
   std::string camera;  // name hint or BLE identifier
   std::string socket_path = octo::default_socket_path();
   std::string log_path = "octomancer-sync.jsonl";
+  // Whether --log was given. --daemon logs somewhere else by default, because
+  // it is meant to be run beside the old one during the changeover and two
+  // daemons interleaving records in one file would make the log unreadable by
+  // exactly the tool that exists to read it.
+  bool log_explicit = false;
   std::string console_path;
   octo::Rotation rotation;
   // How often to ask octomancerd whether the camera is on the air. This is a
@@ -105,6 +119,13 @@ struct Options {
 
   // Read, never written, by this program. See camconf.h.
   std::string camconf_path = octo::default_camera_config_path();
+
+  // --daemon's own socket and its own lock. Separate from the two above on
+  // purpose: a different protocol is spoken on the socket (src/boxmsg.h
+  // rather than proto.h), and the lock has to let this run beside the daemon
+  // it is going to replace.
+  std::string box_socket_path = octo::default_box_socket_path();
+  std::string daemon_lock_path = octo::default_lock_path("octomancer-syncd");
 };
 
 // ------------------------------------------------------------------ output
@@ -1598,6 +1619,20 @@ void usage(FILE* out) {
       "  --packet              print the RTC packet for now and exit, no"
       " Bluetooth\n"
       "\n"
+      "  --daemon              run the event-based daemon: one loop, no"
+      " threads,\n"
+      "                        and the same object the Nordic box will run."
+      " It\n"
+      "                        hears Tentacles, serves the box protocol, and"
+      "\n"
+      "                        drives a camera over the dongle. On a Mac"
+      " there\n"
+      "                        is no asynchronous camera backend yet, so it"
+      "\n"
+      "                        listens and answers without syncing anything."
+      "\n"
+      "  --box-socket PATH     where --daemon answers (default %s)\n"
+      "\n"
       "  --radio KIND          auto (default), corebluetooth, or dongle\n"
       "  --dongle PORT         the dongle's serial port\n"
       "  --passkey NNNNNN      the passkey the camera displays while pairing;\n"
@@ -1605,7 +1640,8 @@ void usage(FILE* out) {
       "                        of its own and no screen to prompt on\n"
       "  --hci-trace           log every HCI packet\n"
       "  --version, --help\n",
-      octo::default_socket_path().c_str());
+      octo::default_socket_path().c_str(),
+      octo::default_box_socket_path().c_str());
 }
 
 bool parse_args(int argc, char** argv, Options* opt) {
@@ -1623,10 +1659,13 @@ bool parse_args(int argc, char** argv, Options* opt) {
     kCameraDb, kNoCameraDb, kDbMaxSamples, kNoAdaptLead, kLeadWindow, kMaxLead,
     kNoCentreFrames,
     kRadio, kDongle, kHciTrace, kPasskey,
+    kDaemon, kBoxSocket,
     kVersion, kHelp,
   };
   static const struct option longs[] = {
       {"camera", required_argument, nullptr, kCamera},
+      {"daemon", no_argument, nullptr, kDaemon},
+      {"box-socket", required_argument, nullptr, kBoxSocket},
       {"source", required_argument, nullptr, kSource},
       {"poll", required_argument, nullptr, kPoll},
       {"max-poll", required_argument, nullptr, kMaxPoll},
@@ -1724,7 +1763,12 @@ bool parse_args(int argc, char** argv, Options* opt) {
       case kNoControl: opt->serve_control = false; break;
       case kLockFile: opt->lock_path = optarg; break;
       case kCameraConfig: opt->camconf_path = optarg; break;
-      case kLog: opt->log_path = optarg; break;
+      case kLog:
+        opt->log_path = optarg;
+        opt->log_explicit = true;
+        break;
+      case kDaemon: opt->mode = Mode::kDaemon; break;
+      case kBoxSocket: opt->box_socket_path = optarg; break;
       case kOnce: opt->once = true; break;
       case kDryRun: opt->sync.dry_run = true; break;
       case kToleranceFrames:
@@ -1853,6 +1897,310 @@ bool parse_args(int argc, char** argv, Options* opt) {
 
 }  // namespace
 
+
+// ------------------------------------------------------- the event daemon
+
+// The stop pipe. A signal handler may write to a pipe and almost nothing
+// else, and the loop is already built to be woken by a readable descriptor --
+// so stopping is one more source rather than a flag the loop has to poll for.
+int g_daemon_stop_pipe[2] = {-1, -1};
+
+void on_daemon_signal(int) {
+  if (g_daemon_stop_pipe[1] < 0) return;
+  const char byte = 'x';
+  const ssize_t ignored = ::write(g_daemon_stop_pipe[1], &byte, 1);
+  (void)ignored;
+}
+
+// The JSONL record for one cycle.
+//
+// The key names are the old daemon's, deliberately. octomancer-report and
+// src/logscan.cc read this file, and a new daemon that renamed the fields
+// would silently produce a log that the tool built to analyse it skips over.
+void log_cycle(octo::JsonLog* log, const octo::CycleReport& report) {
+  if (!log->enabled()) return;
+  Record rec;
+  rec.action(report.action);
+  if (report.bench.ok) {
+    rec.integer("tentacles", report.bench.boxes);
+    rec.num("tentacle_offset_s", report.bench.offset);
+    rec.num("tentacle_spread_s", report.bench.spread);
+  }
+  if (report.bench.skipped > 0) {
+    rec.integer("boxes_disabled", report.bench.skipped);
+  }
+  if (!report.camera_id.empty()) rec.str("camera_id", report.camera_id);
+  if (!report.timecode.empty()) rec.str("camera_tc", report.timecode);
+  if (report.fps > 0) rec.integer("camera_fps", report.fps);
+  rec.boolean("recording", report.recording);
+  if (report.has_timecode_source) {
+    rec.integer("timecode_source", report.timecode_source);
+  }
+  if (report.has_error) rec.num("error_s", report.error_before);
+  if (report.has_error_after) rec.num("error_after_s", report.error_after);
+  if (report.has_write) {
+    rec.str("write_utc", fmt("%02d:%02d:%02d", report.wrote_value.hour,
+                             report.wrote_value.minute,
+                             report.wrote_value.second));
+    rec.integer("rtc_bias", report.bias);
+    rec.num("lead_s", report.lead, 6);
+    rec.num("write_latency_s", report.write_latency);
+    rec.boolean("verified", report.verified);
+  }
+  rec.num("next_poll_s", report.next_poll, 1);
+  rec.str("next_poll_reason", report.next_poll_reason);
+  log->record("cycle", rec.fields());
+}
+
+int run_daemon(Options& opt) {
+  if (!opt.log_explicit) opt.log_path = "octomancer-syncd.jsonl";
+
+  if (::pipe(g_daemon_stop_pipe) != 0) {
+    std::fprintf(stderr, "octomancer-sync: pipe: %s\n", strerror(errno));
+    return 1;
+  }
+  ::signal(SIGINT, on_daemon_signal);
+  ::signal(SIGTERM, on_daemon_signal);
+  ::signal(SIGPIPE, SIG_IGN);
+
+  std::string err;
+
+  // One writer of the camera database, and one holder of a camera. The lock
+  // is its own file rather than octomancer-sync's, so that this can be run
+  // beside the daemon it is meant to replace while it is being trusted.
+  octo::ProcLock lock;
+  if (!opt.sync.dry_run && !opt.daemon_lock_path.empty()) {
+    long holder = 0;
+    if (!lock.acquire(opt.daemon_lock_path, &holder, &err)) {
+      std::fprintf(stderr, "octomancer-sync: %s\n", err.c_str());
+      return 1;
+    }
+  }
+
+  octo::ConsoleLog console;
+  if (!console.open(opt.console_path, opt.rotation, &err)) {
+    std::fprintf(stderr, "octomancer-sync: %s\n", err.c_str());
+    return 1;
+  }
+
+  octo::JsonLog log;
+  log.set_rotation(opt.rotation);
+  if (!log.open(opt.log_path, &err)) {
+    std::fprintf(stderr, "octomancer-sync: %s\n", err.c_str());
+    return 1;
+  }
+
+  // Permission, read from a file this program never writes. A parse error is
+  // fatal rather than ignored: carrying on would mean acting on defaults --
+  // and the defaults permit nothing -- while a person is looking at a file
+  // that says otherwise.
+  octo::CamConf conf;
+  if (!conf.load(opt.camconf_path, &err)) {
+    std::fprintf(stderr, "octomancer-sync: %s\n", err.c_str());
+    return 1;
+  }
+
+  octo::CamDb db;
+  if (!db.open(opt.camdb_path, opt.camdb, &err)) {
+    say("camera database: %s -- continuing without it", err.c_str());
+  }
+
+  octo::Loop& loop = octo::default_loop();
+
+  // Stopping, as a source. See on_daemon_signal.
+  {
+    octo::Handle handle;
+    handle.fd = g_daemon_stop_pipe[0];
+    loop.add_source(handle, octo::kRead, [&loop](int) { loop.stop(); },
+                    [&loop](const std::string&) { loop.stop(); });
+  }
+
+  octo::Policy policy;
+  octo::Registry registry(policy, loop.now());
+
+  octo::SyncdOptions dopt;
+  dopt.sync = opt.sync;
+  dopt.hold = opt.hold;
+  dopt.camera = opt.camera;
+  dopt.tentacle_bench = opt.source == Source::kTentacle;
+
+  octo::ScanBridge bridge(&loop);
+  if (!bridge.ok()) {
+    std::fprintf(stderr, "octomancer-sync: %s\n", bridge.error().c_str());
+    return 1;
+  }
+
+  // The camera, and the honest statement of what is available.
+  //
+  // CameraLink blocks by contract and cannot be driven from a loop, so the
+  // only asynchronous camera backend that exists is the dongle's. That makes
+  // the arithmetic here awkward and worth spelling out, because getting it
+  // wrong is invisible: **one dongle is one HCI link, and the scanner and the
+  // camera each want their own.** Opening the port twice is not refused by
+  // macOS -- a cu.* device happily hands out a second descriptor -- so two
+  // links read the same byte stream, each sees the other's replies as
+  // corruption, and the whole thing presents as a radio that powered off.
+  // That is exactly what the first run of this daemon did.
+  //
+  // So the rule is one job per radio:
+  //
+  //   --radio dongle       the dongle listens; there is no camera.
+  //   --radio corebluetooth  CoreBluetooth listens and the dongle, if one is
+  //                        plugged in, drives the camera. On a Mac this is
+  //                        the useful configuration and it is why the choice
+  //                        is made here rather than by the radio factories.
+  //
+  // On the box neither applies: there is one radio and one link, and the
+  // scanner and the camera will have to share it. That is a change to
+  // src/hcilink.h -- one handler per link is what stops it today -- and it is
+  // the next thing this needs.
+  const bool listening_on_dongle = octo::dongle_selected();
+  const bool have_dongle = listening_on_dongle ||
+                           !octo::radio_options().device.empty() ||
+                           !octo::hci::list_candidate_ports().empty();
+  std::unique_ptr<octo::HciCamera> camera;
+  if (listening_on_dongle) {
+    say("the dongle is being used to listen, so there is no camera backend --"
+        " run with --radio corebluetooth to listen on this Mac and leave the"
+        " dongle for the camera");
+  } else if (have_dongle) {
+    camera = octo::HciCamera::open(
+        &loop,
+        [](bool ok, const std::string& why) {
+          if (ok) {
+            say("dongle ready");
+          } else {
+            say("dongle did not come up: %s", why.c_str());
+          }
+        },
+        &err);
+    if (!camera) {
+      std::fprintf(stderr, "octomancer-sync: %s\n", err.c_str());
+      return 1;
+    }
+    if (octo::radio_options().passkey >= 0) {
+      const uint32_t passkey =
+          static_cast<uint32_t>(octo::radio_options().passkey);
+      camera->set_passkey_provider([passkey](uint32_t* out) {
+        *out = passkey;
+        return true;
+      });
+    }
+  }
+
+  octo::SyncDaemon daemon(&loop, &registry, dopt);
+  daemon.set_config(&conf);
+  daemon.set_camera(camera.get());
+  daemon.on_say([](const std::string& line) { say("%s", line.c_str()); });
+
+  // Take up where the last run left off for this body: the learned bias cost
+  // one of the rationed writes to acquire and the lead needs several, so a
+  // restart that threw them away would throw away a night's work.
+  daemon.on_bind([&db, &opt](const std::string& id, const std::string& name,
+                             octo::SyncState* state) {
+    seed_from_db(&db, opt, state, id, name);
+  });
+
+  // The end of a cycle is where the notebook is kept. This is the host's
+  // business rather than the daemon's: the database is a file, and the box
+  // has no filesystem to keep one in.
+  daemon.on_cycle([&db, &log, &opt](const octo::CycleReport& report,
+                                    octo::SyncState* state) {
+    log_cycle(&log, report);
+    if (!report.has_write || !db.enabled() || state->camera_id.empty()) return;
+
+    octo::WriteSample sample;
+    sample.wall = octo::wall_now();
+    sample.error_before_s = report.error_before;
+    sample.error_after_s = report.error_after;
+    sample.lead_used_s = report.lead;
+    sample.latency_s = report.write_latency;
+    sample.fps = report.fps;
+    sample.bias = report.bias;
+    sample.verified = report.verified;
+    sample.timing_ok = report.timing_usable;
+    sample.measure_epoch = opt.sync.centre_frames ? octo::kMeasureEpoch : 0;
+
+    std::string derr;
+    if (!db.record_write(state->camera_id, sample, &derr)) {
+      say("camera database: %s", derr.c_str());
+    }
+
+    // Re-derived from the body's whole recorded history rather than from this
+    // one observation: at 24fps a single residual carries +/-21ms of frame
+    // quantisation, so chasing each one individually would make the lead
+    // jitter by more than the tolerance it is trying to reach.
+    const octo::CameraRecord* known = db.find(state->camera_id);
+    if (known != nullptr && opt.sync.adapt_lead) {
+      const size_t window = static_cast<size_t>(
+          opt.sync.lead_window > 0 ? opt.sync.lead_window : 1);
+      const octo::LeadEstimate est =
+          octo::estimate_lead(known->recent_apply_delays(window), opt.sync);
+      if (est.has) state->lead = est;
+    }
+    if (db.learn(state->camera_id, true, state->rtc_bias, state->lead.has,
+                 state->lead.lead_s, state->drift.has, state->drift.ppm,
+                 state->drift.span)) {
+      if (!db.record_params(state->camera_id, &derr)) {
+        say("camera database: %s", derr.c_str());
+      }
+    }
+  });
+
+  bridge.on_advert(
+      [&daemon](const octo::Advert& a) { daemon.observe_advert(a); });
+  bridge.on_camera(
+      [&daemon](const octo::Sighting& s) { daemon.observe_camera(s); });
+  bridge.on_state(
+      [&daemon](const std::string& state) { daemon.set_radio_state(state); });
+
+  auto scanner = octo::make_ble_scanner(bridge.advert_sink(),
+                                        bridge.camera_sink(),
+                                        bridge.state_sink());
+  if (!scanner || !scanner->start(&err)) {
+    std::fprintf(stderr, "octomancer-sync: cannot start the radio: %s\n",
+                 err.empty() ? "unsupported on this host" : err.c_str());
+    return 1;
+  }
+
+  octo::LineServer server(&loop, opt.box_socket_path);
+  server.on_open([&daemon](octo::MsgPeer* peer) { daemon.peer_opened(peer); });
+  server.on_line([&daemon](octo::MsgPeer* peer, const std::string& line) {
+    daemon.peer_line(peer, line);
+  });
+  server.on_close([&daemon](octo::MsgPeer* peer) { daemon.peer_closed(peer); });
+  if (!server.start(&err)) {
+    // Not fatal. Syncing a camera is the job; being asked about it is a
+    // convenience, and losing the socket to a stale file is no reason to
+    // leave a clock wrong all night.
+    say("box socket unavailable (%s) -- carrying on without it", err.c_str());
+  } else {
+    say("box socket: %s", opt.box_socket_path.c_str());
+  }
+
+  say("octomancer sync daemon %s -- listening on %s, %s", OCTO_VERSION,
+      octo::describe_radio().c_str(),
+      camera ? "camera over the dongle"
+             : "no camera backend: listening and answering, not syncing");
+  if (!conf.any_writes_enabled()) {
+    say("no camera in %s has writes enabled -- nothing will be written until"
+        " one does", conf.path().c_str());
+  }
+
+  daemon.start();
+  loop.run();
+
+  say("octomancer sync daemon stopping");
+  // The scanner has a queue of its own and hands work to the bridge, so it
+  // goes first: a sighting delivered after the bridge is gone is dropped
+  // safely, but there is no reason to arrange for one.
+  scanner->stop();
+  daemon.stop();
+  server.stop();
+  log.record("stop", "");
+  return 0;
+}
+
 int main(int argc, char** argv) {
   Options opt;
   // The environment is read before the flags so a flag can override it. This
@@ -1875,6 +2223,11 @@ int main(int argc, char** argv) {
                 octo::bmd::to_hex(octo::bmd::rtc_packet(when, 0)).c_str());
     return 0;
   }
+
+  // Before the CoreBluetooth camera link is asked for, because this mode does
+  // not use one and asking would prompt for a permission it will never
+  // exercise.
+  if (opt.mode == Mode::kDaemon) return run_daemon(opt);
 
   ::signal(SIGINT, on_signal);
   ::signal(SIGTERM, on_signal);

@@ -684,6 +684,7 @@ void SyncDaemon::judge() {
   const WriteOutcome outcome =
       judge_write(opt_.sync, &state_, cur_.report.error_before, after, mono());
   cur_.report.verified = outcome.verified;
+  cur_.report.timing_usable = outcome.timing_usable;
   say(outcome.message);
 
   const char* action = "write:ok";

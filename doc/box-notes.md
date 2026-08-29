@@ -1,6 +1,9 @@
 # The box: one loop, one protocol, three transports
 
-*Written 2026-08-29. No firmware exists yet. Everything below is either
+*Written 2026-08-29, and added to the same day when the sync daemon was
+built: everything below that describes the daemon as future work has been
+corrected in place, and the section "One radio is one job" is a thing running
+it taught. No firmware exists yet. Everything below is either
 measured on this machine and said so, checked against the source and cited, or
 marked **(unverified)**. The Nordic has never held a camera link, never
 advertised, and never been connected to — over the dongle only scanning has
@@ -61,6 +64,14 @@ link, runs the decision in `camsync.*`, emits announcements, and answers the
 control protocol. The same source builds as Nordic firmware and as a Mac
 process, and that is the whole point: the box is debuggable without a box.
 
+It exists: `src/syncd.{h,cc}`, started with `octomancer-sync --daemon`. The
+cycle is the old `run_cycle()` with its sleeps turned into states -- and the
+state worth naming is `align`, which is the one that looks like a wait and is
+not. The RTC field holds whole seconds, so a write has to leave at a
+particular instant to land on a boundary; the old daemon slept until then and
+stopped answering for a second every hour, and this arms a timer and goes back
+to the loop.
+
 The **control/state daemon** owns no radio. It holds links to any number of
 sync daemons — local over a unix socket, a Nordic over USB, later a Nordic
 over BLE — merges their rosters into one picture, drains their logs to disk,
@@ -70,6 +81,40 @@ The binaries keep their names. Renaming them would churn launchd labels,
 socket paths and muscle memory for no gain, so `octomancer-sync` becomes the
 sync daemon and `octomancerd` is replaced in substance while keeping its label
 and socket.
+
+### What the daemon can be asked, and what it volunteers
+
+The framing is `src/boxmsg.h`'s -- one message per line, a verb and
+`key=value` fields, unknown keys ignored and unknown verbs answered. What
+follows is the vocabulary `src/syncd.cc` actually implements, which is
+otherwise only written down as code.
+
+A request may carry `id=`, and every reply to it carries the same one back.
+Nothing needs it today -- one line in, answers out, in order -- but a client
+multiplexing several questions down one serial cable will, and adding it later
+would have been a change to every verb.
+
+| asked | answered |
+|---|---|
+| `ping` | `pong` |
+| `hello` | `hello proto=1 role=sync version=…` |
+| `status` | one `status` line: phase, radio, bench, camera, last action, when the next cycle is due |
+| `devices` | a `dev` line per box, then `end what=devices n=…` |
+| `sync [camera=…] [force=1]` | `ok what=sync queued=0\|1`. `force` overrules the gates that mean "there is no need" and none of the ones that mean "must not" |
+| `source value=N [camera=…]` | `ok what=source`; the write is judged by whether the camera echoes it back |
+| `announce on=0\|1` | `ok what=announce`; a peer that does not want the unsolicited half |
+| `forget dev=…` | `ok what=forget known=0\|1` |
+| anything else | `err reason=unknown-verb verb=…` |
+
+Volunteered, to every peer that has not asked otherwise: `bench` on a timer,
+`dev`-shaped `alert` lines when a box crosses a threshold, `cam up=0\|1` when
+a camera appears or goes, `radio state=…`, and a `cycle` line whenever a cycle
+ends -- which is the one that says what the daemon actually did.
+
+Deliberately absent: anything that stops the daemon. The same protocol is
+going to be spoken over an unsecured BLE characteristic, where "anyone in
+range may reconfigure this" is the request and "anyone in range may switch it
+off" is not.
 
 ## Why there are no threads anywhere
 
@@ -122,7 +167,7 @@ The second measurement is the one that made this cheap rather than alarming.
 > | `jsonlog.cc` | 2519 | `loopfake.cc` | 2468 |
 > | `logscan.cc` | 2427 | `pairing.cc` | 2120 |
 > | `tentacle.cc` | 1401 | `timeutil.cc` | 1197 |
-> | `escape.cc` | 317 | | |
+> | `syncd.cc` | 19751 | `escape.cc` | 317 |
 >
 > Only `camdb.cc` fails to port, because it is a file-backed database -- and
 > on-box logging is excluded by design anyway. Earlier failures on `gmtime_r`,
@@ -131,9 +176,20 @@ The second measurement is the one that made this cheap rather than alarming.
 
 That table is the whole tree, which is not what the firmware links. The set the
 box actually needs -- the HCI host and its camera client, the crypto and
-pairing under them, the sync arithmetic, the loop, the message codec, and the
-roster -- comes to **99 KB against a 408 KB slot, or 24% of it**. There is
-room, and there is room by a factor of four.
+pairing under them, the sync arithmetic, the loop, the message codec, the
+roster and now the daemon that drives them -- comes to **121 KB against a
+408 KB slot, or 30% of it**. There is room, and there is room by a factor of
+three.
+
+> **Re-measured 2026-08-29 with `src/syncd.cc` in it.** The set was 101 KB
+> before the daemon; the daemon is 19751 bytes of it. `camconf.cc` is excluded
+> from that sum and from the ones before it, because it reads a file and the
+> box has no filesystem -- permission will have to arrive over the control
+> protocol instead. The three files that deliberately do *not* cross-compile
+> are the seam working as intended: `loop_posix.cc` on `poll.h`, `boxsock.cc`
+> on `sys/socket.h`, and `scanbridge.cc` on `std::mutex` -- the last one being
+> a file that exists only to carry another thread's work to this one, on a
+> target that has no other thread.
 
 ### De-threading made the HCI host twice as big
 
@@ -271,7 +327,10 @@ added, at which point a failure is known to be the radio's.
 1. The loop, and de-threading the radio path. **Done.**
 2. The protocol codec, and the persistence record formats. Portable, tested.
    **Codec done; the record formats are not.**
-3. The Mac sync daemon and control daemon. The churn.
+3. The Mac sync daemon and control daemon. The churn. **The sync daemon is
+   done** -- `src/syncd.{h,cc}`, cross-compiling for cortex-m4, thirty-one
+   properties pinned against a fake camera on a clock that is a variable, and
+   run against the room over a real dongle. The control daemon is not started.
 4. Standalone firmware over USB.
 5. BLE control, and the status broadcast.
 6. MCUboot and A/B update.
@@ -380,6 +439,38 @@ that completion is entitled to call `connect()` again. Every asynchronous
 interface in this program should hold to it; `tests/test_hcilink.cc` pins it
 for the HCI host.
 
+## One radio is one job, and finding that out cost a live run
+
+The first time the daemon was started with a dongle plugged in, it reported
+the radio powering off. Nothing was wrong with the dongle.
+
+**One dongle is one HCI link, and the scanner and the camera each opened their
+own.** macOS does not refuse the second open -- a `cu.*` device hands out
+another descriptor without complaint -- so two `hci::Link`s read the same byte
+stream, each sees the other's replies as corruption, and the link closes.
+`lsof` showed one process holding the port twice, which is what made it
+obvious and would not have been obvious from the log.
+
+The Mac can work around this, because it has two radios:
+
+| | listens | drives the camera |
+|---|---|---|
+| `--radio dongle` | the dongle | nothing |
+| `--radio corebluetooth` | this Mac | the dongle, if one is plugged in |
+
+The second row is the useful arrangement on a desk and is what the live run
+above used. The choice is made in the daemon rather than in the radio
+factories, because it is a statement about how many links there are rather
+than about which radio is better.
+
+**The box cannot work around it**, and this is now the first item in
+`doc/TODO.md`. It has one radio, and the daemon there has to scan and hold a
+camera at once. What is in the way is not the controller -- the nRF52840's is
+expected to manage concurrent roles, which is separately unverified above --
+but `src/hcilink.h`'s one-handler-per-link model: `set_closed_handler`,
+`set_att_handler` and `set_smp_handler` each hold one function, and the
+scanner and the camera both want the first.
+
 ## What lives in flash
 
 Only two things: bonds, and the roster of Tentacle devices seen on the network
@@ -477,7 +568,14 @@ is.
 * `octo::HciCamera` end to end. Its parts are the same logic the blocking
   version had, and the GATT discovery walk it performs is now a chain of
   continuations rather than two nested loops -- which is exactly the sort of
-  rewrite that compiles and is wrong. Nothing drives it yet.
+  rewrite that compiles and is wrong. Something drives it now: the sync daemon
+  scans through it every cycle, and that scan has run against a real dongle in
+  a room with 37 LE devices in it. Everything past the scan -- connect,
+  discover, subscribe, pair, write -- still waits for a camera to be switched
+  on.
+* The sync daemon **against a camera**. Thirty-one properties are pinned
+  against a fake one, which is a statement about this program's arithmetic and
+  not about a Blackmagic body. The first real cycle is still ahead.
 * Whether the nRF52840's controller will scan, advertise, hold a central link
   to a camera and a peripheral link to a Mac all at once **(unverified: this
   design requires it. What would settle it: the Kconfig for concurrent roles,

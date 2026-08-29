@@ -196,29 +196,41 @@ uses, so a failure has somewhere to arrive.
 
 ## The dongle backend
 
-### No tool drives the dongle's camera half any more
+### The dongle's camera half is driven, but only as far as the scan
 
 The dongle's camera path used to implement `CameraLink` in `src/camera.h`,
 which blocks by contract. It cannot any more: blocking there meant waiting on
 the HCI reader thread, and that thread is gone because the box cannot have one.
 The logic moved to `octo::HciCamera` in `src/camhci.h` -- the same work with
-completion handlers instead of return values -- and the sync daemon that will
-call it is not written.
+completion handlers instead of return values -- and for a while nothing called
+it at all.
 
-So `octomancer --set` and `octomancer-sync` under `--radio=dongle` now print
-that the camera half moved and return no link, instead of returning one that
-would hang. Scanning over the dongle is unaffected and still goes through
-`make_hci_scanner`.
+Something does now. `octomancer-sync --daemon` drives it through
+`src/camasync.h`, and every cycle scans through it. That scan has run against
+a real dongle in a room with 37 LE devices in it and correctly found no
+Blackmagic camera, because there was none switched on. **Everything past the
+scan has still never run against hardware**: connect, discover, subscribe,
+pair, write. `doc/dongle-notes.md` is the table of which line of that is real.
 
-Nothing that ever worked was lost: `doc/dongle-notes.md` records that
-connecting, pairing and writing a clock over a dongle have never been run
-against hardware. But this is a real reduction in what the *tools* can be asked
-to do, and it lasts until the sync daemon exists.
+`octomancer --set` and `octomancer-sync` in its older modes still print that
+the camera half moved and return no link, rather than returning one that would
+hang. Those tools block by construction and there is nothing left for them to
+block on; the daemon is the answer for them too, and it is not yet their
+answer.
 
-**What would settle it:** the sync daemon, or a small `--radio=dongle` path in
-`octomancer` that drives `HciCamera` directly. The second is a couple of
-hundred lines and would also be the first end-to-end exercise `HciCamera` has
-ever had.
+**What would settle the rest of it:** a camera, switched on, and one cycle.
+
+### The daemon and the scanner cannot share one dongle
+
+`hci::Link` has one closed handler, one ATT handler and one SMP handler, so
+the scanner and the camera cannot both attach to a link. Each therefore opens
+its own -- over the same serial port, which macOS permits -- and the two read
+the same byte stream until it collapses, reported as the radio powering off.
+
+On a Mac this is worked around by giving each radio one job: `--radio dongle`
+listens and has no camera, `--radio corebluetooth` listens on this Mac and
+leaves the dongle for the camera. On the box there is one radio and no
+workaround, which is why `doc/TODO.md` now opens with it.
 
 ### `read_status()` is gone rather than stubbed
 

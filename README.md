@@ -16,12 +16,25 @@ Two daemons, and the tools that talk to them. All C++, sharing one library:
 | `octomancer-report` | reads the log the sync daemon leaves behind and says what the clocks are actually doing. |
 | `octomancerctl` | the older, bench-only view of `octomancerd`. Still there; `octomancer` covers more. |
 
-The split between the two daemons is deliberate and is the main design decision
-in the project. `octomancerd` is meant to run all the time under launchd, so it
-is built so that it *cannot* disturb a recording: there is no `connect` and no
-`write` anywhere in it. Setting a clock is an action, and an action belongs in
-a program somebody chose to run — and in one whose Bluetooth grant can be taken
-away on its own, without also blinding the listener.
+The split between the two daemons is deliberate. `octomancerd` is meant to run
+all the time under launchd, so it is built so that it *cannot* disturb a
+recording: there is no `connect` and no `write` anywhere in it. Setting a clock
+is an action, and an action belongs in a program somebody chose to run — and in
+one whose Bluetooth grant can be taken away on its own, without also blinding
+the listener.
+
+That split is on its way out, and this paragraph says so rather than letting it
+be discovered. The target is a screenless box on a rig that has to do both jobs
+with one radio, and a design where they are two executables cannot run there at
+all; running a different architecture on the Mac would then mean the interesting
+code existed twice and was debugged once. `octomancer-sync --daemon` is the
+replacement — one process, one event loop, no threads — and `doc/box-notes.md`
+explains what is given up with it. It is not the daemon you should be running
+yet: on a Mac the only asynchronous camera backend is the dongle's, so without
+one plugged in it listens, answers, and syncs nothing. Until it takes over,
+what protects a recording stops being a binary that structurally cannot write
+and becomes `cameras.conf`, which disables writes for any camera nobody has
+named.
 
 Neither daemon has a user interface. Both serve a Unix socket, and everything
 you look at or press is a separate process asking over it. That is what lets

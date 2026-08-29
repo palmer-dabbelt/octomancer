@@ -14,7 +14,7 @@
 # Usage:
 #   tools/flash-dongle.sh --check              is the toolchain here?
 #   tools/flash-dongle.sh --setup              fetch west, the modules and the SDK
-#   tools/flash-dongle.sh --build              build hci_uart from the submodule
+#   tools/flash-dongle.sh --build [BOARD]      build hci_uart from the submodule
 #   tools/flash-dongle.sh --package IMAGE.hex  wrap a hex file for DFU
 #   tools/flash-dongle.sh --flash PACKAGE.zip  push it to a dongle in DFU mode
 #   tools/flash-dongle.sh --ports              list serial ports that look right
@@ -187,6 +187,31 @@ setup() {
     echo "ready. next: $0 --build"
 }
 
+# The board target has to match the dongle, and getting it wrong does not look
+# like getting it wrong.
+#
+# Every nRF52840 dongle is the same chip, so an image built for the wrong one
+# flashes cleanly, verifies, and is reported as programmed -- and then the
+# dongle never appears on USB again, which is indistinguishable from an empty
+# port. A day went into that. What killed it was the power regulators: Nordic's
+# own PCA10059 enables the high-voltage regulator and switches the core supply
+# to DC/DC, which needs external inductors other modules do not have, so the
+# supply collapses during board init -- before USB, before any LED, before
+# anything that could tell you.
+#
+#     nordic/nrf52840dongle           reg0 okay,     reg1 DCDC
+#     raytac/mdbt50q_cx_40_dongle     reg0 disabled, reg1 LDO
+#
+# So the default is the board this project owns. For a different dongle, find
+# it under third_party/zephyr/boards and name it:
+#
+#     tools/flash-dongle.sh --build nordic/nrf52840dongle/nrf52840
+#
+# The tell that a dongle is not a Nordic one, before this bites: run --info and
+# see where the bootloader lives. Nordic puts it at 0xE0000, Raytac at 0xF4000,
+# and each board's partition file states which it expects.
+DEFAULT_BOARD=raytac_mdbt50q_cx_40_dongle/nrf52840
+
 # hci_uart, not hci_usb, and the difference is the whole thing.
 #
 # hci_usb builds a USB Bluetooth *class* device: its prj.conf sets
@@ -204,19 +229,21 @@ setup() {
 # Building it here rather than shipping a binary keeps this project free of
 # somebody else's compiled code.
 build() {
-    out=${1:-$TP/build-hci}
+    board=${1:-$DEFAULT_BOARD}
+    out=$TP/build-hci
     [ -x "$WEST" ] || die "no west in the tree; run: $0 --setup"
     [ -d "$SDK" ] || die "no Zephyr SDK in the tree; run: $0 --setup"
 
-    echo "building hci_uart for nrf52840dongle into $out ..."
+    echo "building hci_uart for $board into $out ..."
     ZEPHYR_BASE=$TP/zephyr \
     ZEPHYR_TOOLCHAIN_VARIANT=zephyr \
     ZEPHYR_SDK_INSTALL_DIR=$SDK \
-        "$WEST" build -b nrf52840dongle/nrf52840 -d "$out" \
+        "$WEST" build -b "$board" -d "$out" \
         "$TP/zephyr/samples/bluetooth/hci_uart"
     echo "built: $out/zephyr/zephyr.hex"
     echo "next:  $0 --package $out/zephyr/zephyr.hex"
 }
+
 
 # The dongle's bootloader will not take a bare hex file: it wants a DFU
 # package. No signing key is passed, because the Open Bootloader the dongle

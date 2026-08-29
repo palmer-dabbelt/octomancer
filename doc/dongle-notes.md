@@ -271,68 +271,87 @@ What none of them can check is whether real hardware agrees. In particular:
 
 ## What the hardware has actually said
 
-The dongle is a **Raytac MDBT50Q-CX** (see `README.md` for what to look for
-when buying one). It arrived carrying Raytac's factory demonstration firmware
--- `nRF52 USB CDC BLE Demo`, `1915:521a` -- which offers a serial port and does
-not speak HCI over it, so the first run said exactly what it should:
+The dongle is a **Raytac MDBT50Q-CX-40**, and it works. On 2026-08-29, running
+Zephyr's `hci_uart` built for `raytac_mdbt50q_cx_40_dongle/nrf52840`:
 
 ```
-hci -> 01030c00
-octomancer-zoom: Reset: no answer from the controller
+radio: /dev/cu.usbmodem212101, HCI version 13, LMP subversion 0xffff,
+       address C7:49:78:1A:39:60 (random static)
+E9:03:67:A7:D8:F9   rssi -49  "BMPCC"
+    manufacturer 0x043f = 0202e00113
 ```
 
-That verified three small things, and it is worth being precise about how
-small: `list_candidate_ports()` found the port out of `/dev` without being
-told, the port opened and took a write, and the silence afterwards was
-reported as silence rather than becoming a hang.
-
-Then the dongle was flashed, and that is where it stands.
+That last one is a Blackmagic camera -- `0x043f` is their company identifier --
+seen over our own Bluetooth host for the first time.
 
 | Verified against hardware | How |
 |---|---|
 | A dongle is found without being named | `list_candidate_ports()` picked it out of `/dev` unaided |
-| The port opens and is written | the `Reset` reached the wire; `--trace` printed it |
-| Silence is reported as silence | the timeout named the unanswered command instead of hanging |
-| The bootloader works | enters DFU on the button, enumerates as `1915:521f`, accepts a package |
-| The image transfers intact | 123736 bytes, CRC checked by the bootloader at offset 0x1E358, execute acknowledged |
+| The transport carries H:4 both ways | `Reset` answered; `Read Local Version` and `Read BD_ADDR` decoded |
+| The zero-address workaround is needed, and works | `Read BD_ADDR` returned zeros; `Link::init()` installed a random static address, and scanning then worked |
+| Command framing and event parsing | dozens of advertising reports parsed without a desync |
+| The AD decoder | flags, 16- and 128-bit service UUIDs, service data, manufacturer data, tx power and names all decoded |
+| Private addresses are called out | resolvable private addresses are marked `(private)` |
+| Silence is reported as silence | before flashing, the timeout named the unanswered command instead of hanging |
 
-**And then nothing runs.** After a successful `Device programmed.` the dongle
-disappears from the USB bus and does not come back -- not as
-`Zephyr HCI UART sample`, not as anything. An nRF52840 whose firmware never
-starts USB is invisible to the host, so this looks identical to an empty port;
-it is not a case of the image being rejected.
+Still untested: connecting, pairing, and writing a clock. Scanning is receive
+only.
 
-The obvious suspects have been eliminated one at a time:
+## The day it cost, and why
 
-* **Not the HCI firmware.** Zephyr's plain `samples/subsys/usb/cdc_acm` -- 60 KB,
-  no Bluetooth in it at all -- was built, flashed and replugged, and behaves
-  identically. Whatever this is, it is not about `hci_uart`.
-* **Not a bad write.** The DFU trace shows every byte transferred and the
-  bootloader's own CRC agreeing at the end.
-* **Not the procedure.** Zephyr's board documentation for `nrf52840dongle`
-  gives exactly the commands used, down to `--hw-version 52 --sd-req=0x00
-  --application-version 1`.
-* **Not a memory conflict.** The image occupies 0x1000 to 0x1F358; the
-  bootloader lives at 0xE0000.
-* **Not an invalid application.** A bootloader that rejected the image would
-  stay in DFU and enumerate as `Open DFU Bootloader`. It does not: it hands
-  over to something, and that something dies before it reaches USB.
+Between the dongle arriving and that scan, every image flashed cleanly and
+then did nothing at all -- no USB, no LED, invisible on the bus. Four things
+were wrong, and each one hid the next.
 
-The open question is **what address the bootloader actually starts an
-application at**. Our images are linked for 0x1000, which is right if the only
-thing ahead of them is Nordic's MBR. If this dongle also carries a SoftDevice
--- and its factory firmware was a *BLE* demo, which needs one -- then the
-application region begins well above 0x1000, every image so far has been
-running from the wrong address, and the fix is a rebuild with a matching
-`CONFIG_FLASH_LOAD_OFFSET`.
+**`hci_usb` is the wrong sample.** It builds a USB Bluetooth *class* device
+(`CONFIG_SERIAL=n`, `CONFIG_USBD_BT_HCI=y`) with no serial port on it. Linux
+binds that with btusb; macOS has no driver for it, and this project speaks to a
+serial port on both. `hci_uart` is the one whose board file puts HCI on CDC
+ACM.
 
-`tools/flash-dongle.sh --info` asks the bootloader directly rather than
-guessing: it reports the chip, and the type, address and length of each
-installed image. It writes nothing and leaves the dongle in DFU mode, so the
-answer can be acted on in the same session. That is the next thing to run, and
-it needs somebody to hold the button.
+**Neither pip DFU tool works.** `pip install nrfutil` is Python 2 all the way
+down -- `iteritems`, then `xrange`, then integer division returning floats.
+`pip install adafruit-nrfutil` installs and runs and speaks the *older* nRF5
+protocol, so against this bootloader it times out **and then exits 0 printing
+"done"**. Nordic's current `nrfutil` binary is what works; its bundled DFU
+commands are pc-nrfutil 6.1.7, the Python 3 release pip declines to offer
+because it predates the interpreter. The tell is the init packet in the zip:
+69 bytes is secure DFU, 14 bytes is the legacy one that gets ignored.
 
-A note for whoever picks this up: `max_size` in the DFU trace is *not* the
-size of the application region -- it is the protocol's chunk size, 4096 bytes,
-and it says nothing about where the application begins. An hour went into
-inferring the layout from it before that became clear.
+**The DFU button is per-board.** One-button dongles want the button held for a
+second *after* the plug seats. Nordic's two-button PCA10059 wants its sideways
+RESET pressed. The instructions here described the second for a board we do
+not own.
+
+**And the one that cost the day: the board target must match the dongle.**
+Every nRF52840 dongle is the same chip, so an image built for the wrong board
+flashes, verifies, and reports success -- and then never appears again, which
+looks exactly like an empty USB port. The difference that killed it was the
+power regulators:
+
+```
+nordic/nrf52840dongle           reg0 okay,     reg1 DCDC
+raytac/mdbt50q_cx_40_dongle     reg0 disabled, reg1 LDO
+```
+
+Nordic's board enables the high-voltage regulator and switches the core supply
+to DC/DC, which needs external inductors the Raytac module does not have. The
+supply collapses during board init -- before USB, before any LED, before
+anything that could report it.
+
+What made this hard to see is that every cheap explanation was eliminated and
+the answer was still not visible. It is not the HCI firmware: Zephyr's plain
+`cdc_acm` sample, 60 KB with no Bluetooth in it, was equally dead. It is not a
+bad write: the DFU trace shows every byte transferred and the bootloader's own
+CRC agreeing. It is not a rejected image: a bootloader that refuses one stays
+in DFU and says so. It is not the offset: `--info` reported the application at
+0x00001000, exactly where it was linked. An app that toggled *every* GPIO
+blinked nothing, which was the last clue -- no pin can toggle if the core has
+already browned out.
+
+Two things would have found it faster. `tools/flash-dongle.sh --info` asks the
+bootloader where it lives: Nordic puts it at 0xE0000, Raytac at 0xF4000, and
+Raytac's own partition file carries the comment `Nordic nRF5 bootloader
+<0xf4000 0xa000>`. The hardware had been saying it was not a Nordic dongle the
+whole time. And `max_size` in a DFU trace is the protocol's chunk size, not the
+application region -- an hour went into trying to infer the layout from it.

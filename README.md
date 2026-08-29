@@ -921,8 +921,26 @@ tools/flash-dongle.sh --package third_party/build-hci/zephyr/zephyr.hex
 tools/flash-dongle.sh --flash  third_party/build-hci/zephyr/hci_uart_dfu.zip
 ```
 
-Unplug and replug it afterwards. It comes back as `Zephyr HCI UART sample`,
-and `octomancer-zoom --scan 10` is the test that everything works.
+`--build` defaults to the board this project owns. **If yours is a different
+dongle, name its Zephyr board target** -- they are under
+`third_party/zephyr/boards`:
+
+```
+tools/flash-dongle.sh --build nordic/nrf52840dongle/nrf52840
+```
+
+This matters more than it looks. Every nRF52840 dongle is the same chip, so an
+image built for the wrong board flashes, verifies and reports success, and then
+the dongle never appears on USB again -- which is indistinguishable from an
+empty port. Board files differ in how they set the power regulators, and
+Nordic's dongle switches the core supply to DC/DC, which needs inductors other
+modules do not have. Get it wrong and the chip browns out during boot, before
+USB or any LED. `tools/flash-dongle.sh --info` will tell you where the
+bootloader lives, which identifies the board: Nordic at 0xE0000, Raytac at
+0xF4000.
+
+Unplug and replug afterwards, then `octomancer-zoom --scan 10` is the test that
+everything works. It should list every advertiser in the room.
 
 `doc/dongle-notes.md` covers flashing the dongle, what is tested without
 hardware and what is not, and `octomancer-zoom`, the Zoom BTA-1 bench.

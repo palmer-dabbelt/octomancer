@@ -22,17 +22,17 @@
 
 #include <string>
 
+#include "escape.h"
 #include "registry.h"
 
 namespace octo {
 
 inline constexpr int kProtocolVersion = 1;
 
-// Percent-escape anything that would break the tokenizer: space, '=', '%',
-// and every byte outside printable ASCII. Box names are user-set and arrive
-// from the air, so they are assumed hostile.
-std::string escape(const std::string& in);
-std::string unescape(const std::string& in);
+// escape() and unescape() now live in escape.h, which this header includes so
+// that every existing caller keeps working. They moved because the box speaks
+// a different line protocol over a different pipe and needs the same token
+// layer without needing Snapshot.
 
 std::string render_text(const Snapshot& snap);
 std::string render_json(const Snapshot& snap);

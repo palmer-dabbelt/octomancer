@@ -39,6 +39,7 @@
 /Octomancer.app/
 /tests/test_att
 /tests/test_bmd
+/tests/test_boxmsg
 /tests/test_camconf
 /tests/test_camdb
 /tests/test_camsync

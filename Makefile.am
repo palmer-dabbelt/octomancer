@@ -27,6 +27,8 @@ libocto_a_SOURCES = \
 	src/att.h \
 	src/bmd.cc \
 	src/bmd.h \
+	src/boxmsg.cc \
+	src/boxmsg.h \
 	src/camconf.cc \
 	src/camconf.h \
 	src/camdb.cc \
@@ -41,6 +43,8 @@ libocto_a_SOURCES = \
 	src/crypto.h \
 	src/devices.cc \
 	src/devices.h \
+	src/escape.cc \
+	src/escape.h \
 	src/hci.cc \
 	src/hci.h \
 	src/hcilink.cc \
@@ -257,6 +261,7 @@ AM_OBJCXXFLAGS = -fobjc-arc -std=c++17
 check_PROGRAMS = \
 	tests/test_att \
 	tests/test_bmd \
+	tests/test_boxmsg \
 	tests/test_camdb \
 	tests/test_camconf \
 	tests/test_camsync \
@@ -297,6 +302,12 @@ tests_test_pairing_LDADD = libocto.a
 
 tests_test_bmd_SOURCES = tests/test_bmd.cc tests/harness.h
 tests_test_bmd_LDADD = libocto.a
+
+# The message layer the box speaks over all three transports. Hostile input is
+# most of what it pins: names arrive from the air, and a box on a rig answers
+# anyone in range.
+tests_test_boxmsg_SOURCES = tests/test_boxmsg.cc tests/harness.h
+tests_test_boxmsg_LDADD = libocto.a
 
 tests_test_camsync_SOURCES = tests/test_camsync.cc tests/harness.h
 tests_test_camsync_LDADD = libocto.a

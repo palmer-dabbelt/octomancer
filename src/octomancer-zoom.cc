@@ -48,6 +48,7 @@
 #include "att.h"
 #include "hci.h"
 #include "hcilink.h"
+#include "loop.h"
 #include "timeutil.h"
 
 namespace {
@@ -155,71 +156,175 @@ void usage() {
 // ---------------------------------------------------------------- scanning
 
 int do_scan(const Options& opt) {
+  octo::Loop& loop = octo::default_loop();
   hci::Link::Options lo;
   lo.device = opt.device;
   lo.trace = opt.trace;
   std::string err;
-  std::unique_ptr<hci::Link> link = hci::Link::open(lo, &err);
-  if (!link) {
-    std::fprintf(stderr, "octomancer-zoom: %s\n", err.c_str());
-    return 1;
-  }
-  say("radio: %s", link->describe().c_str());
-  say("scanning for %.0f seconds; only changes are printed", opt.seconds);
 
   // Print a device when what it says changes, not on every advertisement.
   // A room produces thousands a minute and almost all of them repeat.
   std::map<std::string, std::string> last;
+  int rc = 0;
 
-  if (!link->start_scan(/*active=*/true, /*filter_duplicates=*/false,
-                        [&](const hci::AdvReport& r) {
-                          std::string id = hci::address_to_string(r.addr);
-                          std::string text = hci::to_hex(r.data);
-                          auto it = last.find(id);
-                          if (it != last.end() && it->second == text) return;
-                          last[id] = text;
+  std::unique_ptr<hci::Link> link = hci::Link::open(
+      &loop, lo,
+      [&](bool ok, const std::string& why) {
+        if (!ok) {
+          std::fprintf(stderr, "octomancer-zoom: %s\n", why.c_str());
+          rc = 1;
+          loop.stop();
+          return;
+        }
+        say("radio: %s", link->describe().c_str());
+        say("scanning for %.0f seconds; only changes are printed",
+            opt.seconds);
+        link->start_scan(
+            /*active=*/true, /*filter_duplicates=*/false,
+            [&](const hci::AdvReport& r) {
+              std::string id = hci::address_to_string(r.addr);
+              std::string text = hci::to_hex(r.data);
+              auto it = last.find(id);
+              if (it != last.end() && it->second == text) return;
+              last[id] = text;
 
-                          hci::AdInfo info =
-                              hci::summarise_ad(hci::parse_ad(r.data));
-                          say("%s %s rssi %d%s", id.c_str(),
-                              hci::address_is_stable(r.addr) ? "       "
-                                                             : "(private)",
-                              r.rssi,
-                              info.name.empty()
-                                  ? ""
-                                  : ("  \"" + info.name + "\"").c_str());
-                          for (const std::string& line :
-                               hci::describe_ad(r.data)) {
-                            say("    %s", line.c_str());
-                          }
-                        },
-                        &err)) {
-    std::fprintf(stderr, "octomancer-zoom: %s\n", err.c_str());
-    return 1;
-  }
-
-  double until = mono_now() + opt.seconds;
-  while (!g_stop && mono_now() < until) {
-    struct timespec ts = {0, 200 * 1000 * 1000};
-    nanosleep(&ts, nullptr);
-  }
-  link->stop_scan(nullptr);
-  say("saw %zu distinct devices", last.size());
-  return 0;
-}
-
-// ------------------------------------------------------------------- dump
-
-int do_dump(const Options& opt) {
-  hci::Link::Options lo;
-  lo.device = opt.device;
-  lo.trace = opt.trace;
-  std::string err;
-  std::unique_ptr<hci::Link> link = hci::Link::open(lo, &err);
+              hci::AdInfo info = hci::summarise_ad(hci::parse_ad(r.data));
+              say("%s %s rssi %d%s", id.c_str(),
+                  hci::address_is_stable(r.addr) ? "       " : "(private)",
+                  r.rssi,
+                  info.name.empty() ? ""
+                                    : ("  \"" + info.name + "\"").c_str());
+              for (const std::string& line : hci::describe_ad(r.data)) {
+                say("    %s", line.c_str());
+              }
+            },
+            [&](bool started, const std::string& scan_err) {
+              if (started) return;
+              std::fprintf(stderr, "octomancer-zoom: %s\n", scan_err.c_str());
+              rc = 1;
+              loop.stop();
+            });
+      },
+      &err);
   if (!link) {
     std::fprintf(stderr, "octomancer-zoom: %s\n", err.c_str());
     return 1;
   }
+
+  loop.after(opt.seconds, [&] { loop.stop(); });
+  // Ctrl-C is the usual way this ends. A signal cannot touch the loop, so it
+  // sets a flag and the loop notices -- which is what Loop::wake() exists for,
+  // but a fifth of a second of latency on quitting is not worth the plumbing.
+  loop.every(0.2, [&] {
+    if (g_stop) loop.stop();
+  });
+  loop.run();
+
+  link->stop_scan(nullptr);
+  say("saw %zu distinct devices", last.size());
+  return rc;
+}
+
+// ------------------------------------------------------------------- dump
+
+// Walking a whole attribute table, one question at a time.
+//
+// The blocking version was two nested for loops. Here the same walk is two
+// mutually recursive steps, because each one has to wait for an answer that
+// arrives on the loop -- and holding the position in members rather than on
+// the stack is the whole of the difference.
+struct TableWalk {
+  octo::Loop* loop = nullptr;
+  hci::Link* link = nullptr;
+  uint16_t conn = 0;
+  uint16_t cursor = 0x0001;
+  int round = 0;
+  int printed = 0;
+  std::vector<att::HandleUuid> descs;
+  size_t index = 0;
+
+  void start() { next_batch(); }
+
+  void finish() {
+    say("%d attributes", printed);
+    link->disconnect(conn);
+    loop->stop();
+  }
+
+  void next_batch() {
+    if (round >= 64 || cursor == 0 || g_stop) return finish();
+    ++round;
+    link->att_request(
+        conn, att::find_information_request(cursor, 0xffff), 10.0,
+        [this](bool ok, const std::vector<uint8_t>& rsp, const std::string&) {
+          descs.clear();
+          index = 0;
+          if (!ok || !att::parse_find_information_response(rsp, &descs) ||
+              descs.empty()) {
+            // An Error Response: the end of the table.
+            return finish();
+          }
+          next_desc();
+        });
+  }
+
+  void next_desc() {
+    if (index >= descs.size()) return next_batch();
+    const att::HandleUuid d = descs[index];
+    // Read anything readable. A characteristic declaration decodes into the
+    // properties and the value handle, which is the map of the device.
+    link->att_request(
+        conn, att::read_request(d.handle), 5.0,
+        [this, d](bool ok, const std::vector<uint8_t>& read_rsp,
+                  const std::string&) {
+          std::string line = "handle 0x" + std::to_string(d.handle) + "  " +
+                             hci::uuid_to_string(d.uuid);
+          std::vector<uint8_t> value;
+          if (ok) {
+            att::ErrorResponse e;
+            if (att::parse_error_response(read_rsp, &e)) {
+              line += "  (" + std::string(att::error_name(e.error)) + ")";
+            } else if (att::parse_read_response(read_rsp, &value)) {
+              if (d.uuid == hci::uuid_from_16(att::kUuidCharacteristic) &&
+                  value.size() >= 5) {
+                hci::Uuid cu;
+                hci::uuid_from_le(value.data() + 3, value.size() - 3, &cu);
+                line += "  char " + hci::uuid_to_string(cu) + " [" +
+                        att::properties_to_string(value[0]) +
+                        "] value handle 0x" +
+                        std::to_string(value[1] | (value[2] << 8));
+              } else if (d.uuid ==
+                         hci::uuid_from_16(att::kUuidPrimaryService)) {
+                hci::Uuid su;
+                hci::uuid_from_le(value.data(), value.size(), &su);
+                line += "  service " + hci::uuid_to_string(su);
+              } else {
+                bool printable = !value.empty();
+                for (uint8_t b : value) {
+                  if (b < 0x20 || b > 0x7e) printable = false;
+                }
+                line += "  = " + hci::to_hex(value);
+                if (printable) {
+                  line += "  \"" + std::string(value.begin(), value.end()) +
+                          "\"";
+                }
+              }
+            }
+          }
+          say("%s", line.c_str());
+          ++printed;
+          cursor = d.handle == 0xffff ? 0 : static_cast<uint16_t>(d.handle + 1);
+          ++index;
+          next_desc();
+        });
+  }
+};
+
+int do_dump(const Options& opt) {
+  octo::Loop& loop = octo::default_loop();
+  hci::Link::Options lo;
+  lo.device = opt.device;
+  lo.trace = opt.trace;
 
   hci::Address peer;
   if (!hci::address_from_string(opt.address, &peer)) {
@@ -228,87 +333,79 @@ int do_dump(const Options& opt) {
     return 1;
   }
 
-  uint16_t conn = 0;
-  bool ok = false;
-  for (uint8_t type : {hci::kAddrPublic, hci::kAddrRandom}) {
-    peer.type = type;
-    say("connecting to %s (%s)", opt.address.c_str(),
-        type == hci::kAddrPublic ? "public" : "random");
-    if (link->connect(peer, 15.0, &conn, &err)) {
-      ok = true;
-      break;
-    }
-    say("  %s", err.c_str());
-  }
-  if (!ok) return 1;
-  say("connected, handle 0x%04x", conn);
+  std::string err;
+  int rc = 0;
+  TableWalk walk;
 
-  std::vector<uint8_t> rsp;
-  if (link->att_request(conn, att::exchange_mtu_request(247), &rsp, 5.0,
-                        nullptr)) {
-    uint16_t mtu = 0;
-    if (att::parse_exchange_mtu_response(rsp, &mtu)) say("MTU %u", mtu);
-  }
+  // The address type is not in the printed form, so both are tried in turn. A
+  // request with the wrong type is simply never answered.
+  const std::vector<uint8_t> types = {hci::kAddrPublic, hci::kAddrRandom};
+  std::function<void(size_t)> try_type;
 
-  // Walk every attribute rather than only the services. On a device whose
-  // profile is the thing under investigation, the descriptors and their user
-  // descriptions are exactly the interesting part -- "Server TX Data" is how
-  // these characteristics got their names in the first place.
-  uint16_t cursor = 0x0001;
-  int printed = 0;
-  for (int round = 0; round < 64 && cursor != 0; ++round) {
-    if (!link->att_request(conn, att::find_information_request(cursor, 0xffff),
-                           &rsp, 10.0, &err)) {
-      break;
-    }
-    std::vector<att::HandleUuid> descs;
-    if (!att::parse_find_information_response(rsp, &descs) || descs.empty()) {
-      break;  // an Error Response: the end of the table
-    }
-    for (const att::HandleUuid& d : descs) {
-      std::string line = "handle 0x" + std::to_string(d.handle) + "  " +
-                         hci::uuid_to_string(d.uuid);
-      // Read anything readable. A characteristic declaration decodes into the
-      // properties and the value handle, which is the map of the device.
-      std::vector<uint8_t> value;
-      std::vector<uint8_t> read_rsp;
-      if (link->att_request(conn, att::read_request(d.handle), &read_rsp, 5.0,
-                            nullptr)) {
-        att::ErrorResponse e;
-        if (att::parse_error_response(read_rsp, &e)) {
-          line += "  (" + std::string(att::error_name(e.error)) + ")";
-        } else if (att::parse_read_response(read_rsp, &value)) {
-          if (d.uuid == hci::uuid_from_16(att::kUuidCharacteristic) &&
-              value.size() >= 5) {
-            hci::Uuid cu;
-            hci::uuid_from_le(value.data() + 3, value.size() - 3, &cu);
-            line += "  char " + hci::uuid_to_string(cu) + " [" +
-                    att::properties_to_string(value[0]) + "] value handle 0x" +
-                    std::to_string(value[1] | (value[2] << 8));
-          } else if (d.uuid == hci::uuid_from_16(att::kUuidPrimaryService)) {
-            hci::Uuid su;
-            hci::uuid_from_le(value.data(), value.size(), &su);
-            line += "  service " + hci::uuid_to_string(su);
-          } else {
-            bool printable = !value.empty();
-            for (uint8_t b : value) {
-              if (b < 0x20 || b > 0x7e) printable = false;
-            }
-            line += "  = " + hci::to_hex(value);
-            if (printable) {
-              line += "  \"" + std::string(value.begin(), value.end()) + "\"";
-            }
-          }
+  std::unique_ptr<hci::Link> link;
+  link = hci::Link::open(
+      &loop, lo,
+      [&](bool ok, const std::string& why) {
+        if (!ok) {
+          std::fprintf(stderr, "octomancer-zoom: %s\n", why.c_str());
+          rc = 1;
+          loop.stop();
+          return;
         }
-      }
-      say("%s", line.c_str());
-      ++printed;
-      cursor = d.handle == 0xffff ? 0 : static_cast<uint16_t>(d.handle + 1);
-    }
+        try_type(0);
+      },
+      &err);
+  if (!link) {
+    std::fprintf(stderr, "octomancer-zoom: %s\n", err.c_str());
+    return 1;
   }
-  say("%d attributes", printed);
-  link->disconnect(conn);
-  return 0;
+
+  try_type = [&](size_t i) {
+    if (i >= types.size()) {
+      rc = 1;
+      loop.stop();
+      return;
+    }
+    hci::Address target = peer;
+    target.type = types[i];
+    say("connecting to %s (%s)", opt.address.c_str(),
+        target.type == hci::kAddrPublic ? "public" : "random");
+    link->connect(target, 15.0,
+                  [&, i](bool ok, uint16_t conn, const std::string& why) {
+                    if (!ok) {
+                      say("  %s", why.c_str());
+                      try_type(i + 1);
+                      return;
+                    }
+                    say("connected, handle 0x%04x", conn);
+                    link->att_request(
+                        conn, att::exchange_mtu_request(247), 5.0,
+                        [&, conn](bool got, const std::vector<uint8_t>& rsp,
+                                  const std::string&) {
+                          uint16_t mtu = 0;
+                          if (got &&
+                              att::parse_exchange_mtu_response(rsp, &mtu)) {
+                            say("MTU %u", mtu);
+                          }
+                          // Walk every attribute rather than only the
+                          // services. On a device whose profile is the thing
+                          // under investigation, the descriptors and their
+                          // user descriptions are exactly the interesting part
+                          // -- "Server TX Data" is how these characteristics
+                          // got their names in the first place.
+                          walk.loop = &loop;
+                          walk.link = link.get();
+                          walk.conn = conn;
+                          walk.start();
+                        });
+                  });
+  };
+
+  loop.every(0.2, [&] {
+    if (g_stop) loop.stop();
+  });
+  loop.run();
+  return rc;
 }
 
 // ------------------------------------------------------------------ serve
@@ -348,16 +445,30 @@ bool build_adv(const Options& opt, std::vector<uint8_t>* out,
 }
 
 int serve(const Options& opt, const std::vector<Options>& variants) {
+  octo::Loop& loop = octo::default_loop();
   hci::Link::Options lo;
   lo.device = opt.device;
   lo.trace = opt.trace;
   std::string err;
-  std::unique_ptr<hci::Link> link = hci::Link::open(lo, &err);
+  int rc = 0;
+
+  std::unique_ptr<hci::Link> link;
+  link = hci::Link::open(
+      &loop, lo,
+      [&](bool ok, const std::string& why) {
+        if (!ok) {
+          std::fprintf(stderr, "octomancer-zoom: %s\n", why.c_str());
+          rc = 1;
+          loop.stop();
+          return;
+        }
+        say("radio: %s", link->describe().c_str());
+      },
+      &err);
   if (!link) {
     std::fprintf(stderr, "octomancer-zoom: %s\n", err.c_str());
     return 1;
   }
-  say("radio: %s", link->describe().c_str());
 
   // The profile, hosted exactly as the adapter presents it.
   att::ServerBuilder b;
@@ -437,7 +548,16 @@ int serve(const Options& opt, const std::vector<Options>& variants) {
   double variant_until = 0;
   double next_tick = 0;
 
-  while (!g_stop) {
+  // The old shape was a 200 ms poll around nanosleep. It is a 200 ms timer
+  // now, and deliberately nothing cleverer: the two things it watches -- a
+  // sweep that rotates every twenty-five seconds, and a notification once a
+  // second -- are both far slower than the tick, and a faithful translation is
+  // worth more here than an elegant one.
+  loop.every(0.2, [&] {
+    if (g_stop) {
+      loop.stop();
+      return;
+    }
     // Rotate the advertisement when sweeping and nothing has connected.
     if (!have_conn && mono_now() >= variant_until) {
       const Options& v = variants[variant % variants.size()];
@@ -452,17 +572,21 @@ int serve(const Options& opt, const std::vector<Options>& variants) {
         cfg.scan_response = v.scan_response;
         cfg.type = hci::kAdvInd;
         cfg.interval_ms = v.interval_ms;
-        if (!link->start_advertising(cfg, &err)) {
-          say("could not advertise: %s", err.c_str());
-        } else {
-          say("advertising %s", hci::to_hex(adv).c_str());
-          for (const std::string& line : hci::describe_ad(adv)) {
-            say("    %s", line.c_str());
-          }
-          if (!v.scan_response.empty()) {
-            say("  scan response %s", hci::to_hex(v.scan_response).c_str());
-          }
-        }
+        std::vector<uint8_t> scan_response = v.scan_response;
+        link->start_advertising(
+            cfg, [adv, scan_response](bool ok, const std::string& adv_err) {
+              if (!ok) {
+                say("could not advertise: %s", adv_err.c_str());
+                return;
+              }
+              say("advertising %s", hci::to_hex(adv).c_str());
+              for (const std::string& line : hci::describe_ad(adv)) {
+                say("    %s", line.c_str());
+              }
+              if (!scan_response.empty()) {
+                say("  scan response %s", hci::to_hex(scan_response).c_str());
+              }
+            });
       }
       ++variant;
       variant_until = mono_now() + (variants.size() > 1 ? 25.0 : 1e9);
@@ -480,14 +604,13 @@ int serve(const Options& opt, const std::vector<Options>& variants) {
         next_tick = opt.tick ? now + 1.0 : 1e9;
       }
     }
+  });
 
-    struct timespec ts = {0, 200 * 1000 * 1000};
-    nanosleep(&ts, nullptr);
-  }
+  loop.run();
 
   link->stop_advertising(nullptr);
   if (have_conn) link->disconnect(conn);
-  return 0;
+  return rc;
 }
 
 // The parts of the advertisement the notes leave genuinely open. Each is a

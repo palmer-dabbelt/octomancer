@@ -79,4 +79,12 @@ void FakeLoop::advance(double seconds) {
   }
 }
 
+SourceId FakeLoop::last_source() const {
+  for (size_t i = sources().size(); i > 0; --i) {
+    const Source& s = sources()[i - 1];
+    if (!s.dead) return s.id;
+  }
+  return kNoSource;
+}
+
 }  // namespace octo

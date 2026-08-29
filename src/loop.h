@@ -196,6 +196,19 @@ class Loop {
 // The loop for this host. poll(2) everywhere this program builds today.
 std::unique_ptr<Loop> make_loop();
 
+// The one loop this process waits in.
+//
+// A global, for the same reason radio_options() is one: the radio factories
+// are called from places that have no business knowing about each other, and
+// threading a loop through every signature would be a change to all of them
+// for the benefit of one argument. There is exactly one loop per process by
+// construction -- that is the whole point of the design -- so a second one
+// would be a bug rather than a configuration.
+//
+// Constructed on first use and never destroyed. Nothing here is worth the
+// static-destruction order problem that owning it properly would create.
+Loop& default_loop();
+
 }  // namespace octo
 
 #endif  // OCTO_LOOP_H

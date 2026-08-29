@@ -272,6 +272,7 @@ check_PROGRAMS = \
 	tests/test_jsonlog \
 	tests/test_logscan \
 	tests/test_loop \
+	tests/test_hcilink \
 	tests/test_pairing \
 	tests/test_proclock \
 	tests/test_proto \
@@ -337,6 +338,9 @@ tests_test_logscan_LDADD = libocto.a
 # the wall clock, which is the whole reason the backend is abstract.
 tests_test_loop_SOURCES = tests/test_loop.cc tests/harness.h
 tests_test_loop_LDADD = libocto.a
+
+tests_test_hcilink_SOURCES = tests/test_hcilink.cc tests/harness.h
+tests_test_hcilink_LDADD = libocto.a
 
 # The dongle's codecs. All four run on a machine with no dongle in it, which is
 # the whole argument for having written them as portable C++ rather than as

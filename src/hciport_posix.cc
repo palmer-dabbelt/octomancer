@@ -39,6 +39,12 @@ class PosixPort : public Port {
   PosixPort(int fd, std::string name) : fd_(fd), name_(std::move(name)) {}
   ~PosixPort() override { close(); }
 
+  Handle handle() const override {
+    Handle h;
+    h.fd = fd_;
+    return h;
+  }
+
   int read(uint8_t* buf, size_t len, double timeout) override {
     if (fd_ < 0) return -1;
     struct pollfd pfd;

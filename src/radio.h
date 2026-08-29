@@ -92,7 +92,21 @@ std::string describe_radio();
 std::unique_ptr<Scanner> make_hci_scanner(Scanner::AdvertHandler on_advert,
                                           Scanner::SightingHandler on_camera,
                                           Scanner::StateHandler on_state);
-std::unique_ptr<CameraLink> make_hci_camera_link();
+
+// There is deliberately no make_hci_camera_link().
+//
+// CameraLink blocks by contract, and the dongle's camera half no longer can:
+// it waits on a reader thread that no longer exists, and a thread is the one
+// thing the box cannot have. Its replacement is octo::HciCamera in
+// src/camhci.h, which is the same logic on the loop with completions instead
+// of return values, and which the sync daemon will use. Until that daemon
+// exists, asking for a camera over the dongle says so rather than returning a
+// link that would hang -- see make_camera_link() in radio_camera.cc.
+//
+// Nothing is lost by this that ever worked: doc/dongle-notes.md records that
+// connecting, pairing and writing a clock over a dongle have never been run
+// against hardware. Scanning has, and scanning still goes through
+// make_hci_scanner above.
 
 #ifdef OCTO_HAVE_COREBLUETOOTH
 // The CoreBluetooth backends. These are what make_ble_scanner and

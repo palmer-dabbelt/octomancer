@@ -10,6 +10,14 @@
 // decide, maybe write, sleep -- and a callback-shaped API would turn that into
 // a state machine for no gain. CoreBluetooth's callbacks arrive on a private
 // dispatch queue and are turned back into return values behind this interface.
+//
+// That is now true of CoreBluetooth only. The dongle used to implement this as
+// well, and cannot any more: blocking here means waiting for a reader thread,
+// and the box has no threads to wait for -- see src/loop.h for why that is a
+// property of the toolchain rather than a preference. The dongle's camera half
+// is octo::HciCamera in src/camhci.h, which is the same logic with completion
+// handlers instead of return values. This interface stays as it is for as long
+// as CoreBluetooth is behind it and the tools above it are written as loops.
 #ifndef OCTO_CAMERA_H
 #define OCTO_CAMERA_H
 

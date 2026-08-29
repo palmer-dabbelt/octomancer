@@ -47,6 +47,7 @@
 /tests/test_devices
 /tests/test_crypto
 /tests/test_hci
+/tests/test_hcilink
 /tests/test_jsonlog
 /tests/test_logscan
 /tests/test_loop

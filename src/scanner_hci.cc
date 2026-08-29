@@ -5,6 +5,14 @@
 // notice a Blackmagic camera by the service it advertises rather than by its
 // name. Nothing connects to anything here.
 //
+// Starting is now in two parts, which is what the shared Scanner interface was
+// always shaped for. Opening the port either works or does not and says so
+// straight away; the controller coming up and the scan actually starting are
+// several round trips later, and arrive as a state report -- the same way
+// CoreBluetooth has always reported them. A caller that watches on_state
+// rather than the return value of start() behaves identically over both
+// radios.
+//
 // One difference is visible to callers and worth stating plainly, because it
 // affects stored state. CoreBluetooth hands out an opaque per-host UUID for
 // each device; HCI hands out the real Bluetooth address. Both are stable
@@ -44,7 +52,10 @@ class HciScanner : public Scanner {
     opts.trace = radio_options().trace;
 
     std::string open_err;
-    link_ = hci::Link::open(opts, &open_err);
+    link_ = hci::Link::open(
+        &default_loop(), opts,
+        [this](bool ok, const std::string& why) { on_ready(ok, why); },
+        &open_err);
     if (!link_) {
       // "unsupported" is the word octomancerd already prints when a host has
       // no radio, and hci::no_port_found is how a missing dongle is told apart
@@ -53,18 +64,12 @@ class HciScanner : public Scanner {
       if (err) *err = open_err;
       return false;
     }
-
-    // Duplicate filtering off. The controller would otherwise report each
-    // device once and never again, and a Tentacle's whole value is that it
-    // repeats its clock several times a second.
-    if (!link_->start_scan(/*active=*/false, /*filter_duplicates=*/false,
-                           [this](const hci::AdvReport& r) { on_report(r); },
-                           err)) {
+    // The dongle being unplugged mid-scan is the same event to a caller as the
+    // radio being switched off, and is the one thing that must not pass
+    // silently: a scanner reporting nothing looks exactly like a quiet room.
+    link_->set_closed_handler([this](const std::string&) {
       report("poweredOff");
-      link_.reset();
-      return false;
-    }
-    report("poweredOn");
+    });
     return true;
   }
 
@@ -77,6 +82,24 @@ class HciScanner : public Scanner {
  private:
   void report(const std::string& state) {
     if (on_state_) on_state_(state);
+  }
+
+  void on_ready(bool ok, const std::string& why) {
+    if (!ok) {
+      // The port opened and the controller would not come up. That is a broken
+      // dongle rather than an absent one, so it is not "unsupported".
+      report("poweredOff");
+      (void)why;
+      return;
+    }
+    // Duplicate filtering off. The controller would otherwise report each
+    // device once and never again, and a Tentacle's whole value is that it
+    // repeats its clock several times a second.
+    link_->start_scan(/*active=*/false, /*filter_duplicates=*/false,
+                      [this](const hci::AdvReport& r) { on_report(r); },
+                      [this](bool started, const std::string&) {
+                        report(started ? "poweredOn" : "poweredOff");
+                      });
   }
 
   void on_report(const hci::AdvReport& r) {

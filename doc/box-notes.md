@@ -188,8 +188,9 @@ terminal, so the protocol and the box's behaviour get debugged over a
 transport that cannot itself be the thing that is broken. Only then is BLE
 added, at which point a failure is known to be the radio's.
 
-1. The loop, and de-threading the radio path. **Done for the loop.**
+1. The loop, and de-threading the radio path. **Done.**
 2. The protocol codec, and the persistence record formats. Portable, tested.
+   **Codec done; the record formats are not.**
 3. The Mac sync daemon and control daemon. The churn.
 4. Standalone firmware over USB.
 5. BLE control, and the status broadcast.
@@ -199,6 +200,42 @@ Step 4 depends on something that has never been tested: **connecting, pairing
 and writing a clock over the dongle**. Scanning is the only thing that has
 ever worked. That is a real prerequisite risk and it is best answered from the
 Mac, where there is a debugger and `--trace`, before any of it is firmware.
+
+Half of that risk is now retired, and it is worth being exact about which
+half. `tests/test_hcilink.cc` drives the whole HCI host -- bring-up,
+connecting, discovery, an ATT request that times out, flow control, a peer
+that vanishes -- against a controller made of canned bytes and a clock that is
+a variable. So the *host's* arithmetic has been exercised. What has still
+never happened is a real controller answering it. When the dongle is finally
+pointed at a camera, a failure is now much more likely to be the controller's
+behaviour or the camera's than this program's bookkeeping, and that is a
+different and much cheaper thing to debug.
+
+### What de-threading the radio path actually changed
+
+The reader thread is gone from `src/hcilink.cc`, and with it four mutexes and
+two condition variables. What replaced each of them is a queue, because a
+queue is what each lock was standing in for:
+
+| Was | Is |
+| --- | --- |
+| `command_mu_`, one command at a time | a command queue, one in flight |
+| `att_request_mu_`, one ATT request across *all* connections | one in flight **per connection**, queued per connection |
+| `cv_` waiting on `acl_credits_` | fragments queued against the controller's credits, capped at 64 |
+| `mu_` guarding every field | nothing; there is one thread |
+
+The per-connection change is a real improvement rather than a translation: ATT
+permits one outstanding request per direction per connection, and the old
+single mutex made a slow camera stall a fast one.
+
+Two things it cost. `hci::Link::open()` no longer returns a link that is ready
+to use -- bring-up is half a dozen round trips, so readiness arrives as a
+callback -- and `CameraLink` in `src/camera.h` can no longer be implemented
+over the dongle, because that interface blocks by contract and there is
+nothing left to block on. The replacement is `octo::HciCamera` in
+`src/camhci.h`. Nothing that ever worked was lost by that: `doc/dongle-notes.md`
+records that the dongle's camera path has never been run against hardware.
+Asking for it now prints why rather than returning a link that would hang.
 
 ## What lives in flash
 
@@ -291,7 +328,13 @@ is.
 
 ## What is untested, plainly
 
-* Connecting, pairing and writing a clock over the dongle. Never done.
+* Connecting, pairing and writing a clock over the dongle **against real
+  hardware**. Never done. The host side of all three is now tested against a
+  scripted controller; the controller has never answered for itself.
+* `octo::HciCamera` end to end. Its parts are the same logic the blocking
+  version had, and the GATT discovery walk it performs is now a chain of
+  continuations rather than two nested loops -- which is exactly the sort of
+  rewrite that compiles and is wrong. Nothing drives it yet.
 * Whether the nRF52840's controller will scan, advertise, hold a central link
   to a camera and a peripheral link to a Mac all at once **(unverified: this
   design requires it. What would settle it: the Kconfig for concurrent roles,
@@ -300,4 +343,6 @@ is.
 * Every byte layout in the protocol and the broadcast, which are not yet
   written.
 
-The loop is the only part of this document that exists and runs.
+The loop, the message codec and the HCI host are the parts of this document
+that exist and run. Everything below the "order of work" heading past step 2
+is still description.

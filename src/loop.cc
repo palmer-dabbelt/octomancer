@@ -217,4 +217,9 @@ bool Loop::tick(double max_wait) {
   return running_;
 }
 
+Loop& default_loop() {
+  static Loop* loop = make_loop().release();
+  return *loop;
+}
+
 }  // namespace octo

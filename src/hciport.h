@@ -12,6 +12,8 @@
 #include <string>
 #include <vector>
 
+#include "loop.h"
+
 namespace octo {
 namespace hci {
 
@@ -22,10 +24,20 @@ class Port {
  public:
   virtual ~Port() = default;
 
-  // Blocks up to `timeout` seconds. Returns the number of bytes read, 0 on
-  // timeout, and -1 on a closed or broken port -- the last of which is what
-  // unplugging the dongle looks like, and has to be distinguishable from a
-  // quiet radio.
+  // What the loop waits on. A POSIX port fills in the descriptor; a Zephyr
+  // port fills in a poll event; a test port fills in itself. This is how the
+  // link stopped needing a thread: the port is a source like any other, and
+  // reading happens when there is something to read.
+  virtual Handle handle() const = 0;
+
+  // Returns the number of bytes read, 0 when there were none, and -1 on a
+  // closed or broken port -- the last of which is what unplugging the dongle
+  // looks like, and has to be distinguishable from a quiet radio.
+  //
+  // `timeout` is what it always was, but the loop passes zero: it only calls
+  // this once the handle is already readable, so there is nothing to wait for.
+  // A non-zero timeout still blocks, which is why nothing on the loop's thread
+  // ever passes one.
   virtual int read(uint8_t* buf, size_t len, double timeout) = 0;
 
   // Writes everything or fails. A partial HCI command on the wire desyncs the

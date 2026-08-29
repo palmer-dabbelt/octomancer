@@ -51,6 +51,13 @@ class FakeLoop : public Loop {
   // class advances time only in order to deliver something.
   void jump(double seconds) { now_ += seconds; }
 
+  // The most recently added source that is still live.
+  //
+  // Test support, and narrow on purpose. A class that registers its own source
+  // -- hci::Link does, from inside attach() -- never hands the id back, so
+  // without this a test has no way to say "the port has bytes on it".
+  SourceId last_source() const;
+
   // How many times the loop has waited. A test that asserts a predicate was
   // already true checks this is zero.
   int waits() const { return waits_; }

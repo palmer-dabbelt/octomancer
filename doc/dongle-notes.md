@@ -294,8 +294,22 @@ seen over our own Bluetooth host for the first time.
 | Private addresses are called out | resolvable private addresses are marked `(private)` |
 | Silence is reported as silence | before flashing, the timeout named the unanswered command instead of hanging |
 
-Still untested: connecting, pairing, and writing a clock. Scanning is receive
-only.
+Still untested against hardware: connecting, pairing, and writing a clock.
+Scanning is receive only.
+
+That list has not got shorter, but the doubt behind it has. As of 2026-08-29
+the HCI host has no reader thread: it runs on the event loop in `src/loop.h`,
+and `tests/test_hcilink.cc` drives it against a controller made of canned bytes
+with the clock held as a variable. Bring-up including the zero-address
+workaround, connecting, an ATT request that goes unanswered, a notification
+arriving mid-request, ACL flow control, a peer that disconnects with a request
+outstanding, and the dongle being unplugged are all exercised with no hardware
+present and no wall-clock time spent.
+
+So the table above is still the only column of this document backed by a real
+controller. What has changed is that a failure on the day this is finally
+pointed at a camera is much more likely to be the controller's behaviour or
+the camera's than this host's own bookkeeping.
 
 ## The day it cost, and why
 

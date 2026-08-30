@@ -31,26 +31,32 @@ worktree -- so if you find yourself under `.claude/worktrees/`, leave with the
 
 ## Traps that have already cost hours
 
-**A missing Bluetooth grant looks exactly like an empty room.** When macOS has
-not granted a daemon Bluetooth, CoreBluetooth never calls back at all: no
-error, no prompt, no state. Under launchd there is nobody to prompt, so it
-fails silently and forever. The tells are `"radio":"unknown"` with zero adverts
-in the JSONL, and "Bluetooth did not report a state" in the daemon's `.err`.
-`octomancer status` now says so directly when the device list is empty --
-that line exists because this was diagnosed the slow way once.
+**A missing Bluetooth grant looks exactly like an empty room, and installing
+sometimes causes one.** When macOS has not granted a daemon Bluetooth,
+CoreBluetooth never calls back at all: no error, no prompt, no state. Under
+launchd there is nobody to prompt, so it fails silently and forever, and every
+other symptom is identical to "nothing is switched on".
 
-Only the user can grant it, in System Settings > Privacy & Security >
-Bluetooth. Running the binary once from a terminal usually raises the prompt.
+Recognise it by: `"radio":"unknown"` with zero adverts in the JSONL,
+"Bluetooth did not report a state" in the daemon's `.err`, and -- since
+2026-08-30 -- octomancerd saying so on its own console ten seconds in, plus
+`octomancer status` saying so whenever the device list is empty.
 
-**This is *not* caused by rebuilding, and an earlier version of this note said
-it was.** The daemons embed an Info.plist via `-Wl,-sectcreate` precisely so
-macOS has a stable identity to remember the answer against -- see the comment
-in `launchd/com.dabbelt.octomancerd.plist`. Measured on 2026-08-30:
-octomancerd's cdhash went from `526d6e2f` to `2bd2c463` across a rebuild and
-`make install`, and the daemons kept the radio across a restart. So do not tell
-somebody their bench will go quiet after installing; it will not. The morning
-that was lost went to an unrelated radio bug, plus a grant that had gone
-missing for reasons still unknown.
+Only Palmer can fix it, in System Settings > Privacy & Security > Bluetooth.
+**So: after `make install`, check `octomancer status`. If the radio never
+reports, say so and ask him to re-approve -- do not go looking for a bug in the
+radio code.**
+
+*The mechanism is not understood, and this note has twice claimed one
+confidently and been wrong.* First it said a rebuild always loses the grant,
+because the binaries are ad-hoc signed and the cdhash changes. Then it said a
+rebuild never loses it, because the embedded Info.plist gives macOS a stable
+identity to remember the answer against. Observed on 2026-08-30: two
+rebuild-and-install cycles kept the grant and a third lost it, all with
+different cdhashes. Neither story explains all three. Do not add a fourth
+explanation without evidence that covers every observation -- being able to
+predict *when* it happens is worth something, and a confident wrong rule is
+worth less than none.
 
 **Every GitHub clone fails here, whatever URL you use.** The global git config
 rewrites GitHub to SSH:

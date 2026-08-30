@@ -265,6 +265,10 @@ void log_alert(octo::JsonLog* log, const octo::AlertEvent& e) {
 // most one device's last-seen time being a little early, and nothing else.
 const double kSaveInterval = 30.0;
 
+// How long to wait for the radio to say anything before deciding that silence
+// is itself the answer. See the check in the main loop.
+const double kRadioSilentAfter = 10.0;
+
 // Failing to save is reported once and then carried on from, deliberately. A
 // full disk or a read-only home should not stop a daemon whose actual job is
 // listening to a radio -- but it must not be silent either, or a roster
@@ -558,6 +562,8 @@ int main(int argc, char** argv) {
 
   double next_log = octo::mono_now() + opt.log_interval;
   double next_save = octo::mono_now() + kSaveInterval;
+  const double started_mono = octo::mono_now();
+  bool warned_no_radio = false;
   while (!g_stop) {
     server.serve(200);
     // Before anything reads the registry, and after the wait that is where
@@ -608,6 +614,34 @@ int main(int argc, char** argv) {
     if (log.enabled() && opt.log_interval > 0 && octo::mono_now() >= next_log) {
       next_log = octo::mono_now() + opt.log_interval;
       log_snapshot(&log, registry.snapshot());
+    }
+
+    // A radio that never says anything is the failure with no symptom.
+    //
+    // CoreBluetooth reports "unauthorized" when it knows the answer is no, and
+    // that is handled where the state arrives. What it does under a missing
+    // grant is worse: it never calls back at all. No error, no prompt, no
+    // state -- and under launchd there is nobody to prompt, so the daemon sits
+    // there looking healthy and hearing nothing, which is indistinguishable
+    // from an empty room until somebody thinks to check.
+    //
+    // So it is timed. Ten seconds is far longer than a working radio takes and
+    // far shorter than somebody's patience.
+    if (!warned_no_radio && registry.snapshot().radio == "unknown" &&
+        octo::mono_now() - started_mono > kRadioSilentAfter) {
+      warned_no_radio = true;
+      if (log.enabled()) {
+        log.record("radio", "\"state\":\"silent\"");
+      }
+      if (!opt.quiet) {
+        std::fprintf(stderr,
+                     "octomancerd: the radio has not reported a state after"
+                     " %.0fs.\n  On macOS that is what a missing Bluetooth"
+                     " permission looks like -- there is no prompt and no"
+                     " error.\n  Approve this program in System Settings >"
+                     " Privacy & Security > Bluetooth.\n",
+                     kRadioSilentAfter);
+      }
     }
 
     // On a timer rather than on every change. The roster changes on every

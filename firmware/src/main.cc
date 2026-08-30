@@ -30,9 +30,11 @@
 
 #include <memory>
 #include <string>
+#include <vector>
 
 #include "boxadmin.h"
 #include "faultlog.h"
+#include "hwwatchdog.h"
 #include "boxclock.h"
 #include "boxmsg.h"
 #include "cdcpeer.h"
@@ -40,6 +42,7 @@
 #include "registry.h"
 #include "scanner_zephyr.h"
 #include "syncd.h"
+#include "watchdog.h"
 
 namespace {
 
@@ -70,6 +73,21 @@ const struct gpio_dt_spec g_led = GPIO_DT_SPEC_GET_OR(DT_ALIAS(led0), gpios, {})
 // "the storage limitations are on octomancer-sync".
 constexpr size_t kBoxMaxSamples = 240;
 constexpr double kBoxWindow = 900.0;
+
+// The watchdog, in seconds. Generous on purpose: it is here to catch a machine
+// that has stopped, not to police latency, and the two mistakes are not equally
+// bad. A reset that fires on a working dongle takes the radio off the air in
+// the middle of somebody's shoot; one that fires ten seconds late clears a
+// wedge that would otherwise have lasted until a person noticed. See
+// firmware/src/hwwatchdog.h for why this cannot be adjusted afterwards.
+constexpr double kWatchdogTimeout = 12.0;
+
+// How often the USB side is asked to prove it can still run, and how long it
+// may take to answer. The patience is well under the watchdog's own timeout so
+// that a stuck wire is reported as a stuck wire rather than arriving at the
+// same moment as the reset.
+constexpr double kWireProbePeriod = 3.0;
+constexpr double kWirePatience = 4.0;
 
 }  // namespace
 
@@ -117,30 +135,36 @@ int main() {
     clock.set(t.wall);
   });
 
-  // Why the last run ended, and whether this build can print the numbers the
-  // protocol is made of. Both are answered once, at boot, and told to whoever
-  // attaches -- a box with no console can only report a problem to somebody
-  // who is listening, and the first host to open the port is the first
-  // opportunity there has ever been.
-  const octo::FaultRecord last_fault = octo::take_last_fault();
-  const std::string fault_line = octo::describe_fault(last_fault);
-  const bool floats_ok = octo::can_format_doubles();
+  // What this run needs to tell the first person who asks.
+  //
+  // A box with no console can only report a problem to somebody who is
+  // listening, and the first host to open the port is the first opportunity
+  // there has ever been -- possibly days after the thing being reported. So
+  // these are gathered at boot and kept, rather than announced into a void.
+  std::vector<std::string> boot_notes;
 
-  peer.on_open([&daemon, &peer, &fault_line, floats_ok]() {
+  // Why the last run ended. Empty when it ended cleanly, which is most of the
+  // time and is worth staying quiet about.
+  const std::string fault_line = octo::describe_fault(octo::take_last_fault());
+  if (!fault_line.empty()) boot_notes.push_back(fault_line);
+
+  // Whether this build can print the numbers the protocol is made of. The
+  // failure it catches is silent from both ends: every number in every message
+  // comes out empty and nothing reports an error. Saying so is the difference
+  // between one line and another evening.
+  if (!octo::can_format_doubles()) {
+    boot_notes.push_back(
+        "this build cannot format floating point -- every number in this"
+        " protocol will be empty (CONFIG_PICOLIBC_IO_FLOAT)");
+  }
+
+  peer.on_open([&daemon, &peer, &boot_notes]() {
     daemon.peer_opened(&peer);
-    auto say = [&peer](const std::string& text) {
+    for (const std::string& note : boot_notes) {
       octo::Message msg;
       msg.verb = "say";
-      msg.set("text", text);
+      msg.set("text", note);
       peer.send(octo::encode(msg));
-    };
-    if (!fault_line.empty()) say(fault_line);
-    // The failure this catches is silent from both ends: every number in every
-    // message comes out empty and nothing reports an error. Saying so is the
-    // difference between one line and another evening.
-    if (!floats_ok) {
-      say("this build cannot format floating point -- every number in this "
-          "protocol will be empty (CONFIG_PICOLIBC_IO_FLOAT)");
     }
   });
   peer.on_close([&daemon, &peer]() { daemon.peer_closed(&peer); });
@@ -199,6 +223,40 @@ int main() {
       const bool lit = peer.attached() ? phase != 0 : phase < 2;
       gpio_pin_set_dt(&g_led, lit ? 1 : 0);
     });
+  }
+
+  // The watchdog, last of all. It cannot be stopped or reconfigured once
+  // started -- firmware/src/hwwatchdog.h -- so nothing before this point is
+  // watched, which is the right trade: a box that never finishes booting is
+  // not a box a reset would help.
+  //
+  // Two checks, because there are two things that can stop separately. The
+  // loop going round is the obvious one. The other is the USB side, which
+  // Zephyr's CDC ACM runs on a workqueue rather than in an interrupt, and
+  // which can therefore wedge while the loop is perfectly healthy -- a dongle
+  // that still enumerates, still blinks, and will not open. That is what the
+  // first evening this firmware ran actually looked like, and no single
+  // heartbeat would have caught it.
+  octo::WatchdogPolicy guard;
+  octo::ProbeLiveness wire(kWireProbePeriod, kWirePatience);
+
+  // The loop's own check is a constant. That is not a tautology: this runs
+  // from a loop timer, so the check being *called at all* is the evidence, and
+  // a loop that has stopped stops feeding whatever this returns.
+  guard.watch("loop", []() { return true; });
+  guard.watch("wire", [&wire, &peer, &loop]() {
+    bool poke = false;
+    const bool ok = wire.poll(loop->now(), peer.wire_ticks(), &poke);
+    if (poke) peer.probe_wire();
+    return ok;
+  });
+
+  std::string wdt_err;
+  if (!octo::start_watchdog(loop.get(), &guard, kWatchdogTimeout, &wdt_err)) {
+    // Not fatal. A dongle with no watchdog still does its job; it just cannot
+    // get itself out of a wedge, which is the state it was in before there was
+    // one at all. Said out loud rather than silently accepted.
+    boot_notes.push_back("no watchdog: " + wdt_err);
   }
 
   loop->run();

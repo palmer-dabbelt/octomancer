@@ -72,6 +72,22 @@ class CdcPeer : public MsgPeer {
   // What did not fit. Both are cumulative and neither is ever reset, because
   // the question a person asks is "has this ever happened", not "is it
   // happening right now".
+  // Provoke the transmit path, and count how often it actually runs.
+  //
+  // Zephyr's CDC ACM does not call our handler from an interrupt -- it calls
+  // it from a workqueue -- so "the loop is going round" says nothing about
+  // whether the wire is. The two can be lost separately, and losing only the
+  // wire is what leaves a dongle enumerated, blinking, and impossible to open.
+  //
+  // A thread that is idle by design cannot be watched by asking whether it has
+  // run lately, because the honest answer is no. So ask it to: enabling the
+  // transmit interrupt makes the driver queue our handler whether or not there
+  // is anything to send, and the handler bumps this counter on its way past. A
+  // counter that does not move after a poke is a workqueue that cannot run.
+  // See src/watchdog.h's ProbeLiveness, which is the judgement half.
+  void probe_wire();
+  uint32_t wire_ticks() const { return wire_ticks_; }
+
   uint32_t dropped_tx() const { return dropped_tx_; }
   uint32_t dropped_rx() const { return dropped_rx_; }
   // Lines discarded for exceeding LineReader::kMaxLine.
@@ -108,6 +124,9 @@ class CdcPeer : public MsgPeer {
 
   // Written by the interrupt, read by the loop. Aligned 32-bit words on a
   // Cortex-M, so a torn read is not possible and a lock would buy nothing.
+  // Written from the workqueue, read from the loop. Nothing needs its exact
+  // value, only whether it changed, so a plain counter is enough.
+  volatile uint32_t wire_ticks_ = 0;
   volatile uint32_t dropped_tx_ = 0;
   volatile uint32_t dropped_rx_ = 0;
   uint32_t long_lines_ = 0;

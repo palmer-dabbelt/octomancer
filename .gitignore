@@ -68,6 +68,7 @@
 /tests/test_syncd
 /tests/test_tentacle
 /tests/test_timeutil
+/tests/test_watchdog
 /tests/test_tui
 *.log
 *.trs

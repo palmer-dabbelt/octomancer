@@ -104,7 +104,9 @@ libocto_a_SOURCES = \
 	src/tentacle.cc \
 	src/tentacle.h \
 	src/timeutil.cc \
+	src/watchdog.cc \
 	src/timeutil.h \
+	src/watchdog.h \
 	src/tui.cc \
 	src/tui.h \
 	src/tui_term.cc
@@ -320,6 +322,7 @@ check_PROGRAMS = \
 	tests/test_syncd \
 	tests/test_tentacle \
 	tests/test_timeutil \
+	tests/test_watchdog \
 	tests/test_tui
 TESTS = $(check_PROGRAMS)
 
@@ -353,6 +356,9 @@ tests_test_boxmsg_LDADD = libocto.a
 # The same language over a real socket, with a real poll(2) under it. Nothing
 # is faked here on purpose: this file is system calls, and a fake socket would
 # be testing the fake.
+tests_test_watchdog_SOURCES = tests/test_watchdog.cc tests/harness.h
+tests_test_watchdog_LDADD = libocto.a
+
 tests_test_boxcdc_SOURCES = tests/test_boxcdc.cc tests/harness.h
 tests_test_boxcdc_LDADD = libocto.a
 

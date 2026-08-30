@@ -495,3 +495,61 @@ actually fires and reboots, that the retained record reads back correctly
 across a real reset, that the dedicated CDC workqueue prevents the wedge, and
 that a real Tentacle's offsets from the dongle agree with the Mac's. Each of
 those needs a box on a cable and none of them has been seen yet.
+
+## The watchdog, and what it is for
+
+`firmware/src/faultlog.cc` covers a box that crashes. It does not cover a box
+that *stops*, and those are different: a workqueue that cannot run throws
+nothing and faults nothing, so no fatal handler is ever reached. The machine
+sits there enumerated and blinking with a port that will not open. Only a
+watchdog catches that.
+
+The nRF52840 watchdog has eight reload registers and reloads only when **every
+allocated one has been fed**, which is exactly the primitive for "several
+separate things must all still be alive". Two are used:
+
+| Channel | Fed when |
+| --- | --- |
+| `loop` | the loop ran the feeder at all -- the check is a constant, the *calling* is the evidence |
+| `wire` | the CDC workqueue answered a poke within four seconds |
+
+The second exists because Zephyr's CDC ACM does not call our handler from an
+interrupt. It calls it from a workqueue, so "the loop is going round" and "the
+USB side is going round" are two claims and a box can lose either alone. A
+thread that is idle by design cannot be watched by asking whether it has run
+lately -- the honest answer is no -- so `src/watchdog.h`'s `ProbeLiveness`
+asks it to run and requires an answer. Enabling the transmit interrupt makes
+the driver queue our handler whether or not there is anything to send.
+
+**Once started it cannot be stopped or reconfigured until the chip resets.**
+No turning it off for a moment, no lengthening the timeout because something
+is taking a while. So it starts last, after the radio is up and the daemon is
+running, and nothing before that point is watched -- which is the right trade,
+because a box that never finishes booting is not one a reset would help. The
+timeout is twelve seconds, deliberately generous: the two mistakes are not
+equally bad. A reset that fires on a working dongle takes the radio off the
+air in the middle of a shoot; one that fires ten seconds late clears a wedge
+that would otherwise have lasted until a person noticed.
+
+A watchdog reset leaves no record of its own, because nothing is running at the
+moment it happens -- the part allows about sixty microseconds between the
+timeout and the reset. So the feeder writes down which check is failing every
+time it runs, into the same retained memory as the fault record, and the reset
+cause comes from `hwinfo`. The next boot says *which* thing stopped, not merely
+that something did.
+
+### Still not verified on hardware
+
+The whole of the above is reasoned from the datasheet, the driver source and
+the built ELF. What is checked: `CONFIG_WATCHDOG` and `CONFIG_HWINFO` are on,
+`WDT_NRFX` and `HWINFO_NRF` are the drivers selected, the `watchdog0` alias
+exists on this board, and `start_watchdog` and `note_watchdog_state` are linked
+in. `src/watchdog.h`'s judgement half is covered by `tests/test_watchdog.cc`,
+including the case that matters most -- a slow answer is not a failure, because
+a false positive here reboots a working dongle.
+
+Not checked: that the timer actually fires, that a starved channel actually
+resets the part, that the retained note survives a watchdog reset (it survives
+`SYSRESETREQ`; a watchdog reset is not quite the same path), and that
+`RESET_WATCHDOG` comes back from `hwinfo` on this silicon. Every one of those
+needs a dongle and a deliberate wedge.

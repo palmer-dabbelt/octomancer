@@ -70,6 +70,11 @@ void CdcPeer::isr_trampoline(const struct device* dev, void* user) {
 // loop's data -- it moves bytes between the UART FIFO and a ring buffer and
 // raises a signal, which is the whole of what src/loop.h permits.
 void CdcPeer::isr() {
+  // Proof of life for whoever is watching -- see probe_wire() in the header.
+  // First thing, so that it counts even for a pass that finds nothing to do,
+  // which is exactly the pass a probe provokes.
+  ++wire_ticks_;
+
   while (uart_irq_update(uart_) && uart_irq_is_pending(uart_)) {
     if (uart_irq_rx_ready(uart_)) {
       uint8_t buf[64];
@@ -122,6 +127,15 @@ void CdcPeer::send(const std::string& line) {
                static_cast<uint32_t>(line.size()));
   const uint8_t nl = '\n';
   ring_buf_put(&tx_, &nl, 1);
+  uart_irq_tx_enable(uart_);
+}
+
+void CdcPeer::probe_wire() {
+  if (!started_) return;
+  // Enabling the transmit interrupt is the cheapest way to make the driver
+  // queue our handler. It runs, finds the ring empty, and turns itself off
+  // again -- which is the same path a finished transmission takes, so this
+  // provokes nothing the ordinary code does not already do.
   uart_irq_tx_enable(uart_);
 }
 

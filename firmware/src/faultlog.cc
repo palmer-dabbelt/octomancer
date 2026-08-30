@@ -2,6 +2,7 @@
 #include "faultlog.h"
 
 #include <zephyr/arch/cpu.h>
+#include <zephyr/drivers/hwinfo.h>
 #include <zephyr/fatal.h>
 #include <zephyr/kernel.h>
 #include <zephyr/sys/reboot.h>
@@ -15,6 +16,11 @@ namespace {
 
 // Anything but zero and anything but a plausible value for uninitialised RAM.
 constexpr uint32_t kMagic = 0x0C70417E;
+constexpr uint32_t kStarvedMagic = 0x0C70D06E;
+
+// Kept small and fixed-size: this lives in memory that survives a reset, and
+// anything with a pointer in it would survive as a pointer into the last run.
+constexpr size_t kStarvedMax = 15;
 
 struct Retained {
   uint32_t magic;
@@ -22,6 +28,11 @@ struct Retained {
   uint32_t pc;
   uint32_t lr;
   uint32_t count;
+  // Not covered by `magic`, deliberately. A watchdog reset writes nothing on
+  // its way out -- there is no time -- so this has to be believed on the
+  // strength of its own marker, independently of whether a fault was recorded.
+  uint32_t starved_magic;
+  char starved[kStarvedMax + 1];
 };
 
 // __noinit is the whole mechanism: RAM survives SYSRESETREQ, and this is the
@@ -62,8 +73,36 @@ K_TIMER_DEFINE(g_settle_timer, settled, nullptr);
 
 }  // namespace
 
+void note_watchdog_state(const std::string& starved) {
+  g_retained.starved_magic = kStarvedMagic;
+  size_t i = 0;
+  for (; i < kStarvedMax && i < starved.size(); ++i) {
+    g_retained.starved[i] = starved[i];
+  }
+  g_retained.starved[i] = '\0';
+}
+
 FaultRecord take_last_fault() {
   FaultRecord out;
+
+  // Asked before anything else, because a watchdog reset leaves no record of
+  // its own: nothing runs at the moment it happens. The hardware remembers
+  // instead, and this is the only place that memory is read.
+  uint32_t cause = 0;
+  if (hwinfo_get_reset_cause(&cause) == 0) {
+    if ((cause & RESET_WATCHDOG) != 0) {
+      out.valid = true;
+      out.watchdog = true;
+      if (g_retained.starved_magic == kStarvedMagic) {
+        g_retained.starved[kStarvedMax] = '\0';
+        out.starved = g_retained.starved;
+      }
+    }
+    // Cleared, or every boot from now on reports the reset that happened once.
+    hwinfo_clear_reset_cause();
+  }
+  g_retained.starved_magic = 0;
+
   if (g_retained.magic == kMagic) {
     out.valid = true;
     out.reason = g_retained.reason;
@@ -87,7 +126,20 @@ void mark_run_settled() { g_retained.count = 0; }
 
 std::string describe_fault(const FaultRecord& fault) {
   if (!fault.valid) return std::string();
-  char buf[160];
+  char buf[192];
+  if (fault.watchdog) {
+    if (!fault.starved.empty()) {
+      std::snprintf(buf, sizeof buf,
+                    "last run stopped: the watchdog fired because '%s' had"
+                    " stopped answering",
+                    fault.starved.c_str());
+    } else {
+      std::snprintf(buf, sizeof buf,
+                    "last run stopped: the watchdog fired, and the loop that"
+                    " would have said why had stopped too");
+    }
+    return buf;
+  }
   if (fault.count > 1) {
     std::snprintf(buf, sizeof buf,
                   "last run died: %s at pc=0x%08x lr=0x%08x "

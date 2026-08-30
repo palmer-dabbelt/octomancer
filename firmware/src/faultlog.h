@@ -32,6 +32,16 @@ namespace octo {
 
 struct FaultRecord {
   bool valid = false;
+  // The machine was reset by the watchdog rather than by a fault. A different
+  // kind of death and a more interesting one: a fault is code doing something
+  // impossible, and this is code doing nothing at all. Nothing runs at the
+  // moment it happens, so this is reconstructed on the way back up from the
+  // reset cause the hardware records.
+  bool watchdog = false;
+  // Which liveness check had stopped holding, as of the last time anybody
+  // looked. Empty when the watchdog fired without one -- which would mean the
+  // loop itself stopped between feeds, since it is the loop that writes this.
+  std::string starved;
   uint32_t reason = 0;  // Zephyr's K_ERR_*
   uint32_t pc = 0;      // where, if the exception frame had it
   uint32_t lr = 0;      // and who called it
@@ -48,6 +58,14 @@ FaultRecord take_last_fault();
 // One line for a person, in the shape src/boxmsg.h's `say` carries. Empty when
 // there is nothing to report, so the caller can send it or not without asking.
 std::string describe_fault(const FaultRecord& fault);
+
+// Record which liveness check is currently failing, if any.
+//
+// Called from the watchdog's feeder every time it runs, not only when
+// something is wrong. By the time the reset happens there is nowhere left to
+// write from -- the nRF part allows about sixty microseconds between the
+// timeout and the reset -- so the note has to already be there.
+void note_watchdog_state(const std::string& starved);
 
 // Called once a run has plainly got somewhere -- see kSettledSeconds in the
 // implementation. Resets the consecutive-fault count, so a box that has been

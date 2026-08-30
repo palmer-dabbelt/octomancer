@@ -37,6 +37,7 @@ target_sources(app PRIVATE
   src/boxclock.cc
   src/cdcpeer.cc
   src/faultlog.cc
+  src/hwwatchdog.cc
   src/loop_zephyr.cc
   src/scanner_zephyr.cc
 )
@@ -56,4 +57,5 @@ target_sources(app PRIVATE
   ${OCTO}/syncd.cc
   ${OCTO}/tentacle.cc
   ${OCTO}/timeutil.cc
+  ${OCTO}/watchdog.cc
 )

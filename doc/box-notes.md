@@ -247,10 +247,15 @@ The window the average is computed over is **not** the window that is
 broadcast, and they are decoupled on purpose. They answer different questions.
 
 **The averaging window produces the clock.** What comes out of it is the
-Tentacle network's real time, expressed as a skew against this machine's local
-clock -- and that skew is what a camera's RTC gets written from. It is the
-operational number, the one every write depends on, and it is computed on the
-box out of every advert the radio actually heard.
+Tentacle network's real time, expressed as a skew against **the receiver's**
+local clock -- and that skew is what a camera's RTC gets written from. It is
+the operational number, the one every write depends on, and it is computed on
+the box out of every advert the radio actually heard.
+
+"The receiver's" and not "the Mac's", deliberately: the skew is a property of
+one radio's view of one box, which is what "The unit is a link, not a device"
+below is about. A sync daemon computes it for its own links and for nothing
+else.
 
 **The broadcast window is a slice of what feeds it, shipped for the log.** Those
 four samples are the most recent of the measurements the average was made of --
@@ -345,28 +350,77 @@ hidden**. In `octomancer status`:
   it and is telling me" is visible at a glance, and it is a difference that
   matters: the second one has a link in it that can fail.
 
+The suffix is doing more than labelling, which the next section is about: it is
+half the name of the thing being measured, not a note about where the row came
+from.
+
 This is what settles the identity question in "Six decisions" below from a
 recommendation into a requirement. A name for each sync daemon is not internal
 bookkeeping to be added when convenient -- it is on the screen, so it has to be
 in the protocol, and it should go into `hello` before there is anything to
 migrate.
 
-There is a consequence worth stating plainly, because it will look like a bug
-the first time somebody sees it. **A timecode box heard by both a Mac-local
-sync daemon and a dongle will appear twice.** Not because the merge is careless
-but because the two sightings genuinely have different names: CoreBluetooth
-hands out an opaque per-host UUID and HCI hands out the real Bluetooth address,
-so nothing can tell that the two rows are one box. `README.md` already records
-that a bench learned over one radio is not recognised over the other. The
-`(via …)` suffix is what makes the duplicate legible instead of mysterious --
-two rows, each saying who heard it -- and that is the best available answer
-until something correlates them, which needs more than a name.
+### The unit is a link, not a device
+
+A timecode box heard by both a Mac-local sync daemon and a dongle appears
+**twice**, and an earlier draft of this file apologised for that -- called it a
+consequence to be stated plainly because it would look like a bug, and said the
+`(via …)` suffix was the best answer available until something correlated the
+two rows into one. That was backwards. Correlating them would destroy the
+measurement.
+
+**A timecode box is not a clock source. A box and a receiver, together, are.**
+What gets measured is never "the box's offset"; it is the offset between a
+particular box's transmissions and a particular receiver's clock, over a
+particular radio path. Two receivers hearing the same box measure two different
+things, and the difference between them is not noise to be averaged away -- it
+is the receive-path latency and the clock skew of the two receivers, which is
+exactly the quantity this project exists to be careful about. Merging the rows
+would throw away the only evidence of it.
+
+So the base entity is the **link pair**: `(source, receiver)`. Every
+measurement, every average, every sample window and every drift figure is a
+property of a pair. The `(via …)` suffix is not a disambiguator bolted onto a
+device name -- it is half the name.
+
+There is a second reason, less philosophical and completely decisive: **a
+device identifier is not globally unique, and cannot be.** CoreBluetooth hands
+out an opaque per-host UUID; HCI hands out the real Bluetooth address; a device
+using a resolvable private address changes it every fifteen minutes. A bare
+device id is only meaningful relative to the host that observed it, which
+`README.md` already records under "Two radios". The pair is well-defined. The
+device alone is not. Keying on the device would be keying on something that
+does not exist.
+
+**Why this matters more later than it does now.** The long-run intent is a
+mesh: several dongles as well as the host, spread far enough that no single
+radio can hear the whole network. Then a network-wide clock is not something
+any one receiver measures -- it is composed out of the pairwise skews that each
+receiver can measure, which only works if the pairwise skews were kept as
+pairwise skews. A design that collapsed each box to one number early would have
+to be taken apart again to get there. Building on pairs now costs nothing and
+is what makes that reachable.
+
+None of the mesh exists, and none of it needs to yet. What it changes today is
+one decision: the roster is keyed on pairs, and the duplicate rows are correct
+output rather than a wart.
 
 Structurally this asks for two things that do not exist: an origin on
-`DeviceRow` in `src/devices.h`, and a third value in `DeviceKind`, which today
-is `kTentacle` and `kCamera`. `DeviceView` already carries `canonical_source`
-to say which daemon a number came from, so the idea has a precedent in the file
-it belongs in.
+`DeviceRow` in `src/devices.h` -- making the row's key `(id, origin)` rather
+than `id` -- and a third value in `DeviceKind`, which today is `kTentacle` and
+`kCamera`. `DeviceView` already carries `canonical_source` to say which daemon
+a number came from, so the idea has a precedent in the file it belongs in.
+
+One question this leaves genuinely open, and it wants answering before the
+flash record formats are written, because it decides what they hold.
+**Is enable/disable a property of the device or of the link?** Disabling a box
+that has drifted is a statement about the box, and should hold for every
+receiver. Excluding one dongle's view of a box that it hears badly is a
+statement about the link. Both are real. The cheap answer is that the persisted
+flag is per device -- it is what a person meant -- and that a receiver may
+additionally exclude a link it does not trust, which is a judgement and belongs
+to whoever is judging. Pairing state has no such question: a bond is between
+two radios, so it is per pair definitionally.
 
 ### Pairing, when there is nobody to ask
 
@@ -403,8 +457,13 @@ out of step with itself.
 
 **In RAM, and lost on reboot:** everything about message latency and timing.
 That is four samples per device, the running average, and what the write delay
-has converged to. It is cheap to re-measure, it goes stale anyway, and none of
-it is worth a flash write.
+has converged to. Per *device* and per *link* are the same thing here, because
+a sync daemon has exactly one link to each device it can hear; the distinction
+only starts to matter one layer up, where rows from several daemons meet. See
+"The unit is a link, not a device".
+
+All of it is cheap to re-measure, it goes stale anyway, and none of it is worth
+a flash write.
 
 Four is the whole of it: **64 bytes a device, 320 bytes for a five-box room**,
 against `Registry`'s Mac defaults of 128 KB a device. See "The rates, which are
@@ -504,8 +563,8 @@ non-dry-run sync daemon can run per user however many sockets you name. The
 lock should be keyed on the box socket path.
 
 **One language, all the way up.** There are two line protocols in the tree
-today: `src/proto.h`'s block reply — banner, lines, `end`, one command per
-connection — spoken by both existing daemons, and `src/boxmsg.h`'s one message
+today: `src/proto.h`'s block reply -- banner, lines, `end`, one command per
+connection -- spoken by both existing daemons, and `src/boxmsg.h`'s one message
 per line, spoken by the sync daemon. Layer 2 sits between them, so it either
 translates forever or it does not. It should not. `src/boxmsg.h` was written
 to be one message language for all three pipes, and the two vocabularies

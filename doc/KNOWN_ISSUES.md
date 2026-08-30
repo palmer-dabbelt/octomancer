@@ -752,36 +752,56 @@ It goes away when there is one socket, but until then it is a wrong answer
 rather than a missing feature, and `--json` is what anything scripted would
 use.
 
-### 19. Nothing records which sync daemon a device was heard by
+### 19. The roster is keyed on devices, and the entity is a link
 
 `build_device_view()` in `src/devices.h` merges two daemons' answers into one
-list of rows, and a `DeviceRow` has no idea where it came from. `DeviceView`
-carries a single `canonical_source` for the bench as a whole, which is the
-nearest thing to provenance in the tree and is one string for the whole table.
+list of rows keyed on device id, and a `DeviceRow` has no idea where it came
+from. `DeviceView` carries a single `canonical_source` for the bench as a
+whole, which is the nearest thing to provenance in the tree and is one string
+for the whole table.
 
-That is survivable today, with two daemons on one machine and one radio between
-them. It stops being survivable the moment a dongle across the room is a source
-too, for two reasons:
+The key is the problem, not just the missing label. **A timecode box is not a
+clock source; a box and a receiver together are.** What is measured is the
+offset between one box's transmissions and one receiver's clock over one radio
+path, so it is a property of the pair. Two receivers hearing the same box
+measure two genuinely different things, and the difference between them is the
+receive-path latency and clock skew of the two receivers -- the quantity this
+project exists to be careful about. A roster keyed on the device would merge
+those two rows and destroy the only evidence of it.
 
-* **A person needs to know.** "This Mac can hear that box" and "something
-  across the room can hear it and is telling me" are different situations, and
-  the second has a link in it that can fail. The model puts that on the screen:
-  the dongle gets its own row, and anything reached through it reads
-  `NAME (via DONGLE)`.
-* **The same box will appear twice.** Heard by a Mac-local sync daemon and by a
-  dongle, one physical Tentacle produces two rows with different identifiers --
-  CoreBluetooth's per-host UUID and the real Bluetooth address -- and nothing
-  can tell they are the same device. Without a `(via …)` on each, that reads as
-  a bug in the merge. With one, it reads as what it is.
+There is a second reason that is completely decisive: **a device id is not
+globally unique and cannot be.** CoreBluetooth hands out an opaque per-host
+UUID, HCI hands out the real Bluetooth address, and a device using a resolvable
+private address changes it every fifteen minutes. A bare device id is only
+meaningful relative to the host that observed it. The pair is well-defined; the
+device alone is not.
 
-Structurally: an origin on `DeviceRow`, and a third value in `DeviceKind`,
-which today is `kTentacle` and `kCamera`. And the name has to reach the Mac in
-the first place, which is the sync-daemon identity in `hello` -- see
-`doc/box-notes.md`, where this is what promotes that from a recommendation to a
-requirement.
+So the same box heard by a Mac-local sync daemon and by a dongle **should**
+produce two rows, each reading `NAME (via WHOEVER)`, and that is correct output
+rather than a duplicate to be cleaned up. This entry used to say the opposite.
+
+`doc/box-notes.md` has the long-run reason under "The unit is a link, not a
+device": a mesh of several dongles where no single radio hears the whole
+network, in which a network-wide clock is composed out of pairwise skews and
+only works if the pairwise skews were kept as pairwise skews.
+
+Structurally: a `DeviceRow` keyed on `(id, origin)` rather than `id`, and a
+third value in `DeviceKind`, which today is `kTentacle` and `kCamera`. The
+origin has to reach the Mac in the first place, which is the sync-daemon
+identity in `hello`.
+
+**Also unresolved, and it wants deciding before the flash record formats in
+`doc/TODO.md` item 1 are written, because it decides what they hold:** whether
+enable/disable is a property of the device or of the link. Disabling a box that
+has drifted is a statement about the box and should hold everywhere; excluding
+one dongle's view of a box it hears badly is a statement about the link. The
+cheap answer is that the persisted flag is per device and a receiver may
+additionally distrust a link, but it has not been decided. Pairing state has no
+such question -- a bond is between two radios, so it is per pair.
 
 **What would settle it:** `octomancer status` showing a dongle, its dropped
-broadcast count, and at least one device listed as reached through it.
+broadcast count, and one box listed twice with two different offsets, both
+correct.
 
 ### And one piece of dead scaffolding
 

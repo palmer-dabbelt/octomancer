@@ -1572,33 +1572,42 @@ const CGFloat kWindowWidth = 460.0;
 - (void)updateWindow {
   if (_window == nil || !_window.isVisible) return;
 
-  if (_controlUp) {
-    _daemonLine.stringValue = [NSString
-        stringWithFormat:@"Sync daemon %@ — up since %@%@",
-                         ns(_status.daemon.version),
-                         ago_text(_status.daemon.started_wall,
-                                  _status.daemon.now_wall),
-                         _status.daemon.dry_run ? @" — DRY RUN" : @""];
-    _daemonLine.textColor = [NSColor labelColor];
+  // How long the daemon has been up is not what anybody opened this window to
+  // find out, and it sat above every page. So the line is shown only when it
+  // has something to say -- which is when the daemon is not answering, or is
+  // not going to touch anything. A hidden arranged subview is left out of an
+  // NSStackView's layout entirely, so this costs no blank row.
+  if (_controlUp && !_status.daemon.dry_run) {
+    _daemonLine.hidden = YES;
+  } else if (_controlUp) {
+    _daemonLine.hidden = NO;
+    _daemonLine.stringValue = @"DRY RUN — nothing will be written";
+    _daemonLine.textColor = [NSColor systemOrangeColor];
   } else {
+    _daemonLine.hidden = NO;
     _daemonLine.stringValue = @"Sync daemon not answering";
     _daemonLine.textColor = [NSColor systemRedColor];
   }
 
+  // What the bench is, in its own words. No "Bench:" label -- it is the only
+  // thing on the line -- and no distance from this Mac's clock, which is a
+  // number about the laptop rather than about the boxes. The spread is the one
+  // worth watching: it is how far the boxes are from each other, and it is
+  // what goes wrong first.
   if (_controlUp && _status.bench.has) {
     _benchLine.stringValue =
-        [NSString stringWithFormat:@"Bench: %d timecode box%s, %@, spread %.0f ms",
+        [NSString stringWithFormat:@"%d timecode box%s, spread %.0f ms",
                                    _status.bench.boxes,
                                    _status.bench.boxes == 1 ? "" : "es",
-                                   offset_text(_status.bench.offset_s),
                                    _status.bench.spread_s * 1000.0];
   } else if (_benchUp && _snapshot.has_bench) {
+    // The other daemon does not report a spread, so this says less rather
+    // than inventing one.
     _benchLine.stringValue =
-        [NSString stringWithFormat:@"Bench: %d timecode box%s, %@", _snapshot.live,
-                                   _snapshot.live == 1 ? "" : "es",
-                                   offset_text(_snapshot.bench_offset)];
+        [NSString stringWithFormat:@"%d timecode box%s", _snapshot.live,
+                                   _snapshot.live == 1 ? "" : "es"];
   } else {
-    _benchLine.stringValue = @"Bench: nothing heard yet";
+    _benchLine.stringValue = @"No timecode boxes heard yet";
   }
 
   // The merged list of known devices first: the picker indexes into it, and so
@@ -2330,17 +2339,14 @@ const CGFloat kWindowWidth = 460.0;
 - (void)updateDevices:(const octo::DeviceView&)view {
   if (_deviceGrid == nil) return;
 
+  // Nothing when there is a canonical time: the line above the tabs already
+  // says how many boxes there are and how far apart they sit, and this said it
+  // again in longer words. What it is kept for is the case below, where the
+  // OFFSET column is empty and the reason is not otherwise visible anywhere.
   if (view.has_canonical) {
-    _canonicalLine.stringValue =
-        [NSString stringWithFormat:
-                      @"Canonical time: %d timecode box%s on the air, via %s, "
-                      @"%@ from this Mac, spread %.0f ms",
-                      view.contributing, view.contributing == 1 ? "" : "es",
-                      view.canonical_source.c_str(),
-                      offset_text(view.canonical_offset_s),
-                      view.canonical_spread_s * 1000.0];
-    _canonicalLine.textColor = [NSColor labelColor];
+    _canonicalLine.hidden = YES;
   } else {
+    _canonicalLine.hidden = NO;
     _canonicalLine.stringValue =
         @"No canonical time: nothing is voting on one, so there is nothing "
         @"for the offsets to be measured against.";
@@ -2447,7 +2453,26 @@ const CGFloat kWindowWidth = 460.0;
 // row across the gap, so the page does not flinch every time a camera drops
 // off the air and comes back.
 - (void)rebuildDeviceGrid:(NSArray<NSString*>*)keys {
-  while (_deviceGrid.numberOfRows > 0) [_deviceGrid removeRowAtIndex:0];
+  // Take the old rows out of the view hierarchy, not just out of the grid.
+  //
+  // removeRowAtIndex: unbinds a row from the grid's layout. Whether it also
+  // removes that row's content views from the view hierarchy is not something
+  // NSGridView.h states, and here it does not: the old labels stayed on as
+  // subviews at whatever frame they last held, the rebuilt ones were added
+  // over the top, and after a few changes to the device list the page was text
+  // drawn on text. That reads as a blur rather than as a mistake, which is why
+  // it survived being looked at.
+  //
+  // Removing them explicitly is right whichever way AppKit behaves: a no-op if
+  // it already took them out, and the fix if it did not. Depending on the
+  // answer is what produced the bug.
+  for (NSInteger i = _deviceGrid.numberOfRows - 1; i >= 0; --i) {
+    NSGridRow* row = [_deviceGrid rowAtIndex:i];
+    for (NSInteger c = 0; c < row.numberOfCells; ++c) {
+      [[row cellAtIndex:c].contentView removeFromSuperview];
+    }
+    [_deviceGrid removeRowAtIndex:i];
+  }
 
   // Signal sits before Link rather than after it, which is the one place this
   // table's column order departs from `octomancer status`. The terminal keeps

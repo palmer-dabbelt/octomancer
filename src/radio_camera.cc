@@ -14,16 +14,32 @@
 namespace octo {
 
 std::unique_ptr<CameraLink> make_camera_link() {
-  if (dongle_selected()) {
+  // Only when the dongle was actually asked for.
+  //
+  // This used to test dongle_selected(), which is true under `--radio auto`
+  // the moment a dongle is plugged into any USB port. The consequence was not
+  // a worse choice of radio, it was a restart loop: the shipped
+  // octomancer-sync LaunchAgent runs the blocking path with no --radio flag,
+  // that path exits 1 when this returns null, and launchd's KeepAlive brings
+  // it back every ten seconds forever. Plugging in a dongle -- which the
+  // README invites -- was enough to do it, and the only visible symptom was
+  // an agent that always looked like it was running.
+  //
+  // Auto means "pick something that works". For a blocking camera link the
+  // only thing that works is CoreBluetooth, so auto picks it and says
+  // nothing. Insisting on the dongle still gets the honest refusal below.
+  if (dongle_requested()) {
     // Loud rather than silent. A null link is reported by every caller as "no
     // radio", which here would be a lie: the dongle is plugged in and the
-    // scanner half of it works. What is missing is the tool that drives the
-    // event-loop camera client in src/camhci.h.
+    // scanner half of it works. What is missing is a *blocking* camera client
+    // for it, and there will not be one -- the dongle's camera half is
+    // src/camhci.h, on the event loop, driven by `octomancer-sync --daemon`.
     std::fprintf(stderr,
-                 "octomancer: the dongle's camera half now runs on the event"
-                 " loop (src/camhci.h) and no tool here drives it yet.\n"
-                 "  Use --radio=corebluetooth to set a clock; see"
-                 " doc/box-notes.md for what replaces this.\n");
+                 "octomancer: the dongle's camera half runs on the event loop"
+                 " (src/camhci.h), which this mode cannot drive.\n"
+                 "  Use `octomancer-sync --daemon` to set a clock over the"
+                 " dongle, or --radio=corebluetooth here; see"
+                 " doc/box-notes.md.\n");
     return nullptr;
   }
 #ifdef OCTO_HAVE_COREBLUETOOTH

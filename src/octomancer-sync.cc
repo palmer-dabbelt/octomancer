@@ -2253,7 +2253,12 @@ int main(int argc, char** argv) {
 
   std::unique_ptr<octo::CameraLink> link = octo::make_camera_link();
   if (!link) {
-    std::fprintf(stderr, "octomancer-sync: no CoreBluetooth on this host\n");
+    // make_camera_link has already said why when it was the dongle. Saying
+    // "no CoreBluetooth" in that case was a plain lie on a Mac with a dongle
+    // in it, and it was the visible half of a restart loop.
+    if (!octo::dongle_requested()) {
+      std::fprintf(stderr, "octomancer-sync: no CoreBluetooth on this host\n");
+    }
     return 1;
   }
   std::string err;

@@ -28,6 +28,11 @@ bool dongle_selected() {
   return !hci::list_candidate_ports().empty();
 }
 
+bool dongle_requested() {
+  const RadioOptions& opts = radio_options();
+  return opts.kind == RadioKind::kDongle || !opts.device.empty();
+}
+
 RadioOptions& radio_options() {
   static RadioOptions opts;
   return opts;

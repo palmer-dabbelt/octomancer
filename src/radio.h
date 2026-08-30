@@ -86,6 +86,16 @@ bool radio_options_from_env(std::string* err);
 // have to make the same decision.
 bool dongle_selected();
 
+// Whether the dongle was *asked for*, rather than merely found.
+//
+// The difference matters wherever a fallback exists. `--radio auto` means
+// "pick something that works", and it answers dongle_selected() true the
+// moment a dongle is plugged in -- which is right for a scanner, because the
+// dongle can scan, and wrong for anything the dongle cannot do. Asking the
+// stronger question is how a program tells "the user insisted on the dongle"
+// from "there happens to be one in a USB port".
+bool dongle_requested();
+
 // What the factories would use right now, for the logs and for `--version`:
 // "nRF52840 at /dev/cu.usbmodem1101" or "CoreBluetooth". Does not open
 // anything.

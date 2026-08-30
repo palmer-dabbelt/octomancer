@@ -155,11 +155,17 @@ int main() {
 
   if (g_led.port != nullptr) {
     gpio_pin_configure_dt(&g_led, GPIO_OUTPUT_INACTIVE);
-    loop->every(0.5, [&peer]() {
-      static bool on = false;
-      on = !on;
-      // Attached: a short blink once a second. Idle: an even slow flash.
-      gpio_pin_set_dt(&g_led, (peer.attached() && !on) ? 0 : (on ? 1 : 0));
+    // Idle is an even flash; attached is lit with a short wink in it. Two
+    // states that look different across the room, which is the whole job: the
+    // questions a person standing over the dongle has are "is it running" and
+    // "did the Mac find it", and there is no console to answer either.
+    loop->every(0.25, [&peer]() {
+      static int tick = 0;
+      ++tick;
+      const int period = peer.attached() ? 8 : 4;
+      const int phase = tick % period;
+      const bool lit = peer.attached() ? phase != 0 : phase < 2;
+      gpio_pin_set_dt(&g_led, lit ? 1 : 0);
     });
   }
 

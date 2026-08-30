@@ -67,10 +67,36 @@ std::string describe_fault(const FaultRecord& fault);
 // timeout and the reset -- so the note has to already be there.
 void note_watchdog_state(const std::string& starved);
 
+// Reboot into the bootloader, which then waits in DFU mode instead of starting
+// this image. The one escape hatch a dongle has that does not need a person
+// holding a button while they plug it in.
+void enter_bootloader();
+
 // Called once a run has plainly got somewhere -- see kSettledSeconds in the
-// implementation. Resets the consecutive-fault count, so a box that has been
-// up for a minute is not still described as crash-looping.
+// implementation. Resets the consecutive-fault and boot-attempt counts, so a
+// box that has been up for a minute is not still described as crash-looping.
 void mark_run_settled();
+
+// ---------------------------------------------------------------------------
+// The boot guard, which is the reason this file is worth its weight.
+//
+// Everything else here reports a failure to somebody who is listening. This
+// one is for the failure where nobody can listen: an image that does not get
+// as far as bringing USB up. There is then no port, no console, no LED worth
+// reading and no way in at all -- the dongle is a piece of plastic until
+// somebody holds its button down while plugging it in, and finding that out
+// costs a person a trip to the desk every single time.
+//
+// So the count of consecutive boots that never got anywhere is kept in memory
+// that survives a reset, and a box that has failed too many times in a row
+// stops trying and sits in its bootloader instead, where it can be reflashed
+// over the cable. A bad image then costs a reflash rather than a button.
+//
+// This runs before the drivers do, which is what makes it cover a hang in
+// driver init -- the case that motivated it. A power cycle clears the count on
+// its own, because the memory does not survive losing power, so unplugging and
+// plugging back in is always a fresh set of attempts.
+// ---------------------------------------------------------------------------
 
 }  // namespace octo
 

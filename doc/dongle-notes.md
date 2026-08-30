@@ -553,3 +553,59 @@ resets the part, that the retained note survives a watchdog reset (it survives
 `SYSRESETREQ`; a watchdog reset is not quite the same path), and that
 `RESET_WATCHDOG` comes back from `hwinfo` on this silicon. Every one of those
 needs a dongle and a deliberate wedge.
+
+## The image that never enumerated, and the guard that came out of it
+
+The second image flashed to this dongle did not come up. Not a wedge -- the
+earlier failure at least kept the device on the bus -- but absent entirely: no
+`/dev/cu.usbmodem*`, nothing under `ioreg -p IOUSB`, and no flicker when polled
+twice a second for ten seconds, so not a fast reboot loop either.
+
+The board target was checked first, because
+[the regulator trap](#) above has cost a day before and looks exactly like
+this. It was correct: `CONFIG_BOARD_TARGET="raytac_mdbt50q_cx_40_dongle/nrf52840"`.
+
+What narrows it is init ordering. `CONFIG_CDC_ACM_SERIAL_INITIALIZE_AT_BOOT`
+brings USB up from a `SYS_INIT` at `APPLICATION` level -- *before* `main()`. So
+a device that never appears on the bus failed before that, which rules out
+everything in `main()`: the watchdog, the fault report, the daemon, the radio.
+A config diff against the last image known to enumerate left three lines, and
+of everything in that image only one adds code before USB comes up:
+`CONFIG_USBD_CDC_ACM_WORKQUEUE`, which starts a cooperative-priority thread
+from a `POST_KERNEL` `SYS_INIT`.
+
+**That is an inference, not a proof, and it is recorded as the suspect rather
+than the cause.** A board that is failing to enumerate cannot be instrumented,
+which is the whole difficulty; the option is dropped because the reason for
+wanting it -- catching a starved CDC workqueue -- is now covered better by the
+watchdog, which catches it *and says so*.
+
+### A box that cannot boot puts itself in DFU
+
+The expensive part of all this was never the debugging. It was that every
+attempt cost a person walking to the desk to hold a button down while plugging
+the dongle in, because an image that does not reach USB leaves no way in at
+all.
+
+`octo_boot_guard` in `firmware/src/faultlog.cc` ends that. It counts
+consecutive boots that never got anywhere, in memory that survives a reset, and
+a box that has failed four times in a row stops trying and waits in its
+bootloader instead -- where it can be reflashed over the cable. A bad image now
+costs a reflash rather than a trip to the desk.
+
+It is registered at `PRE_KERNEL_1` with priority 0, which puts it at
+`__init_PRE_KERNEL_1_start` -- the first init entry in the image, ahead of every
+driver. That placement is the whole point: it is what makes the guard cover a
+hang in driver init, which is the case that motivated it. Verified in the ELF
+rather than assumed.
+
+The count is cleared when a run has been up for thirty seconds
+(`mark_run_settled`), and again on the way into DFU, so a dongle sitting in its
+bootloader that is simply replugged gets a fresh set of attempts rather than
+going straight back. A power cycle clears it too, for free: the memory does not
+survive losing power.
+
+What this does not cover: an image that hangs without ever faulting *and*
+without ever resetting. The guard counts boots, so something has to end the
+boot for it to see anything. A hang before the watchdog starts is still a
+button.

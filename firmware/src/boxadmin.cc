@@ -12,15 +12,6 @@
 namespace octo {
 namespace {
 
-// What Nordic's nRF5 bootloader looks for in GPREGRET to stay in DFU mode
-// instead of starting the application. GPREGRET is a retained register: it
-// survives a soft reset, which is the entire mechanism.
-//
-// This is the bootloader's constant, not ours -- BOOTLOADER_DFU_START in the
-// nRF5 SDK -- so it is written down rather than named, because there is no
-// header here to take it from.
-constexpr uint32_t kBootloaderDfuStart = 0xB1;
-
 }  // namespace
 
 bool handle_box_admin(const std::string& line, CdcPeer* peer) {
@@ -77,8 +68,7 @@ bool handle_box_admin(const std::string& line, CdcPeer* peer) {
     // shorter than a person's patience.
     k_sleep(K_MSEC(100));
 
-    nrf_power_gpregret_set(NRF_POWER, 0, kBootloaderDfuStart);
-    sys_reboot(SYS_REBOOT_COLD);
+    enter_bootloader();
     return true;  // not reached
   }
 

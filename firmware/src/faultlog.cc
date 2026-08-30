@@ -1,7 +1,9 @@
 // See firmware/src/faultlog.h.
 #include "faultlog.h"
 
+#include <hal/nrf_power.h>
 #include <zephyr/arch/cpu.h>
+#include <zephyr/init.h>
 #include <zephyr/drivers/hwinfo.h>
 #include <zephyr/fatal.h>
 #include <zephyr/kernel.h>
@@ -17,6 +19,20 @@ namespace {
 // Anything but zero and anything but a plausible value for uninitialised RAM.
 constexpr uint32_t kMagic = 0x0C70417E;
 constexpr uint32_t kStarvedMagic = 0x0C70D06E;
+constexpr uint32_t kBootMagic = 0x0C70B007;
+
+// What Nordic's nRF5 bootloader looks for in GPREGRET to stay in DFU mode
+// instead of starting the application -- BOOTLOADER_DFU_START in the nRF5 SDK.
+// Written down rather than named because there is no header here to take it
+// from. The same constant appears in firmware/src/boxadmin.cc, which is the
+// deliberate route into DFU; this is the involuntary one.
+constexpr uint32_t kBootloaderDfuStart = 0xB1;
+
+// How many boots in a row may fail to get anywhere before the box gives up and
+// waits in its bootloader. High enough that a one-off does not cost a reflash,
+// low enough that a person plugging in a broken dongle sees it settle into
+// something recoverable within a couple of seconds.
+constexpr uint32_t kMaxBootAttempts = 4;
 
 // Kept small and fixed-size: this lives in memory that survives a reset, and
 // anything with a pointer in it would survive as a pointer into the last run.
@@ -33,6 +49,11 @@ struct Retained {
   // strength of its own marker, independently of whether a fault was recorded.
   uint32_t starved_magic;
   char starved[kStarvedMax + 1];
+  // Its own marker, because this is read before anything else has run and must
+  // not depend on a fault having been recorded. Lost on a power cycle, which is
+  // the intended behaviour: replugging is a fresh set of attempts.
+  uint32_t boot_magic;
+  uint32_t boot_attempts;
 };
 
 // __noinit is the whole mechanism: RAM survives SYSRESETREQ, and this is the
@@ -122,7 +143,18 @@ FaultRecord take_last_fault() {
   return out;
 }
 
-void mark_run_settled() { g_retained.count = 0; }
+void mark_run_settled() {
+  g_retained.count = 0;
+  // The run got somewhere. Whatever the last few boots did, this one is not
+  // part of a loop, and the next failure should get the full set of attempts.
+  g_retained.boot_attempts = 0;
+}
+
+void enter_bootloader() {
+  nrf_power_gpregret_set(NRF_POWER, 0, kBootloaderDfuStart);
+  sys_reboot(SYS_REBOOT_COLD);
+  CODE_UNREACHABLE;
+}
 
 std::string describe_fault(const FaultRecord& fault) {
   if (!fault.valid) return std::string();
@@ -176,3 +208,25 @@ extern "C" void k_sys_fatal_error_handler(unsigned int reason,
   sys_reboot(SYS_REBOOT_COLD);
   CODE_UNREACHABLE;
 }
+
+// Before the drivers, so that a hang in driver init is covered -- which is the
+// case this exists for. See the header.
+extern "C" int octo_boot_guard(void) {
+  if (octo::g_retained.boot_magic != octo::kBootMagic) {
+    // Cold start: the memory did not survive, so there is no history to read.
+    octo::g_retained.boot_magic = octo::kBootMagic;
+    octo::g_retained.boot_attempts = 0;
+  }
+  ++octo::g_retained.boot_attempts;
+
+  if (octo::g_retained.boot_attempts > octo::kMaxBootAttempts) {
+    // Cleared before leaving rather than after coming back, because coming
+    // back is exactly what is not happening. A dongle sitting in DFU that was
+    // then simply replugged would otherwise go straight back to DFU forever.
+    octo::g_retained.boot_attempts = 0;
+    octo::enter_bootloader();
+  }
+  return 0;
+}
+
+SYS_INIT(octo_boot_guard, PRE_KERNEL_1, 0);

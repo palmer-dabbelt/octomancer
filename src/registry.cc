@@ -143,6 +143,8 @@ void Registry::observe(const std::string& id, const std::string& name, int rssi,
   dev.rssi = rssi;
   dev.adverts++;
   dev.last_seen_mono = mono;
+  dev.last_seen_wall = wall;
+  dev.heard_this_run = true;
 
   const Decoded decoded = decode(data, len);
   dev.last = decoded;
@@ -161,13 +163,23 @@ void Registry::observe(const std::string& id, const std::string& name, int rssi,
   trim(&dev, mono);
   update_alert(&dev, mono, wall);
 
-  // Forget boxes that have genuinely gone away, so a long-running agent does
-  // not accumulate every Tentacle it has ever met.
-  for (auto it = devices_.begin(); it != devices_.end();) {
-    if (it->first != id && mono - it->second.last_seen_mono > policy_.forget_after) {
-      it = devices_.erase(it);
-    } else {
-      ++it;
+  // Forget boxes that have genuinely gone away, so a sync daemon does not
+  // accumulate every Tentacle it has ever met -- it may be a box with nothing
+  // but NVS to hold them in.
+  //
+  // Zero means never, which is what octomancerd sets: it has a filesystem and
+  // is supposed to remember. A device restored from disk is skipped either
+  // way, because it has no monotonic stamp from this run to age against and
+  // ageing it against zero would delete the entire remembered roster on the
+  // first advertisement.
+  if (policy_.forget_after > 0.0) {
+    for (auto it = devices_.begin(); it != devices_.end();) {
+      if (it->first != id && it->second.heard_this_run &&
+          mono - it->second.last_seen_mono > policy_.forget_after) {
+        it = devices_.erase(it);
+      } else {
+        ++it;
+      }
     }
   }
 }
@@ -227,9 +239,20 @@ Snapshot Registry::snapshot(double mono, double wall) const {
     out.rssi = dev.rssi;
     out.adverts = dev.adverts;
     out.decoded = dev.decoded;
-    out.age = mono - dev.last_seen_mono;
+    // Monotonic while the device is one this run has heard; wall-clock when it
+    // came off disk, because there is no monotonic stamp from this process to
+    // subtract and the answer wanted is "how long since anybody heard it",
+    // which spans restarts.
+    out.heard_this_run = dev.heard_this_run;
+    out.age = dev.heard_this_run
+                  ? mono - dev.last_seen_mono
+                  : wall - dev.last_seen_wall;
+    // A wall clock that has been stepped backwards -- or a roster copied from
+    // another machine -- can put the last sighting in the future. Reporting a
+    // negative age would render as a device heard in several hours' time.
+    if (out.age < 0.0) out.age = 0.0;
     out.first_seen_wall = dev.first_seen_wall;
-    out.live = out.age <= policy_.stale_after;
+    out.live = dev.heard_this_run && out.age <= policy_.stale_after;
     out.alerting = dev.alerting;
     out.alert_since_wall = dev.alert_since_wall;
     if (dev.has_last) {
@@ -289,6 +312,77 @@ Snapshot Registry::snapshot(double mono, double wall) const {
     snap.bench_spread = *minmax.second - *minmax.first;
   }
   return snap;
+}
+
+void Registry::remember(const RememberedDevice& device, double now_wall) {
+  if (device.id.empty()) return;
+  // Anything heard this run beats anything on disk, so an existing entry is
+  // left exactly as it is. This also makes load-then-observe and
+  // observe-then-load produce the same result, which matters because the
+  // daemon does the first and a test will do the second.
+  if (devices_.count(device.id) != 0) return;
+
+  Device& dev = devices_[device.id];
+  dev.id = device.id;
+  dev.name = device.name;
+  dev.rssi = device.rssi;
+  dev.first_seen_wall = device.first_seen_wall;
+  dev.last_seen_wall = device.last_seen_wall;
+  dev.heard_this_run = false;
+  // No monotonic stamp: there is no instant in this process's life when this
+  // was heard. snapshot() ages it against the wall instead, and every path
+  // that would use last_seen_mono is guarded on heard_this_run.
+  dev.last_seen_mono = 0.0;
+
+  // No sample, deliberately -- see the header. What is restored is the last
+  // *reading*, and it is kept apart from the sample window rather than pushed
+  // into it: a sample is evidence, and evidence from a device that has been
+  // switched off for a week must not vote on what time it is.
+  dev.restored_has_time = device.has_time;
+  dev.restored_offset = device.offset;
+  dev.restored_median = device.median_offset;
+  dev.restored_resolution = device.resolution;
+  dev.last.fps = device.fps;
+  (void)now_wall;
+}
+
+std::vector<RememberedDevice> Registry::remembered(double now_wall) const {
+  std::vector<RememberedDevice> out;
+  out.reserve(devices_.size());
+  for (const auto& entry : devices_) {
+    const Device& dev = entry.second;
+    RememberedDevice d;
+    d.id = dev.id;
+    d.name = dev.name;
+    d.first_seen_wall = dev.first_seen_wall;
+    // A device heard this run has a wall stamp from when it was heard; one
+    // restored from disk keeps the stamp it came with. Neither is `now`, which
+    // is what a naive implementation would write and which would make every
+    // device look freshly seen after a restart -- turning the file into a lie
+    // that says the whole roster was on the air at the moment of shutdown.
+    d.last_seen_wall = dev.last_seen_wall;
+    d.rssi = dev.rssi;
+    if (!dev.samples.empty()) {
+      d.has_time = true;
+      d.offset = dev.samples.back().offset;
+      std::vector<double> offsets;
+      offsets.reserve(dev.samples.size());
+      for (const Sample& sample : dev.samples) offsets.push_back(sample.offset);
+      d.median_offset = median_offset(offsets);
+      d.resolution = resolution_name(dev.last.resolution);
+    } else {
+      // Restored and not heard again: hand back exactly what it came with, so
+      // the file does not lose a field per restart.
+      d.has_time = dev.restored_has_time;
+      d.offset = dev.restored_offset;
+      d.median_offset = dev.restored_median;
+      d.resolution = dev.restored_resolution;
+    }
+    d.fps = dev.last.fps;
+    out.push_back(d);
+  }
+  (void)now_wall;
+  return out;
 }
 
 bool Registry::forget(const std::string& id) {

@@ -27,6 +27,7 @@
 #include <string>
 #include <vector>
 
+#include "devicedb.h"
 #include "tentacle.h"
 
 namespace octo {
@@ -48,6 +49,13 @@ struct Policy {
   // about the present.
   double stale_after = 30.0;
   // ...and after this long it is gone; the box left the building.
+  //
+  // Zero or negative means never, which is what octomancerd sets. The two
+  // halves of the program want opposite things here and the reason is the
+  // layering: a sync daemon may be a box with nothing but NVS, so it holds a
+  // working set; the control daemon runs on a Mac with a filesystem and is
+  // supposed to know every device that has ever been seen, showing the ones it
+  // has not heard from lately as offline. See src/devicedb.h.
   double forget_after = 86400.0;
 
   // Sample retention, which sets how long a lever arm drift is measured over.
@@ -93,6 +101,14 @@ struct DeviceSnapshot {
   double age = 0.0;          // seconds since the last advertisement
   double first_seen_wall = 0.0;
   bool live = false;         // heard from recently enough to count
+
+  // Whether anything in this row was measured during this run of the daemon.
+  //
+  // False for a device restored from disk and not heard since. Everything in
+  // such a row is last-known rather than current, and `age` says how long ago
+  // -- but a renderer that showed a three-day-old offset in the same style as
+  // a fresh one would be inviting somebody to act on it.
+  bool heard_this_run = true;
 
   bool has_time = false;
   double sod = 0.0;
@@ -182,6 +198,24 @@ class Registry {
   Snapshot snapshot() const;
   Snapshot snapshot(double mono, double wall) const;
 
+  // Seed a device known from a previous run, which has not been heard from
+  // yet in this one.
+  //
+  // Deliberately separate from observe(): this puts no sample in the window,
+  // so the device cannot vote on the bench, cannot alert, and cannot produce a
+  // drift figure. All of those are measurements of the present, and a
+  // remembered device has none. What it has is a name, an age and a last-known
+  // reading, which is what "offline since Tuesday" is made of.
+  //
+  // An id already present is left alone: whatever has been heard this run is
+  // better than anything on disk.
+  void remember(const RememberedDevice& device, double now_wall);
+
+  // Everything worth keeping across a restart, for src/devicedb.h to write.
+  // Includes devices only known from a previous run, so a roster does not
+  // erode each time the daemon starts before the boxes are switched on.
+  std::vector<RememberedDevice> remembered(double now_wall) const;
+
   // Throw away everything known about one device, by id. Returns false when
   // there was nothing to throw away.
   //
@@ -208,6 +242,23 @@ class Registry {
     uint64_t decoded = 0;
     double first_seen_wall = 0.0;
     double last_seen_mono = 0.0;
+    // Kept alongside the monotonic stamp rather than instead of it. Monotonic
+    // time is what ages a device that is here now, and is immune to the wall
+    // clock being stepped -- which in this program of all programs is not
+    // hypothetical. But it restarts with the process, so a device restored
+    // from disk can only be aged against the wall.
+    double last_seen_wall = 0.0;
+    bool heard_this_run = true;
+    // What this device came back from disk carrying, kept verbatim until it is
+    // heard again. Without it a roster saved from a roster loaded is not the
+    // same roster: a device offline across two restarts would come back with
+    // its last reading zeroed, and the file would erode a little each time the
+    // daemon started. Round-tripping losslessly is the property, and it is
+    // tested.
+    bool restored_has_time = false;
+    double restored_offset = 0.0;
+    double restored_median = 0.0;
+    std::string restored_resolution;
     std::deque<Sample> samples;
     Decoded last;
     bool has_last = false;

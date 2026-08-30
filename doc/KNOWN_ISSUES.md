@@ -868,6 +868,23 @@ needs it.
 
 ## Fixed, and worth remembering why they were not found sooner
 
+**octomancerd forgot every device when it exited.** The registry is memory and
+that is right for the samples, the drift fit and the alert state machine — all
+re-measured within a minute of the radio coming back. The *list* is not: a box
+that was on the bench yesterday and is switched off today is a fact worth
+showing, and losing it made `octomancer status` quietly disagree with the room.
+Five boxes before a restart, four after, with nothing saying the fifth had ever
+existed — an absence you have to already know about to notice.
+
+`src/devicedb.h` keeps the roster in `~/.octomancer/devices.json`, and
+`Policy::forget_after` is now zero — never — in octomancerd. That setting is
+where the two halves of the program disagree on purpose: a sync daemon may be a
+box with nothing but NVS and holds a working set, while the control daemon has
+a filesystem and is supposed to remember. `doc/box-notes.md`'s "What layer 3
+keeps, and where" is the rule; this is the other side of it.
+
+
+
 **The event cursor was off by one, and the test said `next - 1`.**
 `events since=N` filtered with `seq > N` while reporting `next` as the sequence
 the *next* event would be given. An event arriving after a poll takes exactly

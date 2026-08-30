@@ -105,6 +105,7 @@ libocto_a_SOURCES = \
 libocto_a_SOURCES += \
 	src/camera_hci.cc \
 	src/camera_fake.cc \
+	src/devicedb.cc \
 	src/fakebench.cc \
 	src/radiopick.cc \
 	src/scanner_fake.cc \
@@ -286,6 +287,7 @@ check_PROGRAMS = \
 	tests/test_radio \
 	tests/test_crypto \
 	tests/test_devices \
+	tests/test_devicedb \
 	tests/test_hci \
 	tests/test_jsonlog \
 	tests/test_logscan \
@@ -338,6 +340,9 @@ tests_test_boxsock_LDADD = libocto.a
 
 tests_test_radio_SOURCES = tests/test_radio.cc tests/harness.h
 tests_test_radio_LDADD = libocto.a
+
+tests_test_devicedb_SOURCES = tests/test_devicedb.cc tests/harness.h
+tests_test_devicedb_LDADD = libocto.a
 
 tests_test_fakebench_SOURCES = tests/test_fakebench.cc tests/harness.h
 tests_test_fakebench_LDADD = libocto.a

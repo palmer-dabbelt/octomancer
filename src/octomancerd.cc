@@ -22,6 +22,7 @@
 #include <string>
 
 #include "client.h"
+#include "devicedb.h"
 #include "jsonlog.h"
 #include "proto.h"
 #include "proclock.h"
@@ -54,6 +55,10 @@ struct Options {
   std::string log_path;
   std::string console_path;
   std::string notify_command;
+  // Where the roster is kept between runs. Empty disables it, which is what
+  // --probe wants: a ten-second listen should not rewrite the file that the
+  // running agent is curating.
+  std::string devices_path = octo::DeviceDb::default_path();
   double log_interval = 60.0;
   double probe_seconds = 0.0;
   bool foreground = false;
@@ -99,6 +104,11 @@ void usage(FILE* out) {
       "  --min-drift-span SEC  shortest history worth fitting drift to\n"
       "                        (default 900)\n"
       "\n"
+      "  --devices PATH      the roster kept between runs ('' to disable,\n"
+      "                      default ~/.octomancer/devices.json). octomancerd\n"
+      "                      remembers every device it has seen and shows the\n"
+      "                      ones it is not hearing as offline; the sync daemon\n"
+      "                      deliberately does not, having nowhere to put them.\n"
       "  --radio KIND        auto (default: this host's own radio),\n"
       "                      corebluetooth, dongle, or fake. A dongle in a USB\n"
       "                      port is a second radio, not a better first one;\n"
@@ -116,6 +126,7 @@ bool parse_args(int argc, char** argv, Options* opt) {
     kThreshold, kClear, kConfirm, kRenotify, kNotify,
     kWindow, kStale, kDriftSpan, kCameraGone,
     kRadio, kDongle, kHciTrace, kVersion, kHelp,
+    kDevices,
   };
   static const struct option longs[] = {
       {"socket", required_argument, nullptr, kSocket},
@@ -137,6 +148,7 @@ bool parse_args(int argc, char** argv, Options* opt) {
       {"stale-after", required_argument, nullptr, kStale},
       {"min-drift-span", required_argument, nullptr, kDriftSpan},
       {"camera-gone-after", required_argument, nullptr, kCameraGone},
+      {"devices", required_argument, nullptr, kDevices},
       {"radio", required_argument, nullptr, kRadio},
       {"dongle", required_argument, nullptr, kDongle},
       {"hci-trace", no_argument, nullptr, kHciTrace},
@@ -164,6 +176,7 @@ bool parse_args(int argc, char** argv, Options* opt) {
       case kConfirm: opt->policy.alert_confirm = std::atoi(optarg); break;
       case kRenotify: opt->policy.renotify_after = std::atof(optarg); break;
       case kNotify: opt->notify_command = optarg; break;
+      case kDevices: opt->devices_path = optarg; break;
       case kWindow: opt->policy.window = std::atof(optarg); break;
       case kStale: opt->policy.stale_after = std::atof(optarg); break;
       case kDriftSpan: opt->policy.min_drift_span = std::atof(optarg); break;
@@ -245,6 +258,32 @@ void log_alert(octo::JsonLog* log, const octo::AlertEvent& e) {
                 json_escape(e.name).c_str(), json_escape(e.id).c_str(), e.offset,
                 e.entering ? "drifted" : "recovered", e.repeat ? "true" : "false");
   log->record("alert", buf);
+}
+
+// How often the roster is written out. Half a minute, which is the same order
+// as the staleness threshold: losing the last interval to a hard kill costs at
+// most one device's last-seen time being a little early, and nothing else.
+const double kSaveInterval = 30.0;
+
+// Failing to save is reported once and then carried on from, deliberately. A
+// full disk or a read-only home should not stop a daemon whose actual job is
+// listening to a radio -- but it must not be silent either, or a roster
+// quietly stops surviving restarts and nobody finds out until they are looking
+// for a box that has gone missing.
+void save_devices(const octo::Registry& registry, const std::string& path,
+                  bool quiet) {
+  static bool complained = false;
+  octo::DeviceDb db;
+  std::string err;
+  if (db.save(path, registry.remembered(octo::wall_now()), &err)) {
+    complained = false;
+    return;
+  }
+  if (!complained && !quiet) {
+    std::fprintf(stderr, "octomancerd: cannot save the device roster: %s\n",
+                 err.c_str());
+    complained = true;
+  }
 }
 
 void log_snapshot(octo::JsonLog* log, const octo::Snapshot& s) {
@@ -344,8 +383,35 @@ int main(int argc, char** argv) {
     }
   }
 
+  // Never, on this side of the seam. The default exists for a sync daemon,
+  // which may be a box with nothing but NVS and has to hold a working set;
+  // octomancerd has a filesystem and is supposed to know every device it has
+  // ever seen. Set before the registry is built, because it is the registry's
+  // own copy of the policy that matters.
+  opt.policy.forget_after = 0.0;
+
   octo::Registry registry(opt.policy);
   std::string err;
+
+  // The roster from last time. Loaded before anything can be served, so a
+  // client connecting in the first second sees the same list as one connecting
+  // later rather than watching it fill in.
+  //
+  // A file that will not parse is fatal. Carrying on would serve a roster
+  // short of everything the file held and then overwrite the file with the
+  // short version on the next save -- turning a parse error into data loss,
+  // quietly, in the direction nobody checks.
+  octo::DeviceDb devices;
+  if (!opt.devices_path.empty()) {
+    if (!devices.load(opt.devices_path, &err)) {
+      std::fprintf(stderr, "octomancerd: %s\n", err.c_str());
+      return 1;
+    }
+    const double now = octo::wall_now();
+    for (const octo::RememberedDevice& d : devices.devices()) {
+      registry.remember(d, now);
+    }
+  }
 
   // Before anything is printed, so the first line of a run lands in the same
   // file as the rest of it.
@@ -441,7 +507,25 @@ int main(int argc, char** argv) {
     return snap.live > 0 ? 0 : 1;
   }
 
-  octo::Server server(registry, opt.socket_path);
+  // The registry's own handler, with one thing added: a `forget` is written
+  // through immediately rather than waiting for the save timer.
+  //
+  // Everything else in the roster is a fact about the world that will be
+  // re-observed within seconds, so losing thirty of them to a hard kill costs
+  // nothing. A removal is the opposite -- it is a decision, it is the one
+  // thing here a person actually asked for, and a device that came back from
+  // the dead because the daemon was killed a moment later would be indexed
+  // under "this program does not do what I tell it".
+  octo::Handler base = octo::registry_handler(registry);
+  octo::Server server(
+      [&](const std::string& command) {
+        const std::string reply = base(command);
+        if (!opt.devices_path.empty() && command.compare(0, 7, "forget ") == 0) {
+          save_devices(registry, opt.devices_path, opt.quiet);
+        }
+        return reply;
+      },
+      opt.socket_path);
   if (!server.start(&err)) {
     std::fprintf(stderr, "octomancerd: %s\n", err.c_str());
     scanner->stop();
@@ -473,6 +557,7 @@ int main(int argc, char** argv) {
   uint64_t camera_sessions_seen = 0;
 
   double next_log = octo::mono_now() + opt.log_interval;
+  double next_save = octo::mono_now() + kSaveInterval;
   while (!g_stop) {
     server.serve(200);
     // Before anything reads the registry, and after the wait that is where
@@ -524,9 +609,24 @@ int main(int argc, char** argv) {
       next_log = octo::mono_now() + opt.log_interval;
       log_snapshot(&log, registry.snapshot());
     }
+
+    // On a timer rather than on every change. The roster changes on every
+    // advertisement -- five boxes at 2 Hz is ten rewrites a second -- and
+    // nothing in it is worth an fsync at that rate: the cost of losing the
+    // last half-minute is that a box switched off in that window reads as
+    // last-seen half a minute earlier than it was.
+    if (!opt.devices_path.empty() && octo::mono_now() >= next_save) {
+      next_save = octo::mono_now() + kSaveInterval;
+      save_devices(registry, opt.devices_path, opt.quiet);
+    }
   }
 
   if (!opt.quiet) std::fprintf(stderr, "octomancerd: stopping\n");
+  // Once more on the way out, so an orderly stop does not lose the last
+  // interval. A kill -9 still does, which is what the timer above is for.
+  if (!opt.devices_path.empty()) {
+    save_devices(registry, opt.devices_path, opt.quiet);
+  }
   log.record("stop", "");
   server.shutdown();
   scanner->stop();

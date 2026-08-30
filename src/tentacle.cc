@@ -1,5 +1,7 @@
 #include "tentacle.h"
 
+#include <cmath>
+
 #include <cstdarg>
 #include <cstdio>
 
@@ -119,6 +121,78 @@ Decoded decode(const uint8_t* data, size_t len) {
 
 Decoded decode(const std::vector<uint8_t>& data) {
   return decode(data.data(), data.size());
+}
+
+namespace {
+
+// Seconds since midnight, wrapped into a day. A fake box that has drifted past
+// midnight is a case somebody will want to arrange on purpose.
+double wrap_day(double sod) {
+  const double day = 86400.0;
+  sod = std::fmod(sod, day);
+  if (sod < 0.0) sod += day;
+  return sod;
+}
+
+}  // namespace
+
+std::vector<uint8_t> encode_timecode(double sod, int fps, bool sub_frame,
+                                     uint8_t flags) {
+  if (fps < 1) fps = 1;
+  if (fps > 60) fps = 60;
+  sod = wrap_day(sod);
+
+  const int whole = static_cast<int>(std::floor(sod));
+  const double frac = sod - whole;
+  // The epsilon is not a fudge. A frame boundary is a ratio -- 7/24 -- and
+  // multiplying it back by 24 lands a hair under 7 in binary floating point,
+  // so a plain truncation reports frame 6 for a time that is exactly frame 7.
+  int frames = static_cast<int>(frac * fps + 1e-9);
+  if (frames >= fps) frames = fps - 1;
+
+  std::vector<uint8_t> out;
+  out.push_back(kTypeTimecode);
+  out.push_back(flags);
+  out.push_back(static_cast<uint8_t>(fps & 0x3F));
+  out.push_back(static_cast<uint8_t>(whole / 3600));
+  out.push_back(static_cast<uint8_t>((whole / 60) % 60));
+  out.push_back(static_cast<uint8_t>(whole % 60));
+  out.push_back(static_cast<uint8_t>(frames));
+  if (!sub_frame) return out;  // seven bytes: frame resolution only
+
+  // Whatever the frame number could not express. The decoder *adds* this to
+  // the frame time rather than replacing it, so it is the remainder and not
+  // the fraction -- writing the whole fraction here counts it twice and puts
+  // the box up to a frame ahead of where it was asked to be.
+  double remainder = frac - static_cast<double>(frames) / fps;
+  if (remainder < 0.0) remainder = 0.0;
+  uint32_t us = static_cast<uint32_t>(remainder * 1e6 + 0.5);
+  // Only reachable below about 16 fps, where one frame is longer than the
+  // field can count. No real box is down there.
+  if (us > 0xFFFF) us = 0xFFFF;
+  out.push_back(static_cast<uint8_t>(us >> 8));
+  out.push_back(static_cast<uint8_t>(us & 0xFF));
+  return out;
+}
+
+std::vector<uint8_t> encode_micros(double sod, uint8_t flags) {
+  sod = wrap_day(sod);
+  uint64_t us = static_cast<uint64_t>(sod * 1e6 + 0.5);
+  if (us >= 86400ull * 1000000ull) us = 86400ull * 1000000ull - 1;
+
+  std::vector<uint8_t> out;
+  out.push_back(kTypeMicros);
+  out.push_back(flags);
+  out.push_back(0x00);  // byte 2 carries no frame rate in this layout
+  for (int shift = 32; shift >= 0; shift -= 8) {
+    out.push_back(static_cast<uint8_t>((us >> shift) & 0xFF));
+  }
+  return out;
+}
+
+std::vector<uint8_t> encode_static() {
+  return std::vector<uint8_t>{kTypeStatic, 0x3d, 0x00, 0x00,
+                              0x00,        0x00, 0x00, 0x00, 0x00};
 }
 
 std::string to_hex(const uint8_t* data, size_t len) {

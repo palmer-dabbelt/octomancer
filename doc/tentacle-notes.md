@@ -178,6 +178,17 @@ at zero. A linear fit absorbs this into its intercept, so it does not affect
 rate or drift measurements — but treat the absolute sub-frame value as carrying
 a small constant bias of unknown origin.
 
+*The pair is not a canonical spelling of an instant.* This follows from the
+offset above and only matters to something that writes these packets rather
+than reads them, which until now nothing did. Because the sub-frame value can
+exceed a frame, a box may describe an instant as frame 3 plus 45.3 ms where the
+same instant would more naturally be written frame 4 plus 3.6 ms. Both decode
+to the same microsecond and both are correct. `octo::encode_timecode` in
+`src/tentacle.h` therefore promises only that its output decodes back to the
+time it was given — the test that holds it to this file compares the decoded
+times, not the bytes, and 11 of the 212 timecode packets here are cases where
+the bytes would differ.
+
 *They are not a checksum, which was ruled out rather than assumed.* Two
 identical 7-byte prefixes were observed carrying different suffixes, which
 alone disproves any function of the preceding bytes. Beyond that, all 65,536

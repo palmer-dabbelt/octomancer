@@ -14,7 +14,14 @@
 //     byte 4    minutes
 //     byte 5    seconds
 //     byte 6    frames
-//     byte 7-8  microseconds within the frame, big-endian
+//     byte 7-8  microseconds since the frame, big-endian. Added to the frame
+//               time, never substituted for part of it -- and offset by about
+//               3.6 ms, so observed values run 3600..45300 rather than
+//               0..41666 and 5% of them exceed a 24 fps frame outright. See
+//               doc/tentacle-notes.md section 7. The consequence for anyone
+//               writing one of these rather than reading it: (frame, micros)
+//               is not a canonical spelling of an instant, and two encodings
+//               of the same microsecond can both be correct.
 //
 //   0x32, 8 bytes -- microsecond clock, seen on a Track E
 //     byte 0    type 0x32
@@ -75,6 +82,38 @@ struct Decoded {
 
 Decoded decode(const uint8_t* data, size_t len);
 Decoded decode(const std::vector<uint8_t>& data);
+
+// The inverse, for making a box that is not there.
+//
+// Only a test fixture and the fake radio have any use for these -- nothing in
+// octomancer transmits, and nothing should. They live beside the decoder
+// rather than in the fake because that is the only way they can be held to
+// it: encode-then-decode is checkable, and a second copy of the layout kept
+// somewhere else would drift from this one silently, which is the failure
+// mode where a synthetic bench proves the decoder against itself.
+//
+// The contract is exactly one property: what comes back out of decode() is
+// the `sod` that went in, to the precision the format allows. Anything else a
+// caller wants -- the ~3.6 ms floor real boxes show, a box running fast -- is
+// expressed by adding it to `sod` before calling, not by a second parameter
+// that would give the same payload two meanings.
+//
+// `sod` is seconds since local midnight; values outside a day are wrapped,
+// because a fake box drifting past midnight is a case worth being able to
+// arrange rather than an error. `sub_frame` false omits bytes 7-8 entirely,
+// which is how to make a box that reports frame resolution rather than
+// frame+us -- the decoder has a separate branch for it.
+std::vector<uint8_t> encode_timecode(double sod, int fps,
+                                     bool sub_frame = true,
+                                     uint8_t flags = 0x3d);
+
+// A 0x32 payload: the microsecond counter a Track E sends.
+std::vector<uint8_t> encode_micros(double sod, uint8_t flags = 0x3d);
+
+// A 0x42 payload, which carries no clock at all. Worth being able to make:
+// it is the one a decoder must refuse, and a bench with one on it proves the
+// refusal happens somewhere other than in a unit test.
+std::vector<uint8_t> encode_static();
 
 std::string to_hex(const uint8_t* data, size_t len);
 std::string to_hex(const std::vector<uint8_t>& data);

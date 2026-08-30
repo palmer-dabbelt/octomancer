@@ -41,28 +41,54 @@ where there used to be structural protection. `README.md` and
 `doc/service-notes.md` both assert the old design as a virtue and will need
 correcting as the churn lands.
 
-## The real split, which is about tempo
+## Three layers, and which of them exist
 
 The daemons still divide, but along a different line: **a tight loop doing
-timecode messaging, and a loose loop doing configuration.**
+timecode messaging, a loose loop doing configuration, and the programs a
+person actually looks at.**
 
 ```
-  [Tentacle boxes] --adverts--> SYNC DAEMON  (Nordic firmware, or a Mac process)
-  [Blackmagic cam] <--GATT----> the same sync daemon
-                                       |
-                     control protocol over USB CDC / BLE GATT / unix socket
-                                       v
-                            CONTROL/STATE DAEMON  (Mac only)
-                               aggregates N sync daemons
-                                       ^
-                                       | unix socket
-                        octomancer CLI, TUI, Octomancer.app
+  LAYER 3 -- the tight loop. One radio, one event loop, no threads.
+
+    [Tentacle boxes] --adverts-->  SYNC DAEMON           (Mac: octomancer-sync
+    [Blackmagic cam] <---GATT--->  src/syncd.{h,cc}       --daemon. Later: the
+                                   owns the radio         Nordic, same source)
+                                       |   ^
+       bench, cycle, cam, radio,       |   |  ping, hello, status, devices,
+       alert, dev, status              |   |  sync, source, announce, forget
+       (status, upward)                |   |  (control changes, downward)
+                                       v   |
+              one connection per sync daemon, carrying both directions.
+              src/boxmsg.h framing: one message per line, announcements
+              arrive unasked. A unix socket today; USB CDC, then BLE
+              GATT, for a box that is not this process.
+                                       |   ^
+                                       v   |
+
+  LAYER 2 -- the loose loop. Owns no radio. Mac only.
+
+                             CONTROL DAEMON
+                             merges what the sync daemons report into one
+                             roster, drains their logs to disk, keeps the
+                             request state the interfaces poll, holds the
+                             permissions, answers everything above it
+                                       |   ^
+                                       v   |
+                        one socket, one vocabulary, several
+                        concurrent clients, none of them special
+                                       |   ^
+                                       v   |
+
+  LAYER 1 -- user interface. Any number at once.
+
+     octomancer CLI     octomancer tui     Octomancer.app     octomancerctl
 ```
 
-The **sync daemon** owns a radio. It scans for Tentacles, holds the camera
-link, runs the decision in `camsync.*`, emits announcements, and answers the
-control protocol. The same source builds as Nordic firmware and as a Mac
-process, and that is the whole point: the box is debuggable without a box.
+**Layer 3 owns the radio, and is the only thing that does.** It hears the
+Tentacle boxes, holds the camera link, runs the decision in `camsync.*`, emits
+announcements, and answers the control protocol. The same source builds as
+Nordic firmware and as a Mac process, and that is the whole point: the box is
+debuggable without a box.
 
 It exists: `src/syncd.{h,cc}`, started with `octomancer-sync --daemon`. The
 cycle is the old `run_cycle()` with its sleeps turned into states -- and the
@@ -72,15 +98,123 @@ particular instant to land on a boundary; the old daemon slept until then and
 stopped answering for a second every hour, and this arms a timer and goes back
 to the loop.
 
-The **control/state daemon** owns no radio. It holds links to any number of
-sync daemons — local over a unix socket, a Nordic over USB, later a Nordic
-over BLE — merges their rosters into one picture, drains their logs to disk,
-and answers the CLI, the TUI and the app.
+**Layer 2 owns no radio.** One connection down to each sync daemon, carrying
+status up and control changes down -- the same connection for both, because
+the protocol is asynchronous in both directions anyway and a second socket
+would only add a way for the two halves to disagree about whether the daemon
+is still there. Above that it merges what it is told into one roster, drains
+the logs to a filesystem the box does not have, holds the permissions, and
+answers however many interfaces are open.
 
-The binaries keep their names. Renaming them would churn launchd labels,
-socket paths and muscle memory for no gain, so `octomancer-sync` becomes the
-sync daemon and `octomancerd` is replaced in substance while keeping its label
-and socket.
+**Layer 1 is what a person runs.** Several at once, none of them privileged,
+none of them holding a radio, a camera or a lock. A command-line program that
+runs for forty milliseconds and an app that runs all afternoon are the same
+kind of client.
+
+### Where this is not the system yet
+
+The diagram above is the target. It is not a description of the present, and
+the difference is large enough that reading it as one would send somebody in
+the wrong direction. As of 2026-08-29, checked against the source rather than
+against memory:
+
+- **Layer 2 does not exist at all.** Nothing in the tree merges rosters,
+  drains a log, or fronts anything. `doc/TODO.md` records it as unstarted and
+  that is accurate.
+- **`octomancerd` is not layer 2 wearing a different hat. It owns a radio.**
+  It builds a scanner, keeps its own roster, and serves it
+  (`src/octomancerd.cc:402`). Making it layer 2 means taking the scanner out,
+  not adding a link to the top of it.
+- **The one connection between the daemons runs the wrong way.** The legacy
+  `octomancer-sync` is a *client* of `octomancerd`, polling it for the bench
+  and for whether the camera is on the air (`src/octomancer-sync.cc:318`,
+  `:362`). The model has status flowing sync → control; today it flows
+  control → sync, and `octomancerd` never dials out at all.
+- **Every interface opens two sockets and does the merging itself.**
+  `octomancer` holds `octomancerd.sock` and `octomancer-sync.sock` at once
+  (`src/octomancer.cc:54-55`), asks both (`:1009-1021`) and merges the answers
+  with `build_device_view()` (`:1076`); so does the TUI, and
+  `Octomancer.app` additionally launches
+  `octomancer-sync` as a subprocess for scanning and pairing, because that
+  binary is the one holding the Bluetooth grant. Layer 2 has to absorb all
+  three of those paths, not one.
+- **Nothing speaks the box protocol.** `octomancer-sync --daemon` serves
+  `octomancer-syncd.sock`, and outside the tests there is no client of it
+  anywhere. The shipped LaunchAgent still starts the legacy mode. So layer 3
+  is finished, running, and invisible to everything a person runs -- which is
+  also why the hardware verification the rest of this file is waiting on has
+  not happened.
+
+That last point is the one worth holding onto. Layer 2 is not the next feature;
+it is the thing that makes layer 3 reachable.
+
+### Six decisions the layering forces, and what they are
+
+Writing the model down turned up questions the diagram hides. Each is recorded
+with the answer this document takes, because discovering them one at a time
+while building layer 2 is how a shape gets decided by accident.
+
+They are choices rather than findings, and two of them are expensive enough to
+be worth confirming before anyone builds on them: **one language, all the way
+up** rewrites the parse path of every client that exists, and **one connection
+per sync daemon** puts an identity into the protocol that costs nothing now and
+is awkward to add once there are clients. The other four follow from the
+layering rather than from taste.
+
+**One connection per sync daemon, and normally there is one sync daemon.** The
+common case is a single local sync daemon on the Mac; the interesting case is
+that plus a Nordic over USB, and later over BLE. So the count is not fixed at
+one, and every roster line, alert and cycle report that layer 2 relays has to
+say which sync daemon it came from. That means an identity in the protocol —
+a name on `hello`, echoed on announcements — and it is far cheaper to add now
+than after there are clients. There is a concrete obstacle nobody had written
+down: the `--daemon` lock path is fixed at `octomancer-syncd.lock` with no flag
+to change it, while `--box-socket` *is* overridable, so today only one
+non-dry-run sync daemon can run per user however many sockets you name. The
+lock should be keyed on the box socket path.
+
+**One language, all the way up.** There are two line protocols in the tree
+today: `src/proto.h`'s block reply — banner, lines, `end`, one command per
+connection — spoken by both existing daemons, and `src/boxmsg.h`'s one message
+per line, spoken by the sync daemon. Layer 2 sits between them, so it either
+translates forever or it does not. It should not. `src/boxmsg.h` was written
+to be one message language for all three pipes, and the two vocabularies
+already disagree about the meaning of `id` — a correlation tag in one, a
+queued-request handle in the other — which is exactly the collision a
+permanent translation table would hide. The cost is honest: every client's
+parse path gets rewritten once.
+
+**Layer 2 is a request broker, not a relay.** The CLI and the app both issue a
+command, get an id, and poll `result id=N` until it finishes. The box protocol
+has no such thing: `sync` answers `ok what=sync queued=0|1` and the outcome
+turns up later as an untagged `cycle` announcement, from a single pending slot
+shared by every peer. So layer 2 has to assign the id, remember who asked, and
+correlate. It cannot do that reliably against an untagged broadcast, so the
+sync daemon should echo the requesting message's `id=` on the resulting
+`cycle` line. Without that, the broker is guessing, and it will guess wrong the
+first time two clients ask about different cameras.
+
+**Permission belongs to layer 2.** Today the sync daemon reads `cameras.conf`
+itself, and only the front-end tools write it. The box has no filesystem, so
+`src/syncd.h` already says permission will have to arrive over the protocol —
+but there is no verb that sets it, and on the Mac the `default_writes` field
+that anticipates one is dead because a `CamConf` is always installed. Making
+layer 2 the authority, pushing permission down as configuration, is what gives
+the Mac and the box the same shape.
+
+**`scan` and `pair` become verbs.** They are the one place layer 1 reaches
+past the socket entirely, launching `octomancer-sync` as a subprocess because
+it holds the Bluetooth grant. That cannot survive a long-running sync daemon
+holding the port — the CLI already has to offer to stop the agent first — and
+on a Nordic box there is no sibling binary to launch at all. Pairing
+especially, because the passkey has to reach whoever owns the radio.
+
+**`octomancerd.sock` is the surviving socket.** It has the launchd label and
+the muscle memory, so layer 2 keeps it and `octomancer-sync.sock` is retired
+along with the mode that serves it. This is a correction to what this file
+used to say: it claimed `octomancerd` would be "replaced in substance while
+keeping its label and socket", which read as though there had only ever been
+one socket to keep. There are three.
 
 ### What the daemon can be asked, and what it volunteers
 
@@ -118,12 +252,19 @@ off" is not.
 
 ## Why there are no threads anywhere
 
-`std::thread` appears at exactly two places in the tree: `hcilink.cc:47`, the
-HCI reader, and `octomancer-sync.cc:2062`, the control server. Everything else
-that reads like concurrency is a `sleep_for`, or CoreBluetooth's private
-dispatch queue.
+When this was written, `std::thread` appeared at exactly two places in the
+tree: the HCI reader in `hcilink.cc`, and the control server in
+`octomancer-sync.cc`. Everything else that read like concurrency was a
+`sleep_for`, or CoreBluetooth's private dispatch queue.
 
 They go because they cannot come with us.
+
+> **Re-counted 2026-08-29.** The HCI reader is gone -- `hcilink.cc` has no
+> thread at all now. One remains, in `octomancer-sync.cc`'s legacy control
+> server, and it goes with the mode that owns it; `doc/TODO.md` tracks that as
+> part of the cutover. The line numbers this paragraph used to cite have long
+> since moved, which is why it now names files rather than lines: a census
+> pinned to line numbers is a census that rots.
 
 > **Measured 2026-08-29.** The Zephyr SDK 1.0.1 `arm-zephyr-eabi` libstdc++
 > has `_GLIBCXX_HAS_GTHREADS` undefined in **every** one of its multilib
@@ -230,18 +371,21 @@ The model is fully event-based: never wait inside a call, only enqueue and
 dequeue. That is a stronger rule than it first appears, and it is load-bearing
 for a reason that is easy to miss.
 
-`src/camera_hci.cc` — a portable POSIX file compiled into `libocto.a`, not
-part of the Mac backend — has **its own** mutex and condition variable, with
-two waits whose predicates only an `hcilink` callback can satisfy:
-`await_state` at `:366` and `ensure_encrypted` at `:440`. Delete the reader
+The example that made the rule worth stating is worth keeping even though the
+code is gone. `src/camera_hci.cc` — a portable POSIX file compiled into
+`libocto.a`, not part of the Mac backend — used to have **its own** mutex and
+condition variable, with two waits whose predicates only an `hcilink` callback
+could satisfy: `await_state`, and the encryption step. Delete the reader
 thread and leave those waits in place, and the single remaining thread parks
-on a condition variable with nothing left alive to signal it. That is not a
-slow path; it is a guaranteed deadlock, in a file that neither the first
-design pass nor the obvious grep for `std::thread` had looked at.
+on a condition variable with nothing left alive to signal it. Not a slow path:
+a guaranteed deadlock, in a file that neither the first design pass nor the
+obvious grep for `std::thread` had looked at.
 
-An event-based model dissolves this rather than patching it. `await_state` and
-`ensure_encrypted` stop being waits at all and become states in the sync
-machine. This is also why `src/loop.h` deliberately offers **no** primitive
+An event-based model dissolves this rather than patching it, and that is what
+happened — `src/camera_hci.cc` has no mutex, no condition variable and no
+`await_state` today, and what were waits are states in the sync machine. Do
+not go looking for the deadlock in the current file; look at why it was
+invisible. This is also why `src/loop.h` deliberately offers **no** primitive
 that waits inside a call: the shape is available in C++ whether or not we
 provide a helper, and not providing one is what stops it being written again.
 
@@ -332,8 +476,8 @@ added, at which point a failure is known to be the radio's.
 1. The loop, and de-threading the radio path. **Done.**
 2. The protocol codec, and the persistence record formats. Portable, tested.
    **Codec done; the record formats are not.**
-3. The Mac sync daemon and control daemon. The churn. **The sync daemon is
-   done** -- `src/syncd.{h,cc}`, cross-compiling for cortex-m4, thirty-one
+3. The Mac sync daemon and control daemon -- layers 3 and 2. The churn. **The
+   sync daemon is done** -- `src/syncd.{h,cc}`, cross-compiling for cortex-m4, thirty-two
    properties pinned against a fake camera on a clock that is a variable, and
    run against the room over a real dongle. The control daemon is not started.
 4. Standalone firmware over USB.
@@ -611,7 +755,7 @@ is.
   a room with 37 LE devices in it. Everything past the scan -- connect,
   discover, subscribe, pair, write -- still waits for a camera to be switched
   on.
-* The sync daemon **against a camera**. Thirty-one properties are pinned
+* The sync daemon **against a camera**. Thirty-two properties are pinned
   against a fake one, which is a statement about this program's arithmetic and
   not about a Blackmagic body. The first real cycle is still ahead.
 * Whether the nRF52840's controller will scan, advertise, hold a central link
@@ -619,9 +763,14 @@ is.
   design requires it. What would settle it: the Kconfig for concurrent roles,
   and then an actual four-way test.)**
 * RAM at run time, as above.
-* Every byte layout in the protocol and the broadcast, which are not yet
-  written.
+* The BLE status broadcast, whose byte layout is not written. The control
+  protocol's is: `src/boxmsg.h` and the vocabulary table above are what the
+  sync daemon actually serves.
+* **Layer 2, entirely.** Which is the one that matters most, because until it
+  exists nothing a person runs can reach the sync daemon at all, and every
+  other item on this list is waiting behind that.
 
-The loop, the message codec and the HCI host are the parts of this document
-that exist and run. Everything below the "order of work" heading past step 2
-is still description.
+The loop, the message codec, the HCI host, the shared radio and the sync
+daemon are the parts of this document that exist and run -- steps 1 through 3,
+less the control daemon. Everything from the control daemon onwards is still
+description.

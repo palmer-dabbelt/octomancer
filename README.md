@@ -17,27 +17,46 @@ Two daemons, and the tools that talk to them. All C++, sharing one library:
 | `octomancerctl` | the older, bench-only view of `octomancerd`. Still there; `octomancer` covers more. |
 
 The split between the two daemons is deliberate. `octomancerd` is meant to run
-all the time under launchd, so it is built so that it *cannot* disturb a
-recording: there is no `connect` and no `write` anywhere in it. Setting a clock
+all the time under launchd, so it was built so that it *cannot* disturb a
+recording: nothing in it connects to a camera or writes to one. Setting a clock
 is an action, and an action belongs in a program somebody chose to run — and in
 one whose Bluetooth grant can be taken away on its own, without also blinding
 the listener.
 
-That split is on its way out, and this paragraph says so rather than letting it
-be discovered. The target is a screenless box on a rig that has to do both jobs
-with one radio, and a design where they are two executables cannot run there at
-all; running a different architecture on the Mac would then mean the interesting
-code existed twice and was debugged once. `octomancer-sync --daemon` is the
-replacement — one process, one event loop, no threads — and `doc/box-notes.md`
-explains what is given up with it. It is not the daemon you should be running
-yet: on a Mac the only asynchronous camera backend is the dongle's, so without
-one plugged in it listens, answers, and syncs nothing. With one plugged in it
-now does both jobs on that single radio — hearing the timecode boxes while it
-looks for a camera — which is the arrangement the box will have to live with.
-Until it takes over,
-what protects a recording stops being a binary that structurally cannot write
-and becomes `cameras.conf`, which disables writes for any camera nobody has
-named.
+That used to be a structural guarantee and it is now only a true statement
+about the code. `octomancerd`'s dongle scanner links the whole HCI host in with
+it, so `nm` on the binary finds `hci::Link::connect` and `att::write_request` —
+reachable from nothing, but present. Worth knowing before anyone leans on the
+old phrasing: the protection is that no code path calls them, not that they
+could not be called.
+
+That split is on its way out, and this paragraph says so rather than letting
+it be discovered. The target is a screenless box on a rig that has to do both
+jobs with one radio, and a design where they are two executables cannot run
+there at all; running a different architecture on the Mac would then mean the
+interesting code existed twice and was debugged once.
+
+What replaces it is three layers rather than two daemons:
+
+| | |
+|---|---|
+| **user interface** | the command-line programs, the TUI and the app. Several at once. None of them holds a radio. |
+| **control daemon** | answers all of them, and holds one connection down to a sync daemon: status coming up, control changes going down. Owns no radio. |
+| **sync daemon** | the tight loop of BLE message timing. The only thing that talks to a timecode box or a camera. On the Mac it is a process; on the box it is the firmware, from the same source. |
+
+`doc/box-notes.md` has the diagram, the reasoning, and — more usefully — a
+plain statement of which of the three exist. As of now: the sync daemon does
+(`octomancer-sync --daemon`), the interfaces do, and **the control daemon does
+not**. Until it is written, nothing a person runs can reach the sync daemon at
+all, which is why it is not yet the daemon you should be running. On a Mac
+without a dongle it listens, answers, and syncs nothing, because the only
+asynchronous camera backend is the dongle's. With one plugged in it does both
+jobs on that single radio, hearing the timecode boxes while it looks for a
+camera, which is the arrangement the box will have to live with.
+
+Until it takes over, what protects a recording stops being a binary that
+structurally cannot write and becomes `cameras.conf`, which disables writes
+for any camera nobody has named.
 
 Neither daemon has a user interface. Both serve a Unix socket, and everything
 you look at or press is a separate process asking over it. That is what lets
@@ -139,8 +158,10 @@ which is the signal to re-jam it in the Tentacle app. That judgement is made on
 a median rather than a single reading, with hysteresis and three-observation
 confirmation, so a box parked near the threshold cannot spam you.
 
-`doc/service-notes.md` covers the architecture, the wire protocol, the
-threading, and why drift is refused rather than estimated from short samples.
+`doc/service-notes.md` covers the wire protocol and why drift is refused
+rather than estimated from short samples. For the architecture read
+`doc/box-notes.md` instead: it has the three layers the project is moving to,
+and an honest account of which of them exist.
 
 ### One of each, at a time
 
@@ -156,6 +177,15 @@ Two of them connect to the same camera and share one file of learned biases,
 and neither looks broken while they do it -- they just quietly disagree about
 what the camera reads. The lock is held by the open file rather than written
 into it, so a daemon that is killed outright does not lock its successor out.
+
+One gap in that, said plainly because it is reachable today.
+`octomancer-sync --daemon` deliberately takes a *different* lock file, so that
+it can be run beside the daemon it is meant to replace while it is being
+trusted — but it defaults to the same per-camera database. So the two of them
+side by side are exactly the pair of writers this section says cannot happen.
+That is the price of running the replacement next to the thing it replaces,
+and it goes away when the cutover does; until then, give the daemon its own
+`--camdb` if you run both.
 
 The modes that never write anything take no lock and can be run next to a
 running daemon: `--dry-run`, `--scan-only`, `--watch` and `--poke` for
@@ -882,14 +912,25 @@ Two differences are real and cannot be papered over:
   everything worked immediately. The dongle arrives as a stranger, so the
   camera displays a six-digit passkey — pass it with `--passkey`.
 
-**Today the dongle can watch but not act.** Scanning over it works and is what
-the daemon and the window use. Setting a clock over it does not: that half was
-rebuilt on the event loop for the standalone box — see `doc/box-notes.md` — and
-the program that drives it is not written yet, so `--radio=dongle` with
-`octomancer --set` says so and stops rather than appearing to work. Use
-`--radio=corebluetooth` to write a clock. Nothing is lost that ever worked;
-`doc/dongle-notes.md` records that writing a clock over a dongle has never been
-run against hardware at all.
+**The dongle can act, but only from the new daemon.** Scanning over it works
+and is what `octomancerd` and the window use. Setting a clock over it needs
+`octomancer-sync --daemon`, which drives the event-loop camera client written
+for the standalone box — see `doc/box-notes.md`. The older blocking tools
+cannot: they wait on a reader thread that no longer exists, so asking one of
+them for a camera over the dongle prints why and stops rather than appearing
+to work. Use `--radio=corebluetooth` for those, or the daemon for the dongle.
+
+Sharing matters here and did not use to. One dongle is one HCI link, and the
+daemon needs to hear the timecode boxes *while* it holds a camera, so both
+jobs run on the same link — `src/hcishare.h`, and the section in
+`doc/box-notes.md` about what that cost to find out. Two programs cannot share
+one dongle, and since 2026-08-29 the second one is refused at the port rather
+than quietly corrupting the first.
+
+What is still true is the limit `doc/dongle-notes.md` records: **connecting,
+pairing and writing a clock over a dongle have never run against a real
+camera.** The scan has, repeatedly. Everything past it is pinned against a
+scripted controller and nothing else.
 
 ### Which dongle to buy
 

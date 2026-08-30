@@ -128,6 +128,20 @@ bool split_reply(const std::string& text, std::string* err,
         if (err) *err = "not an octomancer reply: " + line;
         return false;
       }
+      // And the version, which this used to skip while proto.cc's parser
+      // refused it. Half-checking is worse than not checking: it is what lets
+      // a client read a reply it does not understand as though it did, and the
+      // whole reason the banner carries a number is so that a breaking change
+      // arrives as a refusal rather than as a surprising field.
+      const int version = std::atoi(line.c_str() + 11);
+      if (version != kProtocolVersion) {
+        if (err) {
+          *err = "unsupported protocol version " + std::to_string(version) +
+                 " (this program speaks " + std::to_string(kProtocolVersion) +
+                 ")";
+        }
+        return false;
+      }
       seen_banner = true;
       continue;
     }

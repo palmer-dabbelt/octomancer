@@ -822,6 +822,50 @@ void test_a_peer_can_ask_not_to_be_announced_to() {
   CHECK_EQ(quiet.count("pong"), 1);
 }
 
+// Saying yes to a peer that is never going to hear anything is a peer waiting
+// all night for lines that were not coming. The daemon has a switch that turns
+// announcements off for everybody, and a per-peer `announce on=1` cannot
+// overrule it -- so the reply says what the peer asked for and, when the two
+// differ, what it is actually going to get.
+void test_announce_says_so_when_announcements_are_off_entirely() {
+  Rig rig;
+  rig.opt.announce = false;
+  rig.build();
+  FakePeer peer;
+  rig.daemon->peer_opened(&peer);
+
+  rig.daemon->peer_line(&peer, "announce on=1");
+  Message ok;
+  CHECK(peer.last("ok", &ok));
+  CHECK_STR(ok.get("what"), "announce");
+  CHECK_STR(ok.get("on"), "1");
+  CHECK_STR(ok.get("effective"), "0");
+
+  // And it is telling the truth: nothing is announced.
+  Sighting seen;
+  seen.id = "CAM-1";
+  seen.name = "Pocket 6K";
+  seen.rssi = -55;
+  seen.mono = rig.loop.now();
+  seen.wall = rig.wall();
+  rig.daemon->observe_camera(seen);
+  CHECK_EQ(peer.count("cam"), 0);
+}
+
+// With announcements on, the reply carries no `effective` at all: there is
+// nothing to warn about, and a field that is always present stops being read.
+void test_announce_is_quiet_when_there_is_nothing_to_warn_about() {
+  Rig rig;
+  rig.build();
+  FakePeer peer;
+  rig.daemon->peer_opened(&peer);
+  rig.daemon->peer_line(&peer, "announce on=1");
+  Message ok;
+  CHECK(peer.last("ok", &ok));
+  CHECK_STR(ok.get("on"), "1");
+  CHECK(!ok.has("effective"));
+}
+
 void test_a_camera_that_goes_off_the_air_is_announced_once() {
   Rig rig;
   rig.opt.announce_period = 5.0;  // a heartbeat, so silence gets timed
@@ -1008,6 +1052,8 @@ int main() {
   test_status_says_what_the_bench_is();
   test_devices_streams_and_says_when_it_is_done();
   test_a_peer_can_ask_not_to_be_announced_to();
+  test_announce_says_so_when_announcements_are_off_entirely();
+  test_announce_is_quiet_when_there_is_nothing_to_warn_about();
   test_a_camera_that_goes_off_the_air_is_announced_once();
   test_a_closed_peer_is_not_written_to();
   test_the_cycle_outcome_is_announced();

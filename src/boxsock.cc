@@ -313,6 +313,13 @@ void LineServer::accept_one() {
   for (;;) {
     const int fd = ::accept(listen_fd_, nullptr, nullptr);
     if (fd < 0) break;
+    if (clients_.size() >= kMaxClients) {
+      // Closed at once rather than queued. The alternative is to stop
+      // accepting, and the listening socket is level-triggered, so a peer left
+      // pending would wake the loop for as long as it waited.
+      ::close(fd);
+      continue;
+    }
     set_nonblocking(fd);
     ::fcntl(fd, F_SETFD, FD_CLOEXEC);
 #ifdef SO_NOSIGPIPE

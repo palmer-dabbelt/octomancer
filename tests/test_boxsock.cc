@@ -370,6 +370,55 @@ void test_a_stale_socket_file_is_cleared_away() {
 
 }  // namespace
 
+// A daemon that is meant to run on a device with a quarter of a megabyte of
+// RAM cannot let the number of peers grow. The per-peer output cap bounds what
+// one connection costs; without a cap on how many there are, that bound does
+// not add up to anything.
+void test_more_peers_than_the_cap_are_refused() {
+  Rig rig("cap");
+  std::string err;
+  CHECK(rig.server.start(&err));
+
+  const size_t cap = octo::LineServer::kMaxClients;
+  std::vector<std::unique_ptr<Peer>> peers;
+  for (size_t i = 0; i < cap; ++i) {
+    std::unique_ptr<Peer> peer(new Peer());
+    CHECK(peer->open(rig.path));
+    peers.push_back(std::move(peer));
+  }
+  rig.pump();
+  CHECK_EQ(rig.server.clients(), cap);
+  CHECK_EQ(rig.opened.size(), cap);
+
+  // One more. The connect itself succeeds -- the kernel completes it against
+  // the listen backlog -- and the server closes it without ever opening it,
+  // which is what the peer observes.
+  Peer extra;
+  CHECK(extra.open(rig.path));
+  rig.pump();
+  CHECK_EQ(rig.server.clients(), cap);
+  CHECK_EQ(rig.opened.size(), cap);        // never greeted
+  CHECK(extra.read_lines().empty());
+
+  // And the peers that were already there are unharmed: a refused connection
+  // must not cost anybody else theirs.
+  peers[0]->write("ping\n");
+  rig.pump();
+  const std::vector<std::string> got = peers[0]->read_lines();
+  CHECK(!got.empty());
+  if (!got.empty()) CHECK_STR(got.back(), "pong");
+
+  // Room again once one leaves.
+  peers.pop_back();
+  rig.pump();
+  CHECK_EQ(rig.server.clients(), cap - 1);
+  Peer late;
+  CHECK(late.open(rig.path));
+  rig.pump();
+  CHECK_EQ(rig.server.clients(), cap);
+  CHECK_EQ(late.read_lines().size(), static_cast<size_t>(1));
+}
+
 int main() {
   test_a_client_connects_and_is_greeted();
   test_two_messages_in_one_write_are_two_messages();
@@ -381,5 +430,6 @@ int main() {
   test_a_peer_that_stops_reading_is_dropped();
   test_a_second_server_will_not_take_the_socket();
   test_a_stale_socket_file_is_cleared_away();
+  test_more_peers_than_the_cap_are_refused();
   return octotest::report("test_boxsock");
 }

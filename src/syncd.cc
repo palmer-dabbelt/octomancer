@@ -1101,7 +1101,13 @@ void SyncDaemon::handle(MsgPeer* peer, const Message& msg) {
     Message out;
     out.verb = "ok";
     out.set("what", "announce");
+    // What the peer asked for, and what it is actually going to get. Those
+    // differ when announcements are switched off for the whole daemon, and
+    // answering "on=1" there would be a peer waiting all night for lines that
+    // were never going to come.
     out.set_bool("on", on);
+    const bool effective = on && opt_.announce;
+    if (effective != on) out.set_bool("effective", effective);
     reply(out);
     return;
   }

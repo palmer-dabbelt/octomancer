@@ -2,9 +2,13 @@
 //
 // This is what doc/box-notes.md calls the sync daemon, and the point of it is
 // that there is one of it. The same object runs as a process on this Mac and
-// as firmware on the Nordic; it owns a radio, hears Tentacle boxes, decides
+// as firmware on the Nordic; it drives a radio, hears Tentacle boxes, decides
 // whether a camera's clock needs setting, sets it, and answers whoever is
-// asking over the control protocol. A design where those were separate
+// asking over the control protocol. It drives one rather than owning one on
+// purpose: the loop, the roster, the camera and the configuration are all
+// handed to it, and the host program is what constructs them -- which is what
+// lets the whole thing be driven by a fake camera on a fake clock with no
+// radio in the building. See tests/test_syncd.cc. A design where those were separate
 // programs could not run on a box with one radio and one loop at all, and
 // running a different architecture on the Mac would mean the interesting code
 // existed twice and was debugged once.

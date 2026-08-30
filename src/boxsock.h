@@ -73,6 +73,18 @@ class LineServer {
   // of a megabyte to consume.
   void set_max_pending(size_t bytes);
 
+  // How many peers may be connected at once.
+  //
+  // The cap above bounds what one peer can cost; this bounds how many peers
+  // there can be, and without it the first bound does not add up to anything.
+  // Nothing is meant to open hundreds of these -- a control daemon holds one,
+  // a person debugging holds a second -- so the limit is low enough to be a
+  // real bound and high enough that nobody legitimate meets it. A connection
+  // over the limit is accepted and closed immediately rather than left
+  // pending, because leaving it queued on a listening socket that is
+  // level-triggered would spin the loop.
+  static constexpr size_t kMaxClients = 16;
+
  private:
   class Client;
 

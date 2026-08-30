@@ -821,8 +821,38 @@ void test_forget_drops_the_row_and_hands_over_the_id() {
 }
 }  // namespace
 
+// A banner carries a version so that a breaking change arrives as a refusal
+// rather than as a surprising field. This parser used to check that the line
+// began with "octomancer " and then ignore the number beside it, while
+// src/proto.cc's parser -- reading the *other* vocabulary over the same
+// framing -- refused it. Half-checking is what lets a client read a reply it
+// does not understand as though it did.
+void test_a_reply_from_a_future_version_is_refused() {
+  const std::string wire =
+      "octomancer 2\n"
+      "daemon version=9.9.9 poll=60\n"
+      "end\n";
+  octo::Status out;
+  std::string err;
+  CHECK(!octo::parse_status(wire, &out, &err));
+  CHECK(err.find("2") != std::string::npos);
+
+  // The current version still parses, which is the half that would otherwise
+  // be broken by a check that was too eager.
+  const std::string ok =
+      "octomancer 1\n"
+      "daemon version=0.1.0 poll=60\n"
+      "end\n";
+  CHECK(octo::parse_status(ok, &out, &err));
+  CHECK_STR(out.daemon.version, "0.1.0");
+
+  // And something that is not one of ours at all is still refused, as before.
+  CHECK(!octo::parse_status("hello there\nend\n", &out, &err));
+}
+
 int main() {
   test_parse_command_basics();
+  test_a_reply_from_a_future_version_is_refused();
   test_parse_command_cameras_accumulate();
   test_parse_command_unescapes_camera_names();
   test_parse_command_rejects_nonsense_numbers();

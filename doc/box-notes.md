@@ -65,12 +65,13 @@ it has one, is pointed at a sync daemon and nothing else.
                                                      source and the same
                                                      design either way.
                                       |   ^
-       state broadcast, unasked:      |   |   control, when somebody wants
-       per device -- how long ago it  |   |   something:
-       was last seen, its averaged    |   |     enable / disable device ID
-       offset and signal strength,    |   |     synchronise device ID now
-       its pairing state, and the     |   |     passcode for device ID
-       last few exact measurements    |   |
+       state broadcast, once a        |   |   control, when somebody wants
+       second, unasked. Per device:   |   |   something:
+       how long ago it was seen,      |   |
+       averaged offset and signal     |   |     enable / disable device ID
+       strength, its pairing state,   |   |     synchronise device ID now
+       and the last four exact        |   |     passcode for device ID
+       measurements                   |   |
                                       v   |
              one connection per sync daemon, carrying both directions.
              src/boxmsg.h framing: one message per line, the broadcast
@@ -176,19 +177,6 @@ fifteen minutes or more and is refused outright from a short one (see
 drift; the control daemon has been receiving and logging the exact
 measurements all along, and can.
 
-"A few" is doing real work in that sentence, and there is a measured reason to
-be careful about it.
-
-> **Read out of `src/registry.h`, 2026-08-30.** The retention defaults are a
-> Mac's: a one-hour window capped at 8192 samples, and `Sample` is two doubles.
-> That is **128 KB per device**, and there are usually five Tentacles in the
-> room. The nRF52840 has 256 KB of RAM in total, shared with the controller and
-> **(unverified: that figure is from memory and is not measured here -- see
-> `doc/standalone-notes.md`)**. Whichever way the uncertainty falls, one
-> device's window would be about half of everything and five would not fit, so
-> the box's window is not this one and the number wants choosing deliberately
-> rather than inheriting.
-
 **Downward, when somebody wants something:**
 
 | told | means |
@@ -201,6 +189,60 @@ That is a smaller vocabulary than the eight verbs `src/syncd.cc` serves today,
 and deliberately so. The current set grew from what was convenient to ask a
 process on the same machine; this is what a box on the end of a serial cable
 actually needs.
+
+### The rates, which are decided
+
+**Broadcast once per second. Keep the last four samples per device.**
+
+Those two numbers together do more than keep the memory down, and the second
+job is the interesting one.
+
+**Memory.** Four samples of two doubles is 64 bytes a device, 320 bytes for a
+five-box room. `Registry`'s Mac defaults -- an hour capped at 8192 samples --
+would be 128 KB a device on a part with 256 KB in total, shared with the
+controller and **(unverified: the RAM figure is from memory; see
+`doc/standalone-notes.md`)**. Two thousand times smaller, and now a rounding
+error rather than a design constraint.
+
+**Bandwidth.** One message per device per second. Over a serial cable that is
+nothing; over a BLE characteristic it is comfortably inside what a connection
+interval will carry, which is the transport that would otherwise have set the
+ceiling.
+
+**Redundancy, which is the point.** Every broadcast carries the last four
+samples, so each individual measurement goes out four times, in four
+consecutive broadcasts. Losing one to a dropped packet costs nothing; losing a
+measurement outright means losing four broadcasts in a row, which on a link
+healthy enough to be worth using does not happen. The control daemon gets an
+essentially complete record of every sighting without anything having to
+acknowledge, retransmit or be asked twice -- which matters because it is the
+control daemon that has to fit drift out of those sightings, and a fit is only
+as good as the gaps in it.
+
+That third property is what pins down what a "sample" is here, and it is worth
+being explicit because the obvious reading breaks it.
+
+> **Measured 2026-08-29, on the bench over a real dongle.** A Tentacle
+> advertises about **seven times a second** -- two boxes went from 294 and 285
+> sightings to 364 and 354 over ten seconds.
+>
+> So if the four retained samples were the last four *adverts*, a one-second
+> broadcast would carry four of the seven that arrived, three would never be
+> sent at all, and consecutive broadcasts would share **none** -- the
+> redundancy would be exactly zero, which is the opposite of the intent.
+>
+> The four are therefore **one per broadcast interval**: the most recent
+> sighting in each of the last four seconds. Then a sample rides four
+> broadcasts, the property above holds, and the sub-second adverts that are not
+> sent are the ones that were never going to add anything -- they are
+> re-measurements of the same second.
+
+One thing this deliberately does not settle: **the window the average is
+computed over need not be the window that is broadcast.** Four samples is a
+thin thing to take a median of, and the current per-device median is over an
+hour. A running average costs one double and no history at all, so the box can
+average over far more than it remembers individually. Which estimator to use is
+open; that it need not be constrained to four samples is not.
 
 ### Pairing, when there is nobody to ask
 
@@ -236,17 +278,21 @@ NVS and nothing else, and because state that is only in one place cannot get
 out of step with itself.
 
 **In RAM, and lost on reboot:** everything about message latency and timing.
-That is a sliding window of the last few sightings per device, the averages
-computed from it, and what the write delay has converged to. It is cheap to
-re-measure, it goes stale anyway, and none of it is worth a flash write.
+That is four samples per device, the running average, and what the write delay
+has converged to. It is cheap to re-measure, it goes stale anyway, and none of
+it is worth a flash write.
 
-The size of that window is the one number here that has to be chosen rather
-than inherited, because it is the only thing in layer 3 whose cost grows with
-the room. `Registry`'s Mac defaults would be 128 KB per device -- see above --
-on a part with 256 KB in total. What the box keeps is a *few* samples: enough
-to average over and enough to send up for logging, and not one more. Anything
-that needs a longer arm than that -- drift being the example -- is computed by
+Four is the whole of it: **64 bytes a device, 320 bytes for a five-box room**,
+against `Registry`'s Mac defaults of 128 KB a device. See "The rates, which are
+decided" above for why four and not some other number -- it is set by the
+redundancy the broadcast is supposed to provide, not by what fits. Anything
+needing a longer arm than that -- drift being the example -- is computed by
 layer 2 out of the measurements it has been receiving all along.
+
+The one thing here that is genuinely unbounded is the *set of devices*. Four
+samples each is nothing; ten thousand devices each with four samples is not.
+Nothing in the room justifies worrying about it yet, and a cap on the roster is
+the obvious answer when something does.
 
 **In flash, and only this:** whether each device is enabled or disabled, and
 the Bluetooth pairing state. Both are things a person decided, neither can be

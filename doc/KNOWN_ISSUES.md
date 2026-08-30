@@ -450,10 +450,10 @@ would be worth having before the control daemon rather than after.
 
 ### 5. The state broadcast is a poll, and the wrong shape
 
-The model has the sync daemon saying what it knows, unasked: per device, how
-long ago it was last seen, the averaged offset and signal strength, its pairing
-state, and a short sliding window of the last few exact measurements. Much of
-that exists in `src/syncd.cc`'s `dev` line, which already carries `id`, `name`,
+The model has the sync daemon saying what it knows, unasked, once a second:
+per device, how long ago it was last seen, the averaged offset and signal
+strength, its pairing state, and the last four exact measurements. Much of that
+exists in `src/syncd.cc`'s `dev` line, which already carries `id`, `name`,
 `rssi`, `live`, `age`, `offset`, `median`, `samples` and `ppm`. Four things are
 wrong with it.
 
@@ -476,19 +476,27 @@ still shows a raw number where an averaged one is wanted.
 `ppm` is **the one derived value that should move up**, and not because it is a
 judgement: because it needs a lever arm. Drift is refused outright from less
 than fifteen minutes of samples, and the box cannot hold fifteen minutes of
-samples -- `Registry`'s Mac defaults are an hour capped at 8192 two-double
-samples, or 128 KB per device, on a part with 256 KB in total and five
-Tentacles in a typical room. Layer 2 has
-been receiving the exact measurements all along and can fit it; layer 3 cannot
-and should stop trying. Which also means **the window the box does keep has to
-be chosen deliberately**, because it is the only state in layer 3 whose cost
-grows with the number of boxes in the room.
+samples. `Registry`'s Mac defaults are an hour capped at 8192 two-double
+samples -- 128 KB per device, on a part with 256 KB in total and five Tentacles
+in a typical room. Layer 2 has been receiving the exact measurements all along
+and can fit drift out of them; layer 3 cannot and should stop trying.
+
+Which is why **the retention on the box is four samples, not a duration.**
+`doc/box-notes.md` has the reasoning under "The rates, which are decided": four
+is 64 bytes a device, and it is set by the redundancy the broadcast provides
+rather than by what fits. Every sample goes out in four consecutive broadcasts,
+so losing a measurement means losing four in a row. The trap to avoid while
+implementing it is that those four must be **one per broadcast interval**, not
+the last four adverts -- a Tentacle advertises about seven times a second
+(measured 2026-08-29), so keeping the last four raw adverts would drop three of
+every seven and leave consecutive broadcasts sharing nothing at all, which is
+the exact opposite of the intent.
 
 It has **no pairing state**, which entry 7 is about.
 
 **What would settle it:** a control daemon that never sends `devices` and still
 has a complete, current roster, because everything arrives on its own -- and a
-box whose per-device RAM is a fixed number somebody chose.
+box whose per-device RAM is 64 bytes however long it has been running.
 
 ### 6. The control vocabulary is a different set from the one the box needs
 

@@ -367,8 +367,10 @@ have to be *un*built, and each one is something somebody will trip over while
 building layer 2.
 
 They are roughly in dependency order. The first eight are the shape -- where
-the code and the model disagree about what each half is for -- and the rest are
-things that will bite whoever writes the bridge between them.
+the code and the model disagree about what each half is for. Then the things
+that will bite whoever writes the bridge between them, and at the end two about
+what the interfaces show, which is where the layering finally becomes visible
+to somebody who does not read this file.
 
 ### 1. `octomancerd` points its radio at the timecode boxes
 
@@ -496,10 +498,19 @@ box's does not. See "Two windows, and why both go over the wire".
 
 Every sample goes out in four consecutive broadcasts, so losing a measurement
 means losing four in a row. The trap to avoid while implementing that is that
-the four must be **one per broadcast interval**, not the last four adverts -- a Tentacle advertises about seven times a second
-(measured 2026-08-29), so keeping the last four raw adverts would drop three of
+the four must be **one per broadcast interval**, not the last four adverts. A
+Tentacle advertises about seven times a second (measured 2026-08-29), so
+keeping the last four raw adverts would drop three of
 every seven and leave consecutive broadcasts sharing nothing at all, which is
 the exact opposite of the intent.
+
+It has **no sequence number**, so the Mac cannot tell a complete record from
+one with a hole in it. The four-sample redundancy repairs losses of up to three
+consecutive broadcasts, which means most gaps heal invisibly -- and that is
+exactly why the counter is needed: nothing in the arriving data says whether
+the healing happened. Call it `seq` rather than `id`, which already means three
+things (entry 17), and make it wide enough that a wrap is not confusable with a
+restart: at one broadcast a second, 16 bits wraps in eighteen hours.
 
 It has **no pairing state**, which entry 7 is about.
 
@@ -740,6 +751,37 @@ unrelated view, which is why it looks like it worked.
 It goes away when there is one socket, but until then it is a wrong answer
 rather than a missing feature, and `--json` is what anything scripted would
 use.
+
+### 19. Nothing records which sync daemon a device was heard by
+
+`build_device_view()` in `src/devices.h` merges two daemons' answers into one
+list of rows, and a `DeviceRow` has no idea where it came from. `DeviceView`
+carries a single `canonical_source` for the bench as a whole, which is the
+nearest thing to provenance in the tree and is one string for the whole table.
+
+That is survivable today, with two daemons on one machine and one radio between
+them. It stops being survivable the moment a dongle across the room is a source
+too, for two reasons:
+
+* **A person needs to know.** "This Mac can hear that box" and "something
+  across the room can hear it and is telling me" are different situations, and
+  the second has a link in it that can fail. The model puts that on the screen:
+  the dongle gets its own row, and anything reached through it reads
+  `NAME (via DONGLE)`.
+* **The same box will appear twice.** Heard by a Mac-local sync daemon and by a
+  dongle, one physical Tentacle produces two rows with different identifiers --
+  CoreBluetooth's per-host UUID and the real Bluetooth address -- and nothing
+  can tell they are the same device. Without a `(via …)` on each, that reads as
+  a bug in the merge. With one, it reads as what it is.
+
+Structurally: an origin on `DeviceRow`, and a third value in `DeviceKind`,
+which today is `kTentacle` and `kCamera`. And the name has to reach the Mac in
+the first place, which is the sync-daemon identity in `hello` -- see
+`doc/box-notes.md`, where this is what promotes that from a recommendation to a
+requirement.
+
+**What would settle it:** `octomancer status` showing a dongle, its dropped
+broadcast count, and at least one device listed as reached through it.
 
 ### And one piece of dead scaffolding
 

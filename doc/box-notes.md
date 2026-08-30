@@ -66,11 +66,12 @@ it has one, is pointed at a sync daemon and nothing else.
                                                      design either way.
                                       |   ^
        state broadcast, once a        |   |   control, when somebody wants
-       second, unasked. Per device:   |   |   something:
-       how long ago it was seen,      |   |
-       averaged offset and signal     |   |     enable / disable device ID
-       strength, its pairing state,   |   |     synchronise device ID now
-       and the last four exact        |   |     passcode for device ID
+       second, unasked, carrying a    |   |   something:
+       sequence number. Per device:   |   |
+       how long ago it was seen,      |   |     enable / disable device ID
+       averaged offset and signal     |   |     synchronise device ID now
+       strength, its pairing state,   |   |     passcode for device ID
+       and the last four exact        |   |
        measurements                   |   |
                                       v   |
              one connection per sync daemon, carrying both directions.
@@ -148,7 +149,9 @@ knows.
 
 **Upward, unasked, per device:** how long ago it was last seen, the **averaged**
 offset and the **averaged** signal strength, its pairing state, and a short
-sliding window of the last few exact measurements.
+sliding window of the last few exact measurements. Each broadcast also carries
+a **sequence number** of its own, which is about the link rather than about any
+device; see below.
 
 Age rather than a timestamp, because two clocks that disagree is exactly the
 thing this project exists to be careful about, and a number counted forward
@@ -284,6 +287,87 @@ makes a good clock, and is not constrained by it at all: a running average
 costs one double and no history, so the box can average over far more than it
 retains individually. Which estimator to use is still open.
 
+### The sequence number, and what it is for
+
+Every broadcast carries a sequence number of its own, counting up by one per
+broadcast per sync daemon. It says nothing about any device; it is a fact about
+the link.
+
+It answers the one question the samples cannot answer about themselves.
+Redundancy repairs small losses -- with four samples in every broadcast at one
+a second, up to three consecutive broadcasts can go missing and every
+measurement still arrives -- but nothing in the arriving data says whether that
+happened. A record with a hole in it looks exactly like a record without one.
+The sequence number is what turns "I have some samples" into "I have all of
+them, or I am missing seconds 41 through 46", and the second of those is what a
+log is worth reading.
+
+The two mechanisms are therefore complementary rather than redundant. The four
+samples make small losses harmless; the sequence number makes the remaining
+losses *visible*. Neither substitutes for the other.
+
+Two further things fall out of it for free, and both are worth having:
+
+* **A sequence that goes backwards means the sync daemon restarted.** That is
+  information, not an error, and it is the honest way to learn it -- the box
+  cannot announce its own reboot after the fact.
+* **A sequence that stops advancing means the link is dead**, which is
+  otherwise indistinguishable from a quiet room. A daemon that is still
+  connected and no longer talking is exactly the failure that hides.
+
+Two small decisions to get right rather than discover:
+
+**Call it `seq`, not `id`.** `id` already means three different things across
+these protocols -- a correlation tag, a queued-request handle, and a device
+identifier -- and `doc/KNOWN_ISSUES.md` has that overloading as work. A fourth
+use would be the mistake that entry is warning about.
+
+**Make it wide.** At one a second a 32-bit counter runs for 136 years. A 16-bit
+one wraps in eighteen hours, which is inside the time a rig might be left
+running, and after it wraps "the daemon restarted" and "the counter went round"
+are the same observation.
+
+### Where a device came from, and saying so
+
+The roster the control daemon shows is merged from every sync daemon it is
+connected to, and **which one a device was heard by is shown rather than
+hidden**. In `octomancer status`:
+
+* **The dongle is itself a row.** Not a timecode box and not a camera, but a
+  device in its own right, with its own state: whether it is connected, over
+  which transport, how long since its last broadcast, and whether its sequence
+  numbers have gaps. That last one is where the section above lands in front of
+  a person -- "this dongle has dropped four per cent of the last minute" is a
+  row in the table, not something buried in a log.
+* **Anything reached through it reads `NAME (via DONGLE)`.** A device heard by
+  a sync daemon on this Mac reads plainly, with no suffix. So the difference
+  between "this Mac can hear that box" and "something across the room can hear
+  it and is telling me" is visible at a glance, and it is a difference that
+  matters: the second one has a link in it that can fail.
+
+This is what settles the identity question in "Six decisions" below from a
+recommendation into a requirement. A name for each sync daemon is not internal
+bookkeeping to be added when convenient -- it is on the screen, so it has to be
+in the protocol, and it should go into `hello` before there is anything to
+migrate.
+
+There is a consequence worth stating plainly, because it will look like a bug
+the first time somebody sees it. **A timecode box heard by both a Mac-local
+sync daemon and a dongle will appear twice.** Not because the merge is careless
+but because the two sightings genuinely have different names: CoreBluetooth
+hands out an opaque per-host UUID and HCI hands out the real Bluetooth address,
+so nothing can tell that the two rows are one box. `README.md` already records
+that a bench learned over one radio is not recognised over the other. The
+`(via …)` suffix is what makes the duplicate legible instead of mysterious --
+two rows, each saying who heard it -- and that is the best available answer
+until something correlates them, which needs more than a name.
+
+Structurally this asks for two things that do not exist: an origin on
+`DeviceRow` in `src/devices.h`, and a third value in `DeviceKind`, which today
+is `kTentacle` and `kCamera`. `DeviceView` already carries `canonical_source`
+to say which daemon a number came from, so the idea has a precedent in the file
+it belongs in.
+
 ### Pairing, when there is nobody to ask
 
 The sync daemon does the pairing, because pairing is a radio operation and the
@@ -397,20 +481,23 @@ Writing the model down turned up questions the diagram hides. Each is recorded
 with the answer this document takes, because discovering them one at a time
 while building layer 2 is how a shape gets decided by accident.
 
-They are choices rather than findings, and two of them are expensive enough to
-be worth confirming before anyone builds on them: **one language, all the way
-up** rewrites the parse path of every client that exists, and **one connection
-per sync daemon** puts an identity into the protocol that costs nothing now and
-is awkward to add once there are clients. The other four follow from the
-layering rather than from taste.
+They are choices rather than findings. One of them is still worth confirming
+before anyone builds on it -- **one language, all the way up** rewrites the
+parse path of every client that exists. **One connection per sync daemon** was
+in that category and no longer is: the identity it puts into the protocol is
+now user-visible, so it is settled. The other four follow from the layering
+rather than from taste.
 
 **One connection per sync daemon, and normally there is one sync daemon.** The
 common case is a single local sync daemon on the Mac; the interesting case is
 that plus a Nordic over USB, and later over BLE. So the count is not fixed at
 one, and every roster line, alert and cycle report that layer 2 relays has to
-say which sync daemon it came from. That means an identity in the protocol —
-a name on `hello`, echoed on announcements — and it is far cheaper to add now
-than after there are clients. There is a concrete obstacle nobody had written
+say which sync daemon it came from. That means an identity in the protocol --
+a name on `hello`, echoed on announcements -- and this is no longer a
+recommendation: "Where a device came from, and saying so" above puts that name
+on the screen, as the `(via …)` on every proxied device and as the dongle's own
+row. A name that a person reads has to be in the protocol. There is a concrete
+obstacle nobody had written
 down: the `--daemon` lock path is fixed at `octomancer-syncd.lock` with no flag
 to change it, while `--box-socket` *is* overridable, so today only one
 non-dry-run sync daemon can run per user however many sockets you name. The
@@ -426,8 +513,8 @@ already disagree about the meaning of `id` -- a correlation tag in one, a
 queued-request handle in the other -- while each of them separately overloads
 it again as a device or camera identifier. That is the collision a permanent
 translation table would hide, and it is the reason the broker below has to
-assign its own handles rather than pass one through. The cost is honest: every client's
-parse path gets rewritten once.
+assign its own handles rather than pass one through. The cost is honest:
+every client's parse path gets rewritten once.
 
 **Layer 2 is a request broker, not a relay.** The CLI and the app both issue a
 command, get an id, and poll `result id=N` until it finishes. The box protocol
@@ -468,12 +555,12 @@ and `passcode for device ID` coming back down -- rather than a verb that
 starts something and waits for it. Waiting is the thing a box on the end of a
 serial cable cannot do.
 
-**`octomancerd.sock` is the surviving socket.** It has the muscle memory -- both agents
-carry a launchd label -- so layer 2 keeps it and `octomancer-sync.sock` is retired
-along with the mode that serves it. This is a correction to what this file
-used to say: it claimed `octomancerd` would be "replaced in substance while
-keeping its label and socket", which read as though there had only ever been
-one socket to keep. There are three.
+**`octomancerd.sock` is the surviving socket.** It has the muscle memory --
+both agents carry a launchd label -- so layer 2 keeps it, and
+`octomancer-sync.sock` is retired along with the mode that serves it. This is a
+correction to what this file used to say: it claimed `octomancerd` would be
+"replaced in substance while keeping its label and socket", which read as
+though there had only ever been one socket to keep. There are three.
 
 ### What the daemon can be asked, and what it volunteers
 

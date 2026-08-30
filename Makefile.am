@@ -42,7 +42,9 @@ libocto_a_SOURCES = \
 	src/bmd.h \
 	src/boxmsg.cc \
 	src/boxmsg.h \
+	src/boxcdc.cc \
 	src/boxsock.cc \
+	src/boxcdc.h \
 	src/boxsock.h \
 	src/camasync.h \
 	src/camconf.cc \
@@ -289,6 +291,7 @@ check_PROGRAMS = \
 	tests/test_att \
 	tests/test_bmd \
 	tests/test_boxmsg \
+	tests/test_boxcdc \
 	tests/test_boxsock \
 	tests/test_advert \
 	tests/test_camdb \
@@ -350,6 +353,9 @@ tests_test_boxmsg_LDADD = libocto.a
 # The same language over a real socket, with a real poll(2) under it. Nothing
 # is faked here on purpose: this file is system calls, and a fake socket would
 # be testing the fake.
+tests_test_boxcdc_SOURCES = tests/test_boxcdc.cc tests/harness.h
+tests_test_boxcdc_LDADD = libocto.a
+
 tests_test_boxsock_SOURCES = tests/test_boxsock.cc tests/harness.h
 tests_test_boxsock_LDADD = libocto.a
 

@@ -168,6 +168,16 @@ bool have_bundle_identity() {
   return [[main.bundleURL pathExtension] isEqualToString:@"app"];
 }
 
+// A device's identity in the Details menu: its id with its kind in front.
+//
+// The prefix is not decoration. Ids are only unique within a kind -- a camera
+// and a timecode box may perfectly well answer to the same string -- and the
+// menu now holds both, so an id alone can no longer say which row of
+// `_configEntries` a selection means.
+NSString* device_key(bool camera, const std::string& id) {
+  return [NSString stringWithFormat:@"%s:%s", camera ? "c" : "b", id.c_str()];
+}
+
 NSTextField* label(NSString* text) {
   NSTextField* f = [NSTextField labelWithString:text];
   f.lineBreakMode = NSLineBreakByTruncatingTail;
@@ -313,9 +323,32 @@ struct ScanHit {
   // --- the window's controls -----------------------------------------
   NSTextField* _daemonLine;
   NSTextField* _benchLine;
-  NSPopUpButton* _cameraPicker;
-  NSArray<NSString*>* _cameraKeys;
-  NSString* _cameraSelectedId;
+  // One picker for every device of every kind. See -rebuildDevicePicker.
+  //
+  // The selection is remembered by key, not by the title showing in the menu:
+  // a title gains and loses "(off the air)" as the device comes and goes, and
+  // a page that jumped back to the first device every time one went quiet
+  // would be useless in exactly the moment somebody was watching it.
+  // `_deviceKeys` is the menu's index-to-key map, rebuilt whenever the menu
+  // is.
+  //
+  // A key is the device's id with "c:" or "b:" in front of it, and the prefix
+  // is doing real work: ids are not unique across kinds, and every question
+  // this page asks -- which readings to draw, which half to show, which
+  // configuration row to write -- needs the kind as well as the id. Carrying
+  // them together means there is no second array to keep in step.
+  NSPopUpButton* _devicePicker;
+  NSArray<NSString*>* _pickerKeys;
+  NSString* _deviceSelectedKey;
+  // Says which kind the selection is, because the menu no longer does. The
+  // readings below it are different for a camera and a box, and a page that
+  // changed shape with nothing naming the reason would just look unstable.
+  NSTextField* _deviceKind;
+  // The two halves, one of which is always hidden. NSStackView leaves a
+  // hidden arranged subview out of the layout entirely, so this costs no
+  // space rather than leaving a gap where the other kind would have been.
+  NSStackView* _cameraHalf;
+  NSStackView* _boxHalf;
   NSGridView* _detail;
   NSTextField* _tcValue;
   NSTextField* _errorValue;
@@ -341,15 +374,6 @@ struct ScanHit {
   NSTextField* _cameraNote;
 
   // --- the Details page, timecode-box half ------------------------------
-  //
-  // The selection is remembered by id, not by the title showing in the menu:
-  // a title gains and loses "(off the air)" as the box comes and goes, and a
-  // page that jumped back to the first box every time one went quiet would be
-  // useless in exactly the moment somebody was watching it. `_boxKeys` is the
-  // menu's index-to-id map, rebuilt whenever the menu is.
-  NSPopUpButton* _boxPicker;
-  NSArray<NSString*>* _boxKeys;
-  NSString* _boxSelectedId;
   NSTextField* _boxTcValue;
   NSTextField* _boxOffValue;
   NSTextField* _boxMacValue;
@@ -382,8 +406,8 @@ struct ScanHit {
 
   // --- the known-device list -------------------------------------------
   // Every device either daemon has heard of plus every device the
-  // configuration file mentions, merged and in a fixed order. Both pickers on
-  // the Details page index into this, and so do the checkboxes: a device
+  // configuration file mentions, merged and in a fixed order. The picker on
+  // the Details page indexes into this, and so do the checkboxes: a device
   // switched off is left out of the merged DeviceView entirely, so a page that
   // took its list from there would have no way to switch one back on.
   std::vector<ConfigEntry> _configEntries;
@@ -1041,9 +1065,10 @@ const CGFloat kWindowWidth = 460.0;
   _daemonLine = label(@"…");
   _benchLine = dim_label(@"…");
 
-  _cameraPicker = [[NSPopUpButton alloc] init];
-  _cameraPicker.target = self;
-  _cameraPicker.action = @selector(cameraPicked:);
+  _devicePicker = [[NSPopUpButton alloc] init];
+  _devicePicker.target = self;
+  _devicePicker.action = @selector(devicePicked:);
+  _deviceKind = dim_label(@"");
 
   _tcValue = mono_label(@"--");
   _errorValue = mono_label(@"--");
@@ -1137,9 +1162,6 @@ const CGFloat kWindowWidth = 460.0;
   // controls to give: nothing in this program can set a Tentacle's clock. The
   // note at the bottom says so rather than leaving the empty space to be read
   // as something unfinished.
-  _boxPicker = [[NSPopUpButton alloc] init];
-  _boxPicker.target = self;
-  _boxPicker.action = @selector(boxPicked:);
 
   _boxTcValue = mono_label(@"--");
   _boxOffValue = mono_label(@"--");
@@ -1198,19 +1220,38 @@ const CGFloat kWindowWidth = 460.0;
   boxActions.orientation = NSUserInterfaceLayoutOrientationHorizontal;
   boxActions.spacing = 12;
 
+  // The two halves, each gathered into a container so the page can show one
+  // and collapse the other. They keep the shape they had when they were two
+  // sections of one long page -- readings, then settings, then whatever can be
+  // done, then a note -- because that is the order somebody reads them in and
+  // it is the same order for both kinds.
+  _cameraHalf = [NSStackView stackViewWithViews:@[
+    detailRow, cameraFlags, actions, _cameraNote,
+  ]];
+  _boxHalf = [NSStackView stackViewWithViews:@[
+    boxDetailRow, boxFlags, boxActions, _boxNote,
+  ]];
+  for (NSStackView* half in @[ _cameraHalf, _boxHalf ]) {
+    half.orientation = NSUserInterfaceLayoutOrientationVertical;
+    half.alignment = NSLayoutAttributeLeading;
+    half.spacing = 10;
+  }
+
   NSStackView* detailsStack = [NSStackView stackViewWithViews:@[
-    heading(@"Camera"), _cameraPicker, detailRow, cameraFlags, actions,
-    _cameraNote,
-    heading(@"Timecode box"), _boxPicker, boxDetailRow, boxFlags, boxActions,
-    _boxNote,
+    heading(@"Device"), _devicePicker, _deviceKind, _cameraHalf, _boxHalf,
   ]];
   detailsStack.orientation = NSUserInterfaceLayoutOrientationVertical;
   detailsStack.alignment = NSLayoutAttributeLeading;
   detailsStack.spacing = 10;
   detailsStack.edgeInsets = NSEdgeInsetsMake(8, 8, 8, 8);
-  [detailsStack setCustomSpacing:20 afterView:_cameraNote];
-  [self pinWidth:_boxNote to:detailsStack inset:24];
-  [self pinWidth:_cameraNote to:detailsStack inset:24];
+  [detailsStack setCustomSpacing:16 afterView:_deviceKind];
+  [self pinWidth:_boxNote to:_boxHalf inset:24];
+  [self pinWidth:_cameraNote to:_cameraHalf inset:24];
+  // The halves are as wide as the page, so the one that is showing wraps its
+  // note to the window rather than to whatever its widest row happened to be.
+  for (NSStackView* half in @[ _cameraHalf, _boxHalf ]) {
+    [self pinWidth:half to:detailsStack inset:16];
+  }
 
   _notifyFailed = [NSButton checkboxWithTitle:@"a sync fails"
                                        target:self
@@ -1464,10 +1505,28 @@ const CGFloat kWindowWidth = 460.0;
     NSLayoutConstraint* fixed =
         [page.widthAnchor constraintEqualToConstant:page_width];
     fixed.active = YES;
-    [page layoutSubtreeIfNeeded];
-    tallest = MAX(tallest, page.fittingSize.height);
+    if (page == detailsStack) {
+      // Only ever one half of the Details page is on screen. Measuring it with
+      // both showing would size the window for a shape it never takes, and
+      // leave a band of nothing under whichever half is up -- which is the
+      // same complaint the flipped document view was fixing, arrived at from
+      // the other direction.
+      for (int camera = 0; camera < 2; ++camera) {
+        _cameraHalf.hidden = camera == 0;
+        _boxHalf.hidden = camera != 0;
+        [page layoutSubtreeIfNeeded];
+        tallest = MAX(tallest, page.fittingSize.height);
+      }
+    } else {
+      [page layoutSubtreeIfNeeded];
+      tallest = MAX(tallest, page.fittingSize.height);
+    }
     fixed.active = NO;
   }
+  // Left as -updateDetail: will find them; it is called before the window is
+  // shown and decides which half belongs up.
+  _cameraHalf.hidden = YES;
+  _boxHalf.hidden = YES;
   // A ceiling, because "as tall as the tallest page" is only a good rule while
   // the tallest page fits on a screen. It used to be a flat 620, which was
   // less than the Details page needs on any display made this decade -- so the
@@ -1542,22 +1601,26 @@ const CGFloat kWindowWidth = 460.0;
     _benchLine.stringValue = @"Bench: nothing heard yet";
   }
 
-  // The merged list of known devices first: both pickers index into it, and
-  // so do the checkboxes underneath them.
+  // The merged list of known devices first: the picker indexes into it, and so
+  // do the checkboxes underneath it.
   [self updateKnownDevices];
-  [self rebuildCameraPicker];
-  [self rebuildBoxPicker];
+  [self rebuildDevicePicker];
   // Built once and handed to both pages that read it. They are two views of
   // one list and must not be able to disagree about what is in it.
   const octo::DeviceView view = [self deviceView];
-  [self updateCameraDetail];
-  [self updateBoxDetail:view];
+  [self updateDetail:view];
   [self updateDevices:view];
 }
 
 // Rebuilt in place: replacing the whole menu on a two-second timer would fight
 // anyone trying to use it.
-// Both pickers, filled the same way from the same list.
+// One menu, every device, both kinds mixed together.
+//
+// It used to be two pickers under two headings, which meant the page asked
+// "which camera" and "which timecode box" as separate questions when the
+// question somebody actually has is "tell me about this thing". Boxes and
+// cameras appear in the order updateKnownDevices built them, which is the
+// order everything else in the program lists them in.
 //
 // The list is `_configEntries`, not the merged DeviceView, and that is the
 // load-bearing part: a device somebody switched off is deliberately absent
@@ -1566,73 +1629,82 @@ const CGFloat kWindowWidth = 460.0;
 //
 // Rebuilt in place, and only when the titles actually differ: replacing the
 // whole menu on a two-second timer would fight anybody trying to use it.
-//
-// The selection is remembered by id rather than by the title showing in the
-// menu, because a title gains and loses "(off the air)" as the device comes
-// and goes. Matching on the title would drop the selection back to the first
-// device every time one went quiet, which is exactly the moment somebody is
-// looking at it.
-- (void)fillPicker:(NSPopUpButton*)picker
-           cameras:(BOOL)cameras
-              keys:(NSArray<NSString*>* __strong*)keysOut
-          selected:(NSString* __strong*)selectedOut
-             empty:(NSString*)empty {
-  if (picker == nil) return;
+- (void)rebuildDevicePicker {
+  if (_devicePicker == nil) return;
   NSMutableArray<NSString*>* titles = [NSMutableArray array];
   NSMutableArray<NSString*>* keys = [NSMutableArray array];
   for (const ConfigEntry& e : _configEntries) {
-    if (e.camera != (cameras == YES)) continue;
     NSString* title = ns(e.name.empty() ? e.id : e.name);
     if (!e.present) title = [title stringByAppendingString:@" (off the air)"];
     if (!e.enabled) title = [title stringByAppendingString:@" — switched off"];
     // NSPopUpButton treats a title as an identity and drops the older of two
     // that match, which would leave `keys` a row longer than the menu and
-    // every selection past the collision pointing at the wrong device.
+    // every selection past the collision pointing at the wrong device. More
+    // likely now than it was with two menus: a camera and a box can only
+    // collide once they are in the same list.
     if ([titles containsObject:title]) {
       title = [NSString stringWithFormat:@"%@ [%@]", title,
                                          ns(e.id.substr(0, 8))];
     }
     [titles addObject:title];
-    [keys addObject:ns(e.id)];
+    [keys addObject:device_key(e.camera, e.id)];
   }
-  *keysOut = keys;
-  if ([titles isEqualToArray:[picker itemTitles]]) return;
+  _pickerKeys = keys;
 
-  [picker removeAllItems];
+  // The empty case goes before the "nothing changed" guard below, and has to.
+  // With no devices at all, `titles` and the menu's own titles are both empty
+  // and compare equal, so the guard returned with the menu exactly as it
+  // found it -- which on the first tick is no items at all, leaving an enabled
+  // drop-down that opens onto nothing.
   if (titles.count == 0) {
-    [picker addItemWithTitle:empty];
-    picker.enabled = NO;
+    if (_devicePicker.numberOfItems == 1 && !_devicePicker.enabled) return;
+    [_devicePicker removeAllItems];
+    [_devicePicker addItemWithTitle:@"No devices"];
+    _devicePicker.enabled = NO;
     return;
   }
-  [picker addItemsWithTitles:titles];
-  picker.enabled = YES;
+  if ([titles isEqualToArray:[_devicePicker itemTitles]]) return;
+
+  [_devicePicker removeAllItems];
+  [_devicePicker addItemsWithTitles:titles];
+  _devicePicker.enabled = YES;
   const NSUInteger want =
-      *selectedOut == nil ? NSNotFound : [keys indexOfObject:*selectedOut];
-  [picker selectItemAtIndex:want == NSNotFound ? 0 : (NSInteger)want];
-  if (want == NSNotFound) *selectedOut = keys.firstObject;
+      _deviceSelectedKey == nil ? NSNotFound
+                                : [keys indexOfObject:_deviceSelectedKey];
+  [_devicePicker selectItemAtIndex:want == NSNotFound ? 0 : (NSInteger)want];
+  if (want == NSNotFound) _deviceSelectedKey = keys.firstObject;
 }
 
-- (void)rebuildCameraPicker {
-  [self fillPicker:_cameraPicker
-           cameras:YES
-              keys:&_cameraKeys
-          selected:&_cameraSelectedId
-             empty:@"No cameras"];
-}
-
-// The id under a picker's current selection, or empty when there is none.
-- (std::string)pickedIdIn:(NSPopUpButton*)picker
-                     keys:(NSArray<NSString*>*)keys {
-  const NSInteger index = picker.indexOfSelectedItem;
-  if (keys == nil || index < 0 || index >= (NSInteger)keys.count) {
-    return std::string();
+// The key under the picker's current selection, or nil when there is none.
+- (NSString*)selectedDeviceKey {
+  const NSInteger index = _devicePicker.indexOfSelectedItem;
+  if (_pickerKeys == nil || index < 0 || index >= (NSInteger)_pickerKeys.count) {
+    return nil;
   }
-  return keys[index].UTF8String;
+  return _pickerKeys[index];
 }
 
-// Which camera the controls act on, as the id the daemon knows it by.
+- (BOOL)selectedIsCamera {
+  NSString* key = [self selectedDeviceKey];
+  return key != nil && [key hasPrefix:@"c:"];
+}
+
+// The selected device's id, but only when it is of the kind asked for. Every
+// caller wants one kind or the other -- a camera's readings are meaningless
+// for a box -- and returning an id of the wrong kind would have them look it
+// up, fail, and draw "no camera" when a camera is not what is selected.
+- (std::string)selectedIdIfCamera:(BOOL)camera {
+  NSString* key = [self selectedDeviceKey];
+  if (key == nil) return std::string();
+  if ([key hasPrefix:@"c:"] != (camera == YES)) return std::string();
+  return [key substringFromIndex:2].UTF8String;
+}
+
+// Which camera the controls act on, as the id the daemon knows it by. Empty
+// when the selection is a timecode box, which is the whole point: the buttons
+// that use this are in the half that is hidden then.
 - (std::string)selectedCameraId {
-  return [self pickedIdIn:_cameraPicker keys:_cameraKeys];
+  return [self selectedIdIfCamera:YES];
 }
 
 // Where the selected device sits in `_configEntries`, which is what a
@@ -1660,6 +1732,38 @@ const CGFloat kWindowWidth = 460.0;
     if (c.id == want) return &c;
   }
   return nullptr;
+}
+
+// Which half of the Details page is showing, and the readings in it.
+//
+// Both halves are updated whichever is visible. It costs nothing -- they are
+// reading numbers already in memory -- and it means the hidden half is never
+// stale for the one frame after somebody switches to it.
+- (void)updateDetail:(const octo::DeviceView&)view {
+  if (_devicePicker == nil) return;
+
+  const BOOL camera = [self selectedIsCamera];
+  const BOOL any = [self selectedDeviceKey] != nil;
+
+  // Hidden rather than emptied: an arranged subview that is hidden is left out
+  // of an NSStackView's layout entirely, so the page is exactly as tall as the
+  // half being shown. With nothing selected at all, both halves go -- there is
+  // no kind to show readings for, and a page of dashes would be pretending
+  // there is.
+  _cameraHalf.hidden = !any || !camera;
+  _boxHalf.hidden = !any || camera;
+
+  if (!any) {
+    _deviceKind.stringValue =
+        _benchUp || _controlUp
+            ? @"Nothing has been heard yet."
+            : @"Neither daemon is answering.";
+  } else {
+    _deviceKind.stringValue = camera ? @"Camera" : @"Timecode box";
+  }
+
+  [self updateCameraDetail];
+  [self updateBoxDetail:view];
 }
 
 - (void)updateCameraDetail {
@@ -1754,27 +1858,16 @@ const CGFloat kWindowWidth = 460.0;
 
 // ------------------------------------------------------------------ actions
 
-- (void)cameraPicked:(id)sender {
-  (void)sender;
-  [self updateCameraDetail];
-}
+
 
 // --------------------------------------------- the Details page, box half
-
-- (void)rebuildBoxPicker {
-  [self fillPicker:_boxPicker
-           cameras:NO
-              keys:&_boxKeys
-          selected:&_boxSelectedId
-             empty:@"No timecode boxes"];
-}
 
 // The readings for the selected box, when the merged view has any. A box that
 // has been switched off is not in the view at all -- that is what switching it
 // off means -- so this returns nothing and the page says so rather than
 // drawing a row of dashes that could equally mean the radio is dead.
 - (const octo::DeviceRow*)boxIn:(const octo::DeviceView&)view {
-  const std::string want = [self pickedIdIn:_boxPicker keys:_boxKeys];
+  const std::string want = [self selectedIdIfCamera:NO];
   if (want.empty()) return nullptr;
   for (const octo::DeviceRow& r : view.rows) {
     if (r.kind == octo::DeviceKind::kTentacle && r.id == want) return &r;
@@ -1844,23 +1937,21 @@ const CGFloat kWindowWidth = 460.0;
   _cameraNote.textColor = [NSColor secondaryLabelColor];
 }
 
-- (void)boxPicked:(id)sender {
+- (void)devicePicked:(id)sender {
   (void)sender;
-  const NSInteger index = _boxPicker.indexOfSelectedItem;
-  if (_boxKeys != nil && index >= 0 && index < (NSInteger)_boxKeys.count) {
-    _boxSelectedId = _boxKeys[index];
-  }
-  [self updateBoxDetail:[self deviceView]];
+  NSString* key = [self selectedDeviceKey];
+  if (key != nil) _deviceSelectedKey = key;
+  [self updateDetail:[self deviceView]];
 }
 
 - (void)updateBoxDetail:(const octo::DeviceView&)view {
-  if (_boxPicker == nil) return;
+  if (_devicePicker == nil) return;
   NSArray<NSTextField*>* values = @[
     _boxTcValue, _boxOffValue, _boxResValue, _boxMacValue, _boxDriftValue,
     _boxSignalValue, _boxHeardValue,
   ];
 
-  const std::string picked = [self pickedIdIn:_boxPicker keys:_boxKeys];
+  const std::string picked = [self selectedIdIfCamera:NO];
   const NSInteger which = [self configIndexFor:picked camera:NO];
   const ConfigEntry* entry =
       which < 0 ? nullptr : &_configEntries[static_cast<size_t>(which)];
@@ -1977,7 +2068,7 @@ const CGFloat kWindowWidth = 460.0;
   _busy = true;
   _activity.stringValue = [what stringByAppendingString:@"…"];
   _activity.textColor = [NSColor secondaryLabelColor];
-  [self updateCameraDetail];
+  [self updateDetail:[self deviceView]];
 
   const std::string path = _controlSocket;
   const std::string request = command;
@@ -2048,7 +2139,7 @@ const CGFloat kWindowWidth = 460.0;
     [alert addButtonWithTitle:@"Cancel"];
     alert.alertStyle = NSAlertStyleWarning;
     if ([alert runModal] != NSAlertFirstButtonReturn) {
-      [self updateCameraDetail];  // put the picker back
+      [self updateDetail:[self deviceView]];  // put the picker back
       return;
     }
   }
@@ -2561,11 +2652,7 @@ const CGFloat kWindowWidth = 460.0;
       // The selection pointed at something that no longer exists; letting the
       // picker keep it would leave the page showing a device it can no longer
       // find and cannot act on.
-      if (camera) {
-        self->_cameraSelectedId = nil;
-      } else {
-        self->_boxSelectedId = nil;
-      }
+      self->_deviceSelectedKey = nil;
       self->_activity.stringValue =
           told ? [NSString stringWithFormat:@"Removed %@.", name]
                : [NSString stringWithFormat:

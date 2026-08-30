@@ -27,8 +27,15 @@ Still to write, roughly in order:
    daemons and serves the window, the TUI and the command line. Replaces the
    `octomancerd` / `octomancer-sync` split, which `doc/box-notes.md` records as
    an artifact of reverse engineering rather than a design goal. Nothing speaks
-   the box protocol yet except a test and whatever is typed into a socket by
-   hand.
+   the box protocol yet except the tests and whatever is typed into a socket
+   by hand.
+
+   Most of this item is not writing a new daemon. It is *un*building things
+   that are in the way -- a daemon that owns a radio it should not, a
+   connection pointing the wrong way, two protocols that cannot be bridged
+   without inventing state. Those are enumerated and numbered under "The three
+   layers, and where the code is not them yet" in `doc/KNOWN_ISSUES.md`, which
+   is the order to work through.
 
    This has been moved ahead of the boot-time retune, which it used to sit
    behind, because it is the blocker for the whole layering. `octomancer-sync

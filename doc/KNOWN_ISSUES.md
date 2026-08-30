@@ -344,35 +344,263 @@ table by a different route.
   specification's worked examples, LE Secure Connections is not implemented,
   and none of it has been run against an nRF52840.
 
-## Nothing a person runs can talk to the sync daemon
+## The three layers, and where the code is not them yet
 
-`octomancer-sync --daemon` is real. It owns the radio, runs the cycle, and
-serves `octomancer-syncd.sock` (`src/boxsock.cc:43`) in the message language of
-`src/boxmsg.h`. Nothing anybody types speaks that language. `octomancer` and
-Octomancer.app each open the two *other* sockets themselves -- octomancerd's
-and the legacy control socket (`src/octomancer.cc:54`, `ui/main.mm:402`) -- and
-merge the answers in the client, and the shipped LaunchAgent starts the legacy
-mode rather than the daemon. The only clients of the box protocol in the tree
-are tests: `tests/test_boxmsg.cc` for the codec, `tests/test_boxsock.cc` for
-the transport, and -- the one that actually exercises the vocabulary --
-`tests/test_syncd.cc`, whose `FakePeer` speaks real verbs at the daemon and
-decodes what comes back.
+`doc/box-notes.md` has the model: **interfaces** on top, a **control daemon**
+that owns no radio in the middle holding one connection down to each sync
+daemon, and a **sync daemon** at the bottom that owns the radio and is the only
+thing that speaks to a Tentacle box or a camera. This is the list of places the
+code disagrees with it, written out so they can be worked through rather than
+rediscovered one at a time.
 
-The consequence is that the daemon is invisible. It cannot be asked what it
-thinks, it cannot be told to do anything, and it cannot be configured, except
-by typing lines into a socket by hand.
+A note on which file this belongs in, because the boundary matters. The control
+daemon *not existing* is work that has not been done, and it lives in
+`doc/TODO.md` as item 2. What is below is the other thing: code that exists,
+runs, and actively contradicts the model -- a daemon that owns a radio it is
+not supposed to have, a connection pointing the wrong way, two protocols that
+cannot be bridged without inventing state. Those are not absences. They have to
+be *un*built, and each one is a thing somebody will trip over while building
+layer 2.
 
-What this is *not* is the reason so many entries in this file end in "a camera,
-switched on, and one cycle" and then stay open. Those stay open because there
-is no camera switched on. The daemon schedules its own cycles and writes each
-one to the console and the log, so running it in a terminal settles them with
-no client involved -- which is how the four-cycle measurement two sections
-above was taken. Blaming the missing layer for that would be a tidier story
-than the true one, and the true one is already written down.
+They are roughly in dependency order. The first four are the shape; the rest
+are things that will bite whoever writes the bridge.
 
-Not a defect in anything that was built. It is the layer that was never
-started, showing up as an absence: `doc/TODO.md` item 2 is the missing daemon,
-and item 3 is the cutover that follows it.
+### 1. `octomancerd` owns a radio, and layer 2 must not
+
+`octomancerd` is the binary that keeps the launchd label and becomes the
+control daemon. It builds a `ScanBridge`, wires advert, camera and state sinks
+into a `Registry`, calls `make_ble_scanner()`, and exits 1 if the scanner will
+not start. It is not a control daemon with a radio bolted on that can be
+unbolted quietly: the radio is where all its data comes from.
+
+So this is a removal, not an addition. The scanner comes out, the `Registry`
+stops being its own -- there is already one inside `SyncDaemon` -- and the
+bench arrives over the box protocol instead of off the air. Everything
+`octomancerd` currently reports has to start coming from below it.
+
+**What would settle it:** `octomancerd` starting and serving a useful snapshot
+on a machine with the radio unplugged, because it never wanted one.
+
+### 2. The connection between the daemons runs the wrong way
+
+The model has status flowing up, sync → control, over a connection the control
+daemon opens. Today the only inter-daemon connection is the reverse: the legacy
+`octomancer-sync` calls `octo::fetch()` against **octomancerd's** socket to ask
+for the bench and for whether the camera is on the air. `octomancerd` never
+dials out at all -- it includes `client.h` and calls nothing from it.
+
+Reversing this is most of what layer 2 is. It is listed separately from the
+entry above because it is a separate mistake: even after `octomancerd` loses
+its radio, something still has to make it the *initiator*, and nothing in
+either daemon is written that way today.
+
+**What would settle it:** `octomancer-sync` with no `--socket` handling at all,
+and `octomancerd` holding an open connection it opened itself.
+
+### 3. Every interface that shows the merged list opens two sockets
+
+`octomancer` holds `octomancerd.sock` and `octomancer-sync.sock` at once,
+queries both, and merges the answers with `build_device_view()` from
+`src/devices.h`. So does the TUI. So does `Octomancer.app`. The merge that
+belongs on the daemon side is in the client, three times.
+
+`octomancerctl` is the exception and only because it shows nothing about
+cameras: it opens `octomancerd.sock` alone and survives unchanged.
+
+The choice of which daemon to ask is made in the client too, at half a dozen
+call sites, and in `remove` it is made per device -- a camera's removal goes to
+one socket and a timecode box's to the other, in a ternary. All of that
+branching goes away with the second socket.
+
+**What would settle it:** `build_device_view()` called in exactly one place,
+inside the control daemon, and every front-end holding one socket path.
+
+### 4. Nothing speaks the box protocol, and launchd starts the wrong mode
+
+`octomancer-sync --daemon` serves `octomancer-syncd.sock` in `src/boxmsg.h`'s
+language. Outside `tests/`, nothing in the tree is a client of it -- the only
+things that speak it are `tests/test_boxmsg.cc` for the codec,
+`tests/test_boxsock.cc` for the transport, and `tests/test_syncd.cc`, whose
+`FakePeer` is the one that actually exercises the vocabulary. The shipped
+LaunchAgent runs `--poll 60`, the legacy mode.
+
+Be exact about what this blocks, because it is easy to overstate. It does
+**not** block the hardware verification the rest of this file waits on: the
+daemon schedules its own cycles and writes each to the console and the log, so
+running it in a terminal with a camera switched on settles those with no client
+involved. What is missing there is a camera. What this blocks is everything
+else -- the daemon cannot be asked what it thinks, told to do anything, or
+configured, except by typing lines into a socket by hand.
+
+**What would settle it:** anything a person runs printing something it learned
+over `octomancer-syncd.sock`. Even a one-verb debug client would do it, and
+would be worth having before the control daemon rather than after.
+
+### 5. Two line protocols, and layer 2 sits on the seam
+
+There are two framings over one token layer, carrying three vocabularies:
+
+* `src/proto.h` -- banner, escaped `key=value` lines, `end`; one command, one
+  whole reply, connection closed. Two unrelated vocabularies ride it:
+  `src/proto.cc`'s registry snapshot, served by `octomancerd`, and
+  `src/control.cc`'s camera-control surface, served by `octomancer-sync`. Both
+  banner themselves `octomancer 1` while being mutually unintelligible.
+* `src/boxmsg.h` -- one message per line on a connection that stays open, with
+  announcements arriving unasked. Served by the sync daemon.
+
+There is no translation layer anywhere, and the control daemon is where one
+would have to live. `doc/box-notes.md` records the decision taken -- take
+`boxmsg` all the way up and retire `proto` for daemon traffic -- but that is a
+decision, not a fact, and until it is made the entries below are the bill for
+the other choice.
+
+### 6. `sync` and `source` cannot be relayed, only brokered
+
+This is the one where translation is not a rename, and it is the reason the
+control daemon has to hold state.
+
+`src/control.cc` queues a `Request`, assigns it an id, returns it, and the
+caller polls `result id=N` until it finishes -- which `src/octomancer.cc` does
+every 500 ms, and so does the app. The box protocol has nothing like it:
+`sync` answers `ok what=sync queued=0|1` with no handle, and the outcome
+arrives later as a `cycle` announcement carrying no reference to the request
+that caused it. The daemon's pending-request state is a single slot shared by
+every peer, so two peers' requests cannot be told apart at all.
+
+So layer 2 must invent the id, remember which peer asked, and correlate the
+next `cycle` back to it -- and it cannot do that reliably against an untagged
+broadcast. Guessing works until two clients ask about different cameras.
+
+**The cheap half of the fix belongs in the sync daemon, not the bridge:** echo
+the requesting message's `id=` on the resulting `cycle` line, and make the
+pending-request state per-peer. Then the correlation is exact. Doing this
+before the control daemon exists is much easier than after.
+
+### 7. The two event channels are not one-for-one
+
+`src/control.cc` keeps a numbered event list and answers `events since=N` by
+replaying everything newer -- so a client that was not listening, or that
+reconnected, catches up. The sync daemon's announcements are unnumbered and
+unreplayable: a peer that connects late has simply missed whatever happened.
+
+Layer 2 cannot synthesise the replayable version from the other without keeping
+its own numbered log, which is a second place for the two to disagree about
+what happened. Better to decide which set is canonical and make the sync daemon
+emit that one.
+
+### 8. No verb grants write permission, and the box has no other route
+
+`src/syncd.h` says permission "will arrive over the control protocol", and
+`SyncdOptions::default_writes` is the field waiting for it. There is no verb
+that sets it -- the whole dispatch has eight verbs and none of them is about
+permission -- and on the Mac the field is dead anyway, because `run_daemon()`
+always installs a `CamConf` read from `cameras.conf` and that wins.
+
+The box has no filesystem, so this is not a nicety: as things stand a Nordic
+box has no way to be told which cameras it may write to, and the default
+permits nothing. Layer 2 should be the authority -- it reads and writes
+`cameras.conf` and pushes permission down as configuration -- which needs a verb
+that does not exist (`writes camera=… on=0|1`, or similar).
+
+**What would settle it:** a sync daemon with no `CamConf` at all, told what it
+may write to over the socket, on both platforms.
+
+### 9. `scan` and `pair` reach past the socket entirely
+
+`octomancer scan` and `octomancer pair` `exec` the sibling `octomancer-sync`
+binary; `Octomancer.app` runs it as an `NSTask`. Both do it for the same
+reason: that binary is the one holding the Bluetooth grant.
+
+This cannot survive a long-running sync daemon that already holds the radio --
+the CLI has to print a note telling you to stop the agent first, which is the
+symptom -- and on a Nordic box there is no sibling binary to launch at all.
+Pairing especially has to become a verb, because the passkey has to reach
+whoever owns the radio and there is no second route to it.
+
+Related, and worth fixing at the same time: `RadioOptions::prompt_for_passkey`
+is declared, defaulted to true, and read by nothing. There is no interactive
+passkey prompt anywhere; `--passkey` is the only way in.
+
+### 10. Three sockets, and one of them goes
+
+`octomancerd.sock`, `octomancer-sync.sock`, `octomancer-syncd.sock`. Two
+survive and do different jobs: `octomancerd.sock` becomes the one every
+interface holds, because it has the launchd label and the muscle memory, and
+`octomancer-syncd.sock` stays as the sync daemon's, which is what layer 2
+connects *down* to. `doc/box-notes.md` takes that decision, and with it that
+`octomancer-sync.sock` is retired along with the mode that serves it.
+
+That retirement is not free: `src/control.cc`'s vocabulary has verbs
+`octomancerd`'s does not -- `result`, `events`, `reload` -- and they have to be
+folded in rather than dropped. `doc/TODO.md` item 3 is the cutover.
+
+### 11. Two loops in the tree
+
+`octomancerd` runs its own hand-rolled `poll()` loop and drains the scan bridge
+by hand; a comment in it says so. Everything else new runs on `src/loop.{h,cc}`.
+Two implementations of the same ordering arithmetic, one of them untested.
+
+Worth doing while `octomancerd` is being taken apart for its radio anyway,
+since both changes touch the same forty lines.
+
+### 12. The two sync modes share one camera database
+
+`octomancer-sync --daemon` takes a *different* lock file from the legacy mode,
+deliberately, so the replacement can run beside the thing it replaces. It
+defaults to the same per-camera database. So the arrangement the separate lock
+exists to allow is exactly the pair of writers `README.md` and
+`doc/service-notes.md` both say cannot happen: two processes holding a camera
+and disagreeing about its learned bias.
+
+Not a bug to fix so much as a cost to remember: pass `--camera-db PATH` to one
+of them, and it goes away at the cutover.
+
+### 13. Small protocol mismatches that will bite the bridge
+
+Individually trivial, collectively the reason a translation table would be
+permanent. Settle them *before* the control daemon is written, not after:
+
+* **Three spellings of `forget`.** `forget <id>` as a bare positional with no
+  escaping (`src/server.cc`), `forget camera=<id or name>` (`src/control.cc`),
+  `forget dev=<id>` (`src/syncd.cc`). The first cannot carry an id that needs
+  escaping at all.
+* **`device`/`dev`, `camera`/`cam`, `error`/`err`** -- same things, two
+  spellings each, split across the two framings.
+* **`id` means three things.** A correlation tag on a boxmsg reply, a
+  queued-request handle in `control.h`, and a device or camera identifier on
+  `dev` and `cam` lines. Layer 2 adds a fourth use. Worth renaming something
+  now.
+* **The box protocol's version handshake is decorative.** Both `hello` lines
+  carry `proto=1` and nothing anywhere compares it against
+  `kBoxProtocolVersion`. `src/proto.cc` refuses a version it does not know;
+  `src/control.cc` was doing only half the check until 2026-08-29 and now does
+  the whole one. The box protocol still does none.
+* **`octomancerd`'s non-status replies are not well-formed.** `ping`, `forget`
+  and `error` emit the banner and one line with no `end`, while `proto.cc`'s
+  own `parse_text` refuses any reply that has no `end`. It works today only
+  because nothing parses those three: `octomancer ping` prints "ok" if the
+  query returned at all and never looks at the text. A bridge that parsed
+  everything uniformly would reject them.
+
+### 14. `octomancer status --json` quietly omits the bench
+
+The human-readable path asks both daemons and merges. The `--json` path sends
+`json` to `octomancer-sync`'s socket alone, so the Tentacle bench is missing
+from it and nothing says so. Both daemons answer `json` with their own
+unrelated view, which is why it looks like it worked.
+
+It goes away when there is one socket, but until then it is a wrong answer
+rather than a missing feature, and `--json` is what anything scripted would
+use.
+
+### And one piece of dead scaffolding
+
+`HciCamera::open()` -- which opens a dongle for a camera that owns no other
+radio -- has no callers. `HciCamera::attach()`, which takes a radio somebody
+else owns, is what the daemon uses. `open()` is kept because it is the honest
+entry point for a process that only wants a camera, but nothing has ever run
+it, so it is untested in the way that only shows up the first time somebody
+needs it.
 
 ## Tests
 

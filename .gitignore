@@ -46,6 +46,9 @@
 /tests/test_camsync
 /tests/test_control
 /tests/test_devices
+/tests/test_fakebench
+/tests/test_fakecamera
+/tests/test_fakedaemon
 /tests/test_crypto
 /tests/test_hci
 /tests/test_hcilink
@@ -55,6 +58,7 @@
 /tests/test_pairing
 /tests/test_proclock
 /tests/test_proto
+/tests/test_radio
 /tests/test_registry
 /tests/test_smp
 /tests/test_syncd

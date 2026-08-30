@@ -54,6 +54,8 @@ libocto_a_SOURCES = \
 	src/hcilink.h \
 	src/hciport.h \
 	src/hciport_posix.cc \
+	src/hcishare.cc \
+	src/hcishare.h \
 	src/jsonlog.cc \
 	src/jsonlog.h \
 	src/logscan.cc \
@@ -281,6 +283,7 @@ check_PROGRAMS = \
 	tests/test_logscan \
 	tests/test_loop \
 	tests/test_hcilink \
+	tests/test_hcishare \
 	tests/test_pairing \
 	tests/test_proclock \
 	tests/test_proto \
@@ -356,6 +359,12 @@ tests_test_loop_LDADD = libocto.a
 
 tests_test_hcilink_SOURCES = tests/test_hcilink.cc tests/harness.h
 tests_test_hcilink_LDADD = libocto.a
+
+# One controller, several jobs. The arbitration this pins down is invisible
+# when it is wrong: two Links on one serial port is not an error, it is a radio
+# that appears to have switched itself off.
+tests_test_hcishare_SOURCES = tests/test_hcishare.cc tests/harness.h
+tests_test_hcishare_LDADD = libocto.a
 
 # The dongle's codecs. All four run on a machine with no dongle in it, which is
 # the whole argument for having written them as portable C++ rather than as

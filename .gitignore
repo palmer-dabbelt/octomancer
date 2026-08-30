@@ -80,3 +80,4 @@
 /third_party/bin/
 /third_party/.nrfutil/
 /third_party/build-*/
+/tests/test_hcishare

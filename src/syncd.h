@@ -248,6 +248,20 @@ class SyncDaemon {
   // Console chatter, for a person watching. Never load-bearing.
   void on_say(SayHandler handler);
 
+  // Being told what time it is.
+  //
+  // Only a host with no clock of its own installs this. A Mac knows the time
+  // and a `time` message to one is a mistake worth reporting rather than
+  // obeying -- so a daemon with no handler answers `err reason=have-clock`
+  // instead of silently accepting a correction it would never apply.
+  //
+  // The box is the other case: no network, no battery-backed RTC, nobody to
+  // ask. Its offsets are measured against a wall clock it can only be given,
+  // which is why this is part of the protocol and not a build option. See
+  // firmware/src/boxclock.h.
+  using TimeHandler = std::function<void(double wall)>;
+  void on_settime(TimeHandler handler);
+
   void start();
   void stop();
   bool started() const { return started_; }
@@ -394,6 +408,7 @@ class SyncDaemon {
   CycleHandler on_cycle_;
   BindHandler on_bind_;
   SayHandler on_say_;
+  TimeHandler on_time_;
 
   bool started_ = false;
   Phase phase_ = Phase::kStopped;

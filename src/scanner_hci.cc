@@ -24,7 +24,7 @@
 #include <utility>
 #include <vector>
 
-#include "bmd.h"
+#include "advert.h"
 #include "hci.h"
 #include "hcilink.h"
 #include "hcishare.h"
@@ -46,9 +46,7 @@ class HciScanner : public Scanner {
       : borrowed_(radio),
         on_advert_(std::move(on_advert)),
         on_camera_(std::move(on_camera)),
-        on_state_(std::move(on_state)),
-        fdac_(hci::uuid_from_16(0xfdac)),
-        camera_(hci::uuid_const(bmd::kServiceCamera)) {}
+        on_state_(std::move(on_state)) {}
 
   ~HciScanner() override { stop(); }
 
@@ -125,38 +123,36 @@ class HciScanner : public Scanner {
   }
 
   void on_report(const hci::AdvReport& r) {
-    hci::AdInfo info = hci::summarise_ad(hci::parse_ad(r.data));
+    // One classifier for every radio -- see src/advert.h. The firmware
+    // scanner asks the same question of the same bytes, and a second copy of
+    // this is how the two radios would come to disagree about what a device
+    // is.
+    const AdvertMatch m = classify_ad(r.data);
+    if (!m.is_box && !m.is_camera) return;
 
-    // A camera is identified by its service UUID, never by its name. There is
-    // a Tentacle on this bench called "BMPCC", and a name match would hand the
-    // sync daemon a box that has no control characteristic on it.
-    if (on_camera_) {
-      for (const hci::Uuid& u : info.services) {
-        if (u == camera_) {
-          Sighting seen;
-          seen.id = device_id(r);
-          seen.name = info.name;
-          seen.rssi = r.rssi;
-          seen.mono = mono_now();
-          seen.wall = wall_now();
-          on_camera_(seen);
-          break;
-        }
-      }
+    // Computed once. It is the same string for both handlers, and it is the
+    // expensive part of this function.
+    const std::string id = device_id(r);
+
+    if (m.is_camera && on_camera_) {
+      Sighting seen;
+      seen.id = id;
+      seen.name = m.name;
+      seen.rssi = r.rssi;
+      seen.mono = mono_now();
+      seen.wall = wall_now();
+      on_camera_(seen);
     }
 
-    if (!on_advert_) return;
-    for (const auto& sd : info.service_data) {
-      if (!(sd.first == fdac_) || sd.second.empty()) continue;
+    if (m.is_box && on_advert_) {
       Advert advert;
-      advert.id = device_id(r);
-      advert.name = info.name;
+      advert.id = id;
+      advert.name = m.name;
       advert.rssi = r.rssi;
-      advert.data = sd.second;
+      advert.data = m.box_data;
       advert.mono = mono_now();
       advert.wall = wall_now();
       on_advert_(advert);
-      break;
     }
   }
 
@@ -183,8 +179,6 @@ class HciScanner : public Scanner {
   AdvertHandler on_advert_;
   SightingHandler on_camera_;
   StateHandler on_state_;
-  hci::Uuid fdac_;
-  hci::Uuid camera_;
 };
 
 }  // namespace

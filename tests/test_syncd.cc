@@ -806,6 +806,67 @@ void test_ping_and_unknown_verbs_are_both_answered() {
   CHECK_STR(err.get("reason"), "bad-line");
 }
 
+// Being told what time it is. Only a host with no clock of its own accepts
+// this -- see the note on on_settime in src/syncd.h.
+void test_time_is_refused_by_a_daemon_that_has_a_clock() {
+  Rig rig;
+  rig.build();
+  FakePeer peer;
+  rig.daemon->peer_opened(&peer);
+
+  // No handler installed, which is every daemon running on a Mac. Pushing the
+  // time at that end is a mistake, and one that would leave no trace if it
+  // were quietly obeyed.
+  rig.daemon->peer_line(&peer, "time wall=1700000000.5 id=4");
+  Message err;
+  CHECK(peer.last("err", &err));
+  CHECK_STR(err.get("reason"), "have-clock");
+  CHECK_STR(err.get("id"), "4");
+}
+
+void test_time_sets_the_clock_of_a_daemon_that_has_none() {
+  Rig rig;
+  rig.build();
+  // What firmware/src/boxclock.h does: hold the difference between the
+  // monotonic clock, which is trustworthy from the first instant, and the wall
+  // clock, which is unknown until somebody says.
+  rig.daemon->on_settime([&rig](double when) {
+    rig.wall0 = when - (rig.loop.now() - Rig::kMono0);
+  });
+  FakePeer peer;
+  rig.daemon->peer_opened(&peer);
+  rig.daemon->peer_line(&peer, "time wall=1700000000.5");
+
+  Message ok;
+  CHECK(peer.last("ok", &ok));
+  CHECK_STR(ok.get("what"), "time");
+  // The acknowledgement carries what the clock reads now rather than echoing
+  // the request, so a client can see the value that was actually adopted.
+  double reported = 0.0;
+  CHECK(ok.get_double("wall", &reported));
+  CHECK_NEAR(reported, 1700000000.5, 1e-2);
+  CHECK_NEAR(rig.wall(), 1700000000.5, 1e-2);
+
+  // And it still moves with the monotonic clock afterwards, which is the whole
+  // point of holding an offset rather than a timestamp.
+  rig.loop.advance(30.0);
+  CHECK_NEAR(rig.wall(), 1700000030.5, 1e-2);
+}
+
+void test_time_without_a_value_is_an_error() {
+  Rig rig;
+  rig.build();
+  rig.daemon->on_settime([](double) {});
+  FakePeer peer;
+  rig.daemon->peer_opened(&peer);
+  rig.daemon->peer_line(&peer, "time");
+
+  Message err;
+  CHECK(peer.last("err", &err));
+  CHECK_STR(err.get("reason"), "missing-field");
+  CHECK_STR(err.get("field"), "wall");
+}
+
 void test_status_says_what_the_bench_is() {
   Rig rig;
   rig.build();
@@ -1098,6 +1159,9 @@ int main() {
   test_not_holding_releases_the_camera();
   test_a_peer_is_greeted();
   test_ping_and_unknown_verbs_are_both_answered();
+  test_time_is_refused_by_a_daemon_that_has_a_clock();
+  test_time_sets_the_clock_of_a_daemon_that_has_none();
+  test_time_without_a_value_is_an_error();
   test_status_says_what_the_bench_is();
   test_devices_streams_and_says_when_it_is_done();
   test_a_peer_can_ask_not_to_be_announced_to();

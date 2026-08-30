@@ -1,11 +1,10 @@
 #!/bin/sh
 #
-# Put an HCI firmware on an nRF52840 dongle.
+# Put a firmware image on an nRF52840 dongle.
 #
-# The dongle needs to speak raw HCI over a serial port for anything in this
-# project to talk to it. Nordic ships it with a DFU bootloader, so the job is
-# to build (or fetch) a Zephyr `hci_uart` image and push it over that
-# bootloader -- no debugger, no soldering, nothing but the USB port.
+# Nordic ships these with a DFU bootloader, so the job is to build an image and
+# push it over that bootloader -- no debugger, no soldering, nothing but the
+# USB port.
 #
 # Deliberately not part of `make install`. Flashing a device is not something a
 # build should do on anybody's behalf, and the image this writes is the whole
@@ -14,16 +13,32 @@
 # Usage:
 #   tools/flash-dongle.sh --check              is the toolchain here?
 #   tools/flash-dongle.sh --setup              fetch west, the modules and the SDK
-#   tools/flash-dongle.sh --build [BOARD]      build hci_uart from the submodule
+#   tools/flash-dongle.sh --build [WHAT] [BOARD]   build an image (see below)
 #   tools/flash-dongle.sh --package IMAGE.hex  wrap a hex file for DFU
 #   tools/flash-dongle.sh --flash PACKAGE.zip  push it to a dongle in DFU mode
 #   tools/flash-dongle.sh --ports              list serial ports that look right
 #   tools/flash-dongle.sh --info               ask a bootloader what is on it
+#   tools/flash-dongle.sh --dfu [PORT]         ask a running octomancer dongle
+#                                              to reboot into its bootloader
 #
-# Putting the dongle into DFU mode: press the small side button (SW1, next to
-# the USB connector, not the one on the end) and hold it while plugging in --
-# or press RESET while holding it. The red LED pulses slowly when it is
-# listening for a firmware image.
+# There are two images, and they are for two different arrangements:
+#
+#   sync   octomancer-sync as firmware -- firmware/. The dongle is a second
+#          sync daemon with its own radio, and octomancerd talks to it over
+#          the box protocol on the USB cable. This is the one you want.
+#
+#   hci    Zephyr's stock hci_uart. The dongle is a bare controller and a Mac
+#          process drives it over HCI. Scaffolding from before the firmware
+#          existed, and still the way to use the dongle as a plain radio.
+#
+# Putting the dongle into DFU mode. If it is already running the octomancer
+# firmware, `--dfu` asks it over the cable and no button is involved. Otherwise
+# it is the button, and the button is per-board: this Raytac has one, on the
+# end, and it must be held while the plug goes in and for about a second after
+# it seats. Letting go as it seats just starts the existing firmware. Nordic's
+# PCA10059 instead has a sideways RESET pressed while it stays plugged in.
+# README.md has both side by side and is the copy to trust. Either way the LED
+# settles into a slow pulse when the bootloader is listening.
 
 set -e
 
@@ -35,7 +50,7 @@ die() {
 }
 
 usage() {
-    sed -n '3,26p' "$0" | sed 's/^# \{0,1\}//'
+    sed -n '3,41p' "$0" | sed 's/^# \{0,1\}//'
     exit "${1:-0}"
 }
 
@@ -229,19 +244,58 @@ DEFAULT_BOARD=raytac_mdbt50q_cx_40_dongle/nrf52840
 # Building it here rather than shipping a binary keeps this project free of
 # somebody else's compiled code.
 build() {
+    what=sync
+    case "${1:-}" in
+        sync|hci) what=$1; shift ;;
+    esac
     board=${1:-$DEFAULT_BOARD}
-    out=$TP/build-hci
     [ -x "$WEST" ] || die "no west in the tree; run: $0 --setup"
     [ -d "$SDK" ] || die "no Zephyr SDK in the tree; run: $0 --setup"
 
-    echo "building hci_uart for $board into $out ..."
+    if [ "$what" = sync ]; then
+        out=$TP/build-fw
+        src=$ROOT/firmware
+        what_desc="octomancer-sync firmware"
+    else
+        out=$TP/build-hci
+        src=$TP/zephyr/samples/bluetooth/hci_uart
+        what_desc="hci_uart"
+    fi
+
+    echo "building $what_desc for $board into $out ..."
     ZEPHYR_BASE=$TP/zephyr \
     ZEPHYR_TOOLCHAIN_VARIANT=zephyr \
     ZEPHYR_SDK_INSTALL_DIR=$SDK \
-        "$WEST" build -b "$board" -d "$out" \
-        "$TP/zephyr/samples/bluetooth/hci_uart"
+        "$WEST" build -b "$board" -d "$out" "$src"
     echo "built: $out/zephyr/zephyr.hex"
     echo "next:  $0 --package $out/zephyr/zephyr.hex"
+}
+
+# Ask a dongle already running this firmware to reboot into its bootloader.
+#
+# The alternative is the button, and the button is per-board, undocumented on
+# the module itself, and the subject of the longest paragraph in
+# doc/dongle-notes.md. A dongle that can be put into DFU over the cable it is
+# already plugged into never needs it again -- but only if the image currently
+# on it knows the command, so this does nothing for a dongle running hci_uart
+# or anything else. That one still wants the button, once.
+enter_dfu() {
+    port=$1
+    if [ -z "$port" ]; then
+        for p in /dev/cu.usbmodem* /dev/ttyACM*; do
+            [ -e "$p" ] || continue
+            port=$p
+            break
+        done
+    fi
+    [ -n "$port" ] || die "no serial port found"
+    echo "asking $port to reboot into its bootloader ..."
+    # The reply is read back rather than discarded: an `err` here means the
+    # image on the dongle is not this firmware, and saying so beats waiting
+    # for a bootloader that is never going to appear.
+    printf 'dfu confirm=1\r\n' > "$port"
+    echo "if the dongle was running octomancer-sync it is now in DFU mode."
+    echo "check with: $0 --info"
 }
 
 
@@ -257,7 +311,7 @@ package() {
     [ "$tool" = none ] && die "no nrfutil; run: $0 --setup"
     nrfutil_env
 
-    out=$(dirname "$hex")/hci_uart_dfu.zip
+    out=$(dirname "$hex")/octomancer_dfu.zip
     rm -f "$out"
     "$tool" nrf5sdk-tools pkg generate \
         --hw-version 52 \
@@ -306,10 +360,14 @@ flash() {
 
     echo
     echo "done. Unplug and replug the dongle -- it does not come back on its"
-    echo "own after programming. It should return as 'Zephyr HCI UART sample';"
-    echo "check with:"
-    echo "    ioreg -l -w 0 | grep -A4 Nordic"
-    echo "    octomancer-zoom --scan 10"
+    echo "own after programming."
+    echo
+    echo "The octomancer firmware announces itself on USB as 'octomancer-sync',"
+    echo "which is how to tell it from anything else: every other Zephyr image"
+    echo "on this board calls itself 'CDC ACM serial backend', including"
+    echo "hci_uart. Check with:"
+    echo "    ioreg -l -w 0 | grep -B2 -A6 octomancer"
+    echo "    octomancer dongle --probe"
 }
 
 case "${1:-}" in
@@ -318,6 +376,7 @@ case "${1:-}" in
     --ports)   shift; ports ;;
     --info)    shift; exec "$(dirname "$0")/dfu-info.py" "$@" ;;
     --build)   shift; build "$@" ;;
+    --dfu)     shift; enter_dfu "$@" ;;
     --package) shift; package "$@" ;;
     --flash)   shift; flash "$@" ;;
     --help|-h|"") usage 0 ;;

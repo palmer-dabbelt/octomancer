@@ -1,0 +1,83 @@
+// See firmware/src/boxadmin.h.
+#include "boxadmin.h"
+
+#include <hal/nrf_power.h>
+#include <zephyr/kernel.h>
+#include <zephyr/sys/reboot.h>
+
+#include "boxmsg.h"
+#include "scanner_zephyr.h"
+
+namespace octo {
+namespace {
+
+// What Nordic's nRF5 bootloader looks for in GPREGRET to stay in DFU mode
+// instead of starting the application. GPREGRET is a retained register: it
+// survives a soft reset, which is the entire mechanism.
+//
+// This is the bootloader's constant, not ours -- BOOTLOADER_DFU_START in the
+// nRF5 SDK -- so it is written down rather than named, because there is no
+// header here to take it from.
+constexpr uint32_t kBootloaderDfuStart = 0xB1;
+
+}  // namespace
+
+bool handle_box_admin(const std::string& line, CdcPeer* peer) {
+  Message msg;
+  std::string err;
+  if (!decode(line, &msg, &err)) return false;  // the daemon reports bad lines
+
+  if (msg.verb == "boxstats") {
+    Message out;
+    out.verb = "boxstats";
+    if (msg.has("id")) out.set("id", msg.get("id"));
+    // Everything that can be dropped, and was. All cumulative: the question a
+    // person asks is "has this ever happened", not "is it happening now".
+    out.set_int("adverts_dropped", zephyr_scanner_dropped());
+    out.set_int("tx_dropped", peer->dropped_tx());
+    out.set_int("rx_dropped", peer->dropped_rx());
+    out.set_int("long_lines", peer->long_lines());
+    // Free heap is not reported. There is no supported way to ask picolibc's
+    // arena how much of it is left, and a figure invented here would be worse
+    // than the silence -- it is exactly the kind of number that gets believed.
+    peer->send(encode(out));
+    return true;
+  }
+
+  if (msg.verb == "dfu") {
+    // Confirmation required. This is the one command that ends the
+    // conversation, and a client retrying a garbled line should not be able to
+    // take the radio off the air by accident.
+    bool confirm = false;
+    if (!msg.get_bool("confirm", &confirm) || !confirm) {
+      Message bad;
+      bad.verb = "err";
+      if (msg.has("id")) bad.set("id", msg.get("id"));
+      bad.set("reason", "needs-confirm");
+      bad.set("hint", "dfu confirm=1");
+      peer->send(encode(bad));
+      return true;
+    }
+
+    Message out;
+    out.verb = "ok";
+    if (msg.has("id")) out.set("id", msg.get("id"));
+    out.set("what", "dfu");
+    peer->send(encode(out));
+
+    // Let the reply reach the host before the USB device disappears. There is
+    // no way to ask the CDC ring whether the endpoint has drained, and a
+    // reboot that beats the acknowledgement out of the door looks exactly like
+    // a crash. A tenth of a second is far longer than a bulk transfer and far
+    // shorter than a person's patience.
+    k_sleep(K_MSEC(100));
+
+    nrf_power_gpregret_set(NRF_POWER, 0, kBootloaderDfuStart);
+    sys_reboot(SYS_REBOOT_COLD);
+    return true;  // not reached
+  }
+
+  return false;
+}
+
+}  // namespace octo

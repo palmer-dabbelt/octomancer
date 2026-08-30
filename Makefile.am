@@ -16,11 +16,24 @@ AM_CPPFLAGS = -I$(top_srcdir)/src -I$(top_builddir) \
 	-DOCTO_LOGDIR=\"$(OCTO_LOGDIR)\" \
 	-DOCTO_PKGDATADIR=\"$(EXPANDED_DATADIR)/$(PACKAGE)\"
 
+# The firmware is not built by this Makefile -- it is a Zephyr application,
+# cross-compiled by tools/flash-dongle.sh -- but it is part of the source and
+# belongs in a distribution. Most of what it compiles is listed above, in
+# libocto: firmware/ is only the glue. See firmware/CMakeLists.txt.
 EXTRA_DIST = autogen.sh README.md tests/data/adverts.golden \
-	tools/flash-dongle.sh
+	tools/flash-dongle.sh \
+	firmware/CMakeLists.txt firmware/prj.conf \
+	firmware/src/boxadmin.cc firmware/src/boxadmin.h \
+	firmware/src/boxclock.cc firmware/src/boxclock.h \
+	firmware/src/cdcpeer.cc firmware/src/cdcpeer.h \
+	firmware/src/loop_zephyr.cc \
+	firmware/src/main.cc \
+	firmware/src/scanner_zephyr.cc firmware/src/scanner_zephyr.h
 
 noinst_LIBRARIES = libocto.a
 libocto_a_SOURCES = \
+	src/advert.cc \
+	src/advert.h \
 	src/agents.cc \
 	src/agents.h \
 	src/att.cc \
@@ -277,6 +290,7 @@ check_PROGRAMS = \
 	tests/test_bmd \
 	tests/test_boxmsg \
 	tests/test_boxsock \
+	tests/test_advert \
 	tests/test_camdb \
 	tests/test_camconf \
 	tests/test_camsync \
@@ -340,6 +354,9 @@ tests_test_boxsock_LDADD = libocto.a
 
 tests_test_radio_SOURCES = tests/test_radio.cc tests/harness.h
 tests_test_radio_LDADD = libocto.a
+
+tests_test_advert_SOURCES = tests/test_advert.cc tests/harness.h
+tests_test_advert_LDADD = libocto.a
 
 tests_test_devicedb_SOURCES = tests/test_devicedb.cc tests/harness.h
 tests_test_devicedb_LDADD = libocto.a

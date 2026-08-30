@@ -129,6 +129,9 @@ void SyncDaemon::set_state(const SyncState& state) { state_ = state; }
 void SyncDaemon::on_cycle(CycleHandler handler) { on_cycle_ = std::move(handler); }
 void SyncDaemon::on_bind(BindHandler handler) { on_bind_ = std::move(handler); }
 void SyncDaemon::on_say(SayHandler handler) { on_say_ = std::move(handler); }
+void SyncDaemon::on_settime(TimeHandler handler) {
+  on_time_ = std::move(handler);
+}
 
 double SyncDaemon::wall() const { return wall_(); }
 double SyncDaemon::mono() const { return loop_->now(); }
@@ -1037,6 +1040,38 @@ void SyncDaemon::handle(MsgPeer* peer, const Message& msg) {
 #ifdef OCTO_VERSION
     out.set("version", OCTO_VERSION);
 #endif
+    reply(out);
+    return;
+  }
+
+  if (msg.verb == "time") {
+    double when = 0.0;
+    if (!msg.get_double("wall", &when)) {
+      Message bad;
+      bad.verb = "err";
+      bad.set("reason", "missing-field");
+      bad.set("field", "wall");
+      reply(bad);
+      return;
+    }
+    // A daemon that already knows the time says so rather than taking the
+    // correction. Accepting it would make a Mac's roster silently depend on
+    // whatever the last client felt like sending, and the mistake -- pushing
+    // the time at the wrong end of the cable -- would leave no trace.
+    if (!on_time_) {
+      Message bad;
+      bad.verb = "err";
+      bad.set("reason", "have-clock");
+      reply(bad);
+      return;
+    }
+    on_time_(when);
+    Message out;
+    out.verb = "ok";
+    out.set("what", "time");
+    // What the clock reads now, which is the acknowledgement worth having: it
+    // is the value actually adopted, and the round trip is visible in it.
+    out.set_double("wall", wall(), 3);
     reply(out);
     return;
   }

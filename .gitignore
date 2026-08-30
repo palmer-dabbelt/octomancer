@@ -58,6 +58,7 @@
 /tests/test_pairing
 /tests/test_proclock
 /tests/test_proto
+/tests/test_advert
 /tests/test_radio
 /tests/test_registry
 /tests/test_smp

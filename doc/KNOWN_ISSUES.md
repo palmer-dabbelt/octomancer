@@ -823,6 +823,26 @@ entry point for a process that only wants a camera, but nothing has ever run
 it, so it is untested in the way that only shows up the first time somebody
 needs it.
 
+## Fixed, and worth remembering why they were not found sooner
+
+**The event cursor was off by one, and the test said `next - 1`.**
+`events since=N` filtered with `seq > N` while reporting `next` as the sequence
+the *next* event would be given. An event arriving after a poll takes exactly
+that number and was skipped permanently. Events arrive one at a time, so this
+lost almost all of them: `Octomancer.app` polls every two seconds and stores
+`next` verbatim, so its notifications had essentially never fired for a real
+event.
+
+Both halves read correctly on their own. `tests/test_control.cc` had a test
+called `test_events_are_delivered_once` that passed, because it asked for
+`next - 1` — someone had hit this and subtracted one rather than recognising
+it. That is the shape to watch for: an unexplained adjustment in a test is
+usually a bug wearing a disguise.
+
+Found on 2026-08-30 by pointing the real client at a real server for the first
+time (`tests/test_fakedaemon.cc`). No parser test could have caught it, because
+neither side is wrong on its own — only the contract between them is.
+
 ## Tests
 
 * ~~**`test_syncd` is flaky.**~~ **Fixed 2026-08-30, and the comment that

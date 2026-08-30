@@ -820,10 +820,26 @@ std::string Control::handle_locked(const Command& cmd) {
     return render_result(e->result);
   }
   if (cmd.verb == "events") {
+    // Inclusive, and it has to be. `next` in the reply is next_event_seq_ --
+    // the sequence the *next* event will be given, not the last one issued --
+    // and a client is expected to hand it straight back as `since`. With an
+    // exclusive test the event that then takes exactly that sequence is
+    // skipped, permanently: poll, event arrives with seq == next, poll again
+    // with since == next, and it is filtered out and never offered again.
+    //
+    // Events arrive one at a time, so that lost exactly the first event after
+    // every poll -- which in practice is all of them. Octomancer.app polls
+    // every two seconds and stores `next` verbatim, so its notifications had
+    // essentially never fired for a real event.
+    //
+    // Found by pointing the real client at a real server for the first time,
+    // in tests/test_fakedaemon.cc. Both halves read correctly on their own,
+    // which is exactly the class of bug a round trip catches and a parser test
+    // cannot.
     const int64_t since = cmd.has_since ? cmd.since : 0;
     std::vector<Event> picked;
     for (const Event& e : events_) {
-      if (e.seq > since) picked.push_back(e);
+      if (e.seq >= since) picked.push_back(e);
     }
     return render_events(picked, next_event_seq_);
   }

@@ -282,6 +282,7 @@ check_PROGRAMS = \
 	tests/test_control \
 	tests/test_fakebench \
 	tests/test_fakecamera \
+	tests/test_fakedaemon \
 	tests/test_radio \
 	tests/test_crypto \
 	tests/test_devices \
@@ -343,6 +344,10 @@ tests_test_fakebench_LDADD = libocto.a
 
 tests_test_fakecamera_SOURCES = tests/test_fakecamera.cc tests/harness.h
 tests_test_fakecamera_LDADD = libocto.a
+
+tests_test_fakedaemon_SOURCES = tests/test_fakedaemon.cc tests/fakedaemon.h \
+	tests/harness.h
+tests_test_fakedaemon_LDADD = libocto.a
 
 tests_test_camsync_SOURCES = tests/test_camsync.cc tests/harness.h
 tests_test_camsync_LDADD = libocto.a

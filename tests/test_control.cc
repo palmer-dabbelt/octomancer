@@ -447,12 +447,33 @@ void test_events_are_delivered_once() {
                            &got, &next, &err));
   CHECK(got.empty());
 
+  // The cursor is handed straight back, with no arithmetic done to it. This
+  // line used to say `next - 1`, and that -1 was the bug: `next` is the
+  // sequence the next event will be *given*, so an event arriving after a poll
+  // takes exactly that number, and a filter that skipped it dropped the first
+  // event after every poll. Events arrive one at a time, so that was almost
+  // all of them -- Octomancer.app polls every two seconds and stores `next`
+  // verbatim, and its notifications had essentially never fired.
+  //
+  // Subtracting one made this test pass by asking for one event further back
+  // than the client would, which is why it survived being written. The
+  // property to hold is the one a client actually relies on: poll, hand the
+  // cursor back unchanged, and see everything that happened in between exactly
+  // once.
   control.emit(EventKind::kCameraLost, "id", "name", "three");
   CHECK(octo::parse_events(control.handle("events since=" +
-                                          std::to_string(next - 1)),
+                                          std::to_string(next)),
                            &got, &next, &err));
   CHECK_EQ(static_cast<int>(got.size()), 1);
   CHECK(got[0].kind == EventKind::kCameraLost);
+
+  // ...and once. A second poll from the new cursor is empty again, which is
+  // the other half of "delivered once" and the half that stops a UI announcing
+  // the same failure on every refresh.
+  CHECK(octo::parse_events(control.handle("events since=" +
+                                          std::to_string(next)),
+                           &got, &next, &err));
+  CHECK(got.empty());
 }
 
 void test_cameras_persist_but_go_absent() {

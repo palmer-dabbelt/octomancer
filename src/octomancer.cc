@@ -31,10 +31,13 @@
 
 #include "agents.h"
 #include "bmd.h"
+#include "boxcdc.h"
 #include "camconf.h"
 #include "client.h"
 #include "control.h"
 #include "devices.h"
+#include "hciport.h"
+#include "loop.h"
 #include "proto.h"
 #include "server.h"
 #include "timeutil.h"
@@ -64,6 +67,164 @@ struct Options {
   bool wait = true;
 };
 
+// ------------------------------------------------------------- the dongle
+
+// This machine's offset from UTC, in seconds east, right now.
+//
+// The box needs this and cannot work it out: it has no timezone database, and
+// a Tentacle broadcasts a *local* time of day. See firmware/src/boxclock.cc.
+int utc_offset_now() {
+  const std::time_t now = std::time(nullptr);
+  struct tm parts;
+  ::localtime_r(&now, &parts);
+  return static_cast<int>(parts.tm_gmtoff);
+}
+
+// Ask the dongle what it can hear, and print it.
+//
+// The other radio, in other words. doc/box-notes.md's whole experiment is that
+// two radios listening to the same room should report the same boxes with
+// slightly different offsets, and this is the first half of being able to see
+// that: a Mac holding a link open to an nRF52840 running the same sync daemon
+// as firmware.
+//
+// It also sets the box's clock, which is not a courtesy. A box with no wall
+// clock records no offsets at all -- src/registry.cc declines to subtract a
+// clock it does not have -- so without this the answer is an empty roster and
+// no explanation.
+int run_dongle(const std::string& device, bool verbose) {
+  std::string err;
+  std::unique_ptr<octo::hci::Port> port = octo::hci::open_port(device, &err);
+  if (port == nullptr) {
+    std::fprintf(stderr, "octomancer: %s\n", err.c_str());
+    if (octo::hci::no_port_found(err)) {
+      std::fprintf(stderr,
+                   "no dongle found. A dongle running this firmware appears as"
+                   " 'octomancer-sync' on USB; one running anything else does"
+                   " not answer this protocol.\n");
+    }
+    return 1;
+  }
+
+  std::unique_ptr<octo::Loop> loop = octo::make_loop();
+  const std::string port_name = port->name();
+  std::unique_ptr<octo::BoxLink> link =
+      octo::BoxLink::attach(loop.get(), std::move(port));
+  if (link == nullptr) {
+    std::fprintf(stderr, "octomancer: could not attach to %s\n",
+                 port_name.c_str());
+    return 1;
+  }
+
+  // Flushed, because everything after this that goes wrong goes to stderr,
+  // and a buffered stdout would print the port name after the complaint about
+  // it.
+  std::printf("%s\n", port_name.c_str());
+  std::fflush(stdout);
+
+  int devices = 0;
+  bool greeted = false;
+  bool finished = false;
+  int exit_code = 1;
+
+  link->on_closed([&](const std::string& why) {
+    std::fprintf(stderr, "octomancer: link closed: %s\n", why.c_str());
+    finished = true;
+  });
+
+  link->on_message([&](const octo::Message& msg) {
+    if (msg.verb == "hello") {
+      greeted = true;
+      std::printf("  %s, protocol %s\n",
+                  msg.get("role").empty() ? "?" : msg.get("role").c_str(),
+                  msg.get("proto").empty() ? "?" : msg.get("proto").c_str());
+      // The clock, before anything is asked of it. Everything the box can say
+      // about a Tentacle is measured against this.
+      octo::Message set;
+      set.verb = "time";
+      set.set_double("wall", octo::wall_now(), 3);
+      set.set_int("zone", utc_offset_now());
+      link->send(set);
+      return;
+    }
+
+    // A box with no console says what it is doing this way, and at least one
+    // of these lines is why the last run ended.
+    if (msg.verb == "say") {
+      std::printf("  %s\n", msg.get("text").c_str());
+      return;
+    }
+
+    if (msg.verb == "ok" && msg.get("what") == "time") {
+      octo::Message ask;
+      ask.verb = "devices";
+      ask.set("id", "1");
+      link->send(ask);
+      return;
+    }
+
+    if (msg.verb == "dev") {
+      ++devices;
+      const std::string name =
+          msg.get("name").empty() ? msg.get("id") : msg.get("name");
+      double offset = 0.0;
+      if (msg.get_double("offset", &offset)) {
+        std::printf("  %-24s %+8.3f s\n", name.c_str(), offset);
+      } else {
+        // No offset is a real answer and a different one from zero: the box
+        // heard it and had nothing to measure it against.
+        std::printf("  %-24s        -- (no time)\n", name.c_str());
+      }
+      return;
+    }
+
+    if (msg.verb == "done") {
+      std::printf("  %d device%s\n", devices, devices == 1 ? "" : "s");
+      exit_code = 0;
+      finished = true;
+      return;
+    }
+
+    if (msg.verb == "err") {
+      std::fprintf(stderr, "octomancer: dongle refused: %s\n",
+                   msg.get("reason").c_str());
+      finished = true;
+      return;
+    }
+
+    if (verbose) std::printf("  < %s\n", octo::encode(msg).c_str());
+  });
+
+  // Bounded, because a dongle that has stopped answering must not hang a
+  // command someone typed. Long enough for a box to enumerate a bench.
+  loop->every(0.05, [&]() {
+    if (finished) loop->stop();
+  });
+  loop->after(10.0, [&]() {
+    if (!finished) {
+      if (greeted) {
+        std::fprintf(stderr,
+                     "octomancer: the dongle greeted us and then went quiet."
+                     " That is what a crashed box looks like from here: the"
+                     " USB pull-up stays up, so the device is still listed"
+                     " while nothing is left running behind it. Reflash it,"
+                     " and the next image will say what killed it --"
+                     " firmware/src/faultlog.h.\n");
+      } else {
+        std::fprintf(stderr,
+                     "octomancer: no greeting from %s in ten seconds. Either"
+                     " it is not running this firmware -- one that is calls"
+                     " itself 'octomancer-sync' on USB -- or it is running"
+                     " it and has stopped.\n",
+                     port_name.c_str());
+      }
+      loop->stop();
+    }
+  });
+  loop->run();
+  return exit_code;
+}
+
 void usage(FILE* out) {
   std::fprintf(out,
       "usage: octomancer [options] <command> [arguments]\n"
@@ -76,6 +237,12 @@ void usage(FILE* out) {
       "                        watching a jam take hold rather than asking\n"
       "                        whether it has.\n"
       "  list-cameras          one line per camera the daemon knows about\n"
+      "  dongle [PORT]         ask the dongle what it can hear. The other\n"
+      "                        radio: an nRF52840 running the same sync\n"
+      "                        daemon as firmware, listening to the same room\n"
+      "                        and reporting the same boxes with its own\n"
+      "                        offsets. Sets its clock first, because a box\n"
+      "                        with no wall clock measures nothing.\n"
       "  scan                  look for Blackmagic cameras on the air. With\n"
       "                        --all, every LE device seen, which is how you\n"
       "                        tell a silent camera from a deaf radio.\n"
@@ -1352,6 +1519,11 @@ int main(int argc, char** argv) {
       args.push_back(opt.cameras.front());
     }
     return exec_radio_program(args);
+  }
+
+  if (command == "dongle") {
+    const std::string device = optind + 1 < argc ? argv[optind + 1] : "";
+    return run_dongle(device, opt.verbose);
   }
 
   std::fprintf(stderr, "octomancer: unknown command '%s'\n", command.c_str());

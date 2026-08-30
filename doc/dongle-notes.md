@@ -432,3 +432,66 @@ Raytac's own partition file carries the comment `Nordic nRF5 bootloader
 <0xf4000 0xa000>`. The hardware had been saying it was not a Nordic dongle the
 whole time. And `max_size` in a DFU trace is the protocol's chunk size, not the
 application region -- an hour went into trying to infer the layout from it.
+
+## The first evening the firmware ran
+
+Three faults, found in the space of one probe, and only one of them was in
+code. Written down because all three are the same shape: a thing that worked
+correctly and answered wrongly, on the one machine the test suite cannot run
+on.
+
+**Picolibc prints no floats unless asked.** It ships printf in two flavours
+and links the integer-only one by default, and that one does not fail on
+`%f` -- it prints nothing for it and returns success. So `set_double`
+produced `offset=` with no number after it, for every offset, spread, uptime
+and drift figure the box has, while `set_int` worked perfectly and the build
+was clean and silent. The fix is `CONFIG_PICOLIBC_IO_FLOAT=y`; the check is
+`can_format_doubles()` in `src/boxmsg.h`, which the firmware runs at boot and
+says out loud. Confirm from the symbol table rather than by reading the
+config: `nm zephyr.elf | grep vfprintf` resolves to `__d_vfprintf` when float
+support is in and `__l_vfprintf` when it is not.
+
+**Picolibc's `localtime_r` works, and answers UTC.** There is no timezone
+database on a dongle and no TZ for it to read, so it returns a correct
+conversion into the wrong zone. A Tentacle broadcasts a *local* time of day,
+so every box on the bench read seven hours out -- a confident number, in the
+right units, from code that did what it was told. The `time` verb now carries
+a zone and `firmware/src/boxclock.cc` defines `localtime_r` from it, which is
+the same move that file already makes for `gettimeofday` and for the same
+reason: Zephyr will happily supply a version backed by something nothing sets.
+
+**A crashed box looks exactly like a bad cable.** Zephyr's default fatal
+handler halts the CPU with interrupts locked. On a USB device the pull-up
+stays asserted through that, so the host goes on listing the device while
+nothing is left running behind it -- and `open()` blocks forever waiting for
+control transfers nobody will answer. There is no error, no disconnect, and
+no console, because `prj.conf` switches the console off so the CDC port can
+carry the box protocol alone.
+
+Recognise it by: the device present in `ioreg` with an unchanged `sessionID`,
+`open()` on `/dev/cu.usbmodem*` hanging rather than failing, and
+`octomancer dongle` reporting a greeting followed by silence.
+
+`firmware/src/faultlog.cc` is the answer. It catches the fault, writes the
+reason and the PC into `__noinit` RAM -- which survives `SYSRESETREQ` -- and
+reboots, so the dongle comes back and the first thing it tells the next host
+is what killed the last run. Consecutive faults are counted, so a crash loop
+reads as one rather than as a series of unrelated deaths, and a box faulting
+during boot slows its own reboots enough that a `dfu` command can still be got
+into it.
+
+### What is pinned to hardware and what is not
+
+| Claim | How it is checked |
+| --- | --- |
+| Float printf is linked | `nm zephyr.elf` shows `__d_vfprintf` |
+| The fault handler is ours | `nm zephyr.elf` shows `k_sys_fatal_error_handler` defined |
+| The fault record survives a reset | `g_retained` is inside the `noinit` section, by address |
+| `localtime_r`/`gettimeofday` are ours | `addr2line` resolves both into `boxclock.cc` |
+| The build is reproducible | two clean builds, byte-identical `zephyr.bin` |
+
+Not checked without hardware, and stated as such: that the fault handler
+actually fires and reboots, that the retained record reads back correctly
+across a real reset, that the dedicated CDC workqueue prevents the wedge, and
+that a real Tentacle's offsets from the dongle agree with the Mac's. Each of
+those needs a box on a cable and none of them has been seen yet.

@@ -7,7 +7,7 @@ the reasons in "What it does, and deliberately does not do" below.
 
 > **Read this first, 2026-08-29.** This file describes `octomancerd` and the
 > two-daemon design it belongs to, and both are being replaced. The split it
-> argues for below — one program that observes, another that acts — is being
+> argues for below -- one program that observes, another that acts -- is being
 > dropped on purpose, in favour of three layers: interfaces, a control daemon
 > that owns no radio, and a sync daemon that owns the radio and does the
 > timing. `doc/box-notes.md` has the shape and the reasoning, and is the
@@ -91,15 +91,17 @@ src/octomancer.cc      the front door: asks both daemons, draws the merged list
 ui/main.mm             the app
 ```
 
-That list is `octomancerd`'s half of the tree and has not grown to match the
-rest of it. Everything the sync daemon is made of is missing from it:
+That list is the two-daemon-era layout and has not grown to match the rest of
+the tree. None of the sync daemon is in it, and neither is the Bluetooth host
+underneath it. The largest pieces missing:
 `src/loop.*` and `src/loopfake.*` (the event loop and its clock-as-a-variable
 twin), `src/syncd.*` (the daemon itself), `src/boxmsg.*` (the other line
 protocol), `src/boxsock.*` (its transport), `src/scanbridge.*` (the one place
 another thread's work becomes this one's), `src/hcilink.*`, `src/hcishare.*`,
 `src/camhci.h` and `src/camera_hci.cc` (a Bluetooth host and a camera client
 with no Apple in them), `src/att.*`, `src/smp.*`, `src/crypto.*`,
-`src/camconf.*` and `src/control.*`. `doc/box-notes.md` is where those are
+`src/camconf.*` and `src/control.*`, and `src/hci.*` -- the HCI host itself,
+and the biggest single file of the lot. `doc/box-notes.md` is where those are
 described.
 
 The seam that matters is `src/scanner.h`. Everything above it is portable C++
@@ -116,38 +118,44 @@ in it worth a test.
 
 ## Threading
 
-*This section described two threads and one lock. Both are gone; what follows
-is what replaced them, and why the change was not optional.*
+*This section described two threads and one lock. The lock is gone; the threads
+have moved rather than vanished. What follows is what replaced the lock, and
+why the change was not optional.*
 
 CoreBluetooth still delivers advertisements on its own serial dispatch queue,
-so there is still another thread — it is simply not ours, and its work no
+so there is still another thread -- it is simply not ours, and its work no
 longer arrives by taking a lock. `Registry` used to take a mutex on every
 entry point. It does not any more, and `src/registry.h` says the absence is a
-requirement rather than an economy: the Zephyr SDK's `arm-zephyr-eabi`
-libstdc++ has `_GLIBCXX_HAS_GTHREADS` undefined in every multilib, so
-`std::mutex` does not exist on the box at all, and a roster that needs one is a
-roster that cannot go there.
+requirement rather than an economy, pointing at `src/loop.h` for the reason:
+the Zephyr SDK's libstdc++ has `_GLIBCXX_HAS_GTHREADS` undefined in every one
+of its multilib variants, measured on 2026-08-29 and recorded in
+`doc/box-notes.md`. `std::mutex` does not exist on the box at all, so a roster
+that needs one is a roster that cannot go there.
 
-What carries the other thread's work across is `src/scanbridge.h`, and it is
-the only place that does: the callback queues under a lock of its own and
+What carries the other thread's work across in `octomancerd` is
+`src/scanbridge.h`, and there it is the only place that does: the callback queues under a lock of its own and
 writes one byte down a pipe, the loop drains it on its own thread, and
 everything above sees work arriving as an event like any other. One place to
 get right instead of every entry point.
 
-The `poll()` loop is now `src/loop.{h,cc}`, which is the same idea generalised
-and tested — timers, sources, a wake pipe — so the ordering arithmetic is
-exercised once rather than once per program. Signals are still handled by
+The main thread still runs `poll()` over the listening socket and its clients,
+waking every 200 ms to drain the bridge and write periodic log lines. The
+generalised version of that -- timers, sources, a wake pipe, tested once rather
+than once per program -- is `src/loop.{h,cc}`, and the sync daemon runs on it.
+`octomancerd` does not; it still runs its own, and drains the bridge by hand.
+Two loops in the tree, not one, until the cutover. Signals are still handled by
 writing one byte to a self-pipe: `write()` is async-signal-safe, and almost
 nothing else that would be useful in a handler is.
 
-One `std::thread` is left in the tree, in `octomancer-sync`'s legacy control
-server, and it goes with the mode that owns it.
+One `std::thread` is left in `src/`, in `octomancer-sync`'s legacy control
+server, and it goes with the mode that owns it. `tests/test_control.cc` starts
+two more to drive that same server, and they go with it too.
 
 ## The wire protocol
 
 *One of three vocabularies, in one of two framings. What follows is
 `octomancerd`'s, which is what this file is about. `src/control.cc` serves a
-different vocabulary over the same framing, on `octomancer-sync`'s socket —
+different vocabulary over the same framing, on `octomancer-sync`'s socket --
 which is why a program that talks to both daemons cannot treat them as
 interchangeable despite the identical banner. The sync daemon speaks a third,
 `src/boxmsg.h`, which is not this framing at all: one message per line on a
@@ -320,16 +328,22 @@ changes what the clock says, not how long a write takes to reach it.
 
 `octomancerd` never touches this file, even though it is the process that knows
 about camera sessions. Two writers would need locking, and the interesting data
-— what a write did — only exists in `octomancer-sync`. `octomancerd` remains the
-process that never calls `connect` and never writes to a camera, which is the
-property that makes it safe to leave running during a take.
+-- what a write did -- only exists in `octomancer-sync`.
+
+This file used to call `octomancerd` "the process with no `connect` and no
+`write` in it". That was a claim about the binary, and it stopped being true
+when the dongle scanner started linking the HCI host in: `nm` finds
+`hci::Link::connect` and `att::write_request` in it, reachable from nothing but
+present. What is left is the weaker and still-sufficient version -- no code
+path in it connects to a camera or writes to one -- and that is the property
+that makes it safe to leave running during a take.
 
 > **Two writers are reachable now, 2026-08-29.** `octomancer-sync --daemon`
 > takes a *different* lock file from the legacy mode, deliberately, so that the
 > replacement can be run beside the thing it replaces while it is being
 > trusted. It defaults to the same per-camera database. So running both at once
-> — which is the whole point of the separate lock — is exactly the pair of
-> writers this section says cannot happen. Give one of them its own `--camdb`
+> -- which is the whole point of the separate lock -- is exactly the pair of
+> writers this section says cannot happen. Give one of them its own `--camera-db PATH`
 > until the cutover retires the other.
 
 ### Why a log rather than a document
@@ -385,8 +399,7 @@ approval and appears to work; launched by launchd it would not.
 ## Tests
 
 `make check` runs every binary in `check_PROGRAMS`, none of which needs a
-radio. There were eighteen when this was written and there are more now, which
-is why the count is no longer given here:
+radio. There were eighteen when this was written and there are twenty-five now:
 
 * `test_tentacle` decodes **322 real advertisements** captured from the bench
   and compares every field against expectations generated by the Python

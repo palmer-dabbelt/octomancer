@@ -86,17 +86,20 @@ person actually looks at.**
 
 **Layer 3 owns the radio, and is the only thing that does.** It hears the
 Tentacle boxes, holds the camera link, runs the decision in `camsync.*`, emits
-announcements, and answers the control protocol. The same source builds as
-Nordic firmware and as a Mac process, and that is the whole point: the box is
-debuggable without a box.
+announcements, and answers the control protocol. The same source is meant to
+build as Nordic firmware and as a Mac process, and that is the whole point: the
+box is debuggable without a box. Only the Mac half is built today -- the files
+cross-compile for cortex-m4, measured object by object below, and nothing has
+been linked into firmware.
 
 It exists: `src/syncd.{h,cc}`, started with `octomancer-sync --daemon`. The
 cycle is the old `run_cycle()` with its sleeps turned into states -- and the
 state worth naming is `align`, which is the one that looks like a wait and is
 not. The RTC field holds whole seconds, so a write has to leave at a
-particular instant to land on a boundary; the old daemon slept until then and
-stopped answering for a second every hour, and this arms a timer and goes back
-to the loop.
+particular instant to land on a boundary. The old daemon slept until then on
+the thread running the cycle -- it kept answering its socket, which a second
+thread served, but it could do nothing else until the write left -- and this
+arms a timer and goes back to the loop.
 
 **Layer 2 owns no radio.** One connection down to each sync daemon, carrying
 status up and control changes down -- the same connection for both, because
@@ -118,8 +121,9 @@ the difference is large enough that reading it as one would send somebody in
 the wrong direction. As of 2026-08-29, checked against the source rather than
 against memory:
 
-- **Layer 2 does not exist at all.** Nothing in the tree merges rosters,
-  drains a log, or fronts anything. `doc/TODO.md` records it as unstarted and
+- **Layer 2 does not exist at all.** No *daemon* merges rosters, drains a log
+  or fronts anything -- each interface does its own merging, two bullets
+  down. `doc/TODO.md` records it as unstarted and
   that is accurate.
 - **`octomancerd` is not layer 2 wearing a different hat. It owns a radio.**
   It builds a scanner, keeps its own roster, and serves it
@@ -130,23 +134,32 @@ against memory:
   and for whether the camera is on the air (`src/octomancer-sync.cc:318`,
   `:362`). The model has status flowing sync → control; today it flows
   control → sync, and `octomancerd` never dials out at all.
-- **Every interface opens two sockets and does the merging itself.**
+- **Every interface that shows the merged device list opens two sockets and
+  does the merging itself.** (`octomancerctl` is the exception, and only
+  because it shows nothing about cameras: it opens `octomancerd.sock` alone.)
   `octomancer` holds `octomancerd.sock` and `octomancer-sync.sock` at once
   (`src/octomancer.cc:54-55`), asks both (`:1009-1021`) and merges the answers
   with `build_device_view()` (`:1076`); so does the TUI, and
-  `Octomancer.app` additionally launches
-  `octomancer-sync` as a subprocess for scanning and pairing, because that
-  binary is the one holding the Bluetooth grant. Layer 2 has to absorb all
+  both the CLI and `Octomancer.app` reach past
+  the socket for `scan` and `pair`, running `octomancer-sync` as a subprocess
+  -- the CLI `exec`s it, the app runs it as an `NSTask` -- because that binary
+  is the one holding the Bluetooth grant. Layer 2 has to absorb all
   three of those paths, not one.
 - **Nothing speaks the box protocol.** `octomancer-sync --daemon` serves
   `octomancer-syncd.sock`, and outside the tests there is no client of it
   anywhere. The shipped LaunchAgent still starts the legacy mode. So layer 3
-  is finished, running, and invisible to everything a person runs -- which is
-  also why the hardware verification the rest of this file is waiting on has
-  not happened.
+  is finished, nothing starts it, and nothing talks to it.
 
-That last point is the one worth holding onto. Layer 2 is not the next feature;
-it is the thing that makes layer 3 reachable.
+Be exact about what that last one blocks, because it is easy to overstate, and
+`doc/TODO.md` says the same. It does **not** block the hardware verification
+the rest of this file is waiting on: the daemon schedules its own cycles and
+writes each to the console and the log, so `octomancer-sync --daemon --radio
+dongle` in a terminal with a camera switched on would settle it with no client
+involved -- which is how the shared-radio measurement further down was taken.
+What is missing there is a camera, not a client. What the absent layer *does*
+block is everything else. The daemon cannot be asked what it thinks, told to do
+anything, or configured, except by typing lines into a socket by hand. Layer 2
+is not the next feature; it is the thing that makes layer 3 usable.
 
 ### Six decisions the layering forces, and what they are
 
@@ -179,9 +192,11 @@ connection — spoken by both existing daemons, and `src/boxmsg.h`'s one message
 per line, spoken by the sync daemon. Layer 2 sits between them, so it either
 translates forever or it does not. It should not. `src/boxmsg.h` was written
 to be one message language for all three pipes, and the two vocabularies
-already disagree about the meaning of `id` — a correlation tag in one, a
-queued-request handle in the other — which is exactly the collision a
-permanent translation table would hide. The cost is honest: every client's
+already disagree about the meaning of `id` -- a correlation tag in one, a
+queued-request handle in the other -- while each of them separately overloads
+it again as a device or camera identifier. That is the collision a permanent
+translation table would hide, and it is the reason the broker below has to
+assign its own handles rather than pass one through. The cost is honest: every client's
 parse path gets rewritten once.
 
 **Layer 2 is a request broker, not a relay.** The CLI and the app both issue a
@@ -205,12 +220,12 @@ the Mac and the box the same shape.
 **`scan` and `pair` become verbs.** They are the one place layer 1 reaches
 past the socket entirely, launching `octomancer-sync` as a subprocess because
 it holds the Bluetooth grant. That cannot survive a long-running sync daemon
-holding the port — the CLI already has to offer to stop the agent first — and
+holding the port — the CLI already has to print a note telling you to stop the agent yourself — and
 on a Nordic box there is no sibling binary to launch at all. Pairing
 especially, because the passkey has to reach whoever owns the radio.
 
-**`octomancerd.sock` is the surviving socket.** It has the launchd label and
-the muscle memory, so layer 2 keeps it and `octomancer-sync.sock` is retired
+**`octomancerd.sock` is the surviving socket.** It has the muscle memory -- both agents
+carry a launchd label -- so layer 2 keeps it and `octomancer-sync.sock` is retired
 along with the mode that serves it. This is a correction to what this file
 used to say: it claimed `octomancerd` would be "replaced in substance while
 keeping its label and socket", which read as though there had only ever been
@@ -235,8 +250,8 @@ would have been a change to every verb.
 | `status` | one `status` line: phase, radio, bench, camera, last action, when the next cycle is due |
 | `devices` | a `dev` line per box, then `end what=devices n=…` |
 | `sync [camera=…] [force=1]` | `ok what=sync queued=0\|1`. `force` overrules the gates that mean "there is no need" and none of the ones that mean "must not" |
-| `source value=N [camera=…]` | `ok what=source`; the write is judged by whether the camera echoes it back |
-| `announce on=0\|1` | `ok what=announce`; a peer that does not want the unsolicited half |
+| `source value=N [camera=…]` | `ok what=source value=N queued=0\|1`; the write is judged by whether the camera echoes it back |
+| `announce on=0\|1` | `ok what=announce on=0\|1`, plus `effective=0` when the daemon's own announcements are off and saying yes would leave the peer waiting all night; a peer that does not want the unsolicited half |
 | `forget dev=…` | `ok what=forget known=0\|1` |
 | anything else | `err reason=unknown-verb verb=…` |
 
@@ -354,13 +369,17 @@ An asynchronous one stores it in the object, and here that means a
 went the same way for the same reason.
 
 Twelve kilobytes for a radio that works on the target at all is a trade worth
-making, and 99 KB in a 408 KB slot means it can be made without arithmetic. But
+making, and 131 KB in a 408 KB slot means it can be made without arithmetic. But
 if the firmware ever does run out of room, this is the first place to look, and
 the cheapest fix is fewer distinct `std::function` types rather than less code.
 
-`doc/standalone-notes.md` estimated 250–350 KB and said to measure before
-designing around it. Even after the radio doubled in size, the set the firmware
-links is well under half that. **Flash is not the binding constraint.** RAM at run time still is, and is still unmeasured
+`doc/standalone-notes.md` estimated 250-350 KB and said to measure before
+designing around it. That was a good estimate and it was pessimistic: even
+after the radio doubled in size and the daemon and the sharing layer were added
+to it, the set the firmware links is 131 KB -- half the bottom of that range
+and well under the top. **Flash is not the binding constraint.**
+
+RAM at run time still is, and is still unmeasured
 **(unverified: the heap cost of `std::string`/`std::map` in `Registry` under a
 real bench has never been profiled. What would settle it: build the firmware
 and read the thread analyzer's high-water mark.)**
@@ -477,7 +496,7 @@ added, at which point a failure is known to be the radio's.
 2. The protocol codec, and the persistence record formats. Portable, tested.
    **Codec done; the record formats are not.**
 3. The Mac sync daemon and control daemon -- layers 3 and 2. The churn. **The
-   sync daemon is done** -- `src/syncd.{h,cc}`, cross-compiling for cortex-m4, thirty-two
+   sync daemon is done** -- `src/syncd.{h,cc}`, cross-compiling for cortex-m4, thirty-four
    properties pinned against a fake camera on a clock that is a variable, and
    run against the room over a real dongle. The control daemon is not started.
 4. Standalone firmware over USB.
@@ -691,7 +710,7 @@ nRF5 bootloader stays where it is.
 
 Sums to exactly 1 MB. The chain is Nordic bootloader → MCUboot → application,
 so the button-and-plug DFU stays as the recovery path and everything else is a
-push. 99 KB of application code in a 408 KB slot leaves room for Zephyr, the
+push. 131 KB of application code in a 408 KB slot leaves room for Zephyr, the
 controller and USB several times over.
 
 Two things to know before building it. **MCUboot is not in the workspace**:
@@ -755,7 +774,7 @@ is.
   a room with 37 LE devices in it. Everything past the scan -- connect,
   discover, subscribe, pair, write -- still waits for a camera to be switched
   on.
-* The sync daemon **against a camera**. Thirty-two properties are pinned
+* The sync daemon **against a camera**. Thirty-four properties are pinned
   against a fake one, which is a statement about this program's arithmetic and
   not about a Blackmagic body. The first real cycle is still ahead.
 * Whether the nRF52840's controller will scan, advertise, hold a central link
@@ -771,6 +790,7 @@ is.
   other item on this list is waiting behind that.
 
 The loop, the message codec, the HCI host, the shared radio and the sync
-daemon are the parts of this document that exist and run -- steps 1 through 3,
-less the control daemon. Everything from the control daemon onwards is still
+daemon are the parts of this document that exist and run -- steps 1 and 3 less
+the control daemon, and the codec half of step 2; the persistence record
+formats are still unwritten. Everything from the control daemon onwards is still
 description.

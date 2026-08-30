@@ -42,7 +42,7 @@ What replaces it is three layers rather than two daemons:
 |---|---|
 | **user interface** | the command-line programs, the TUI and the app. Several at once. None of them holds a radio. |
 | **control daemon** | answers all of them, and holds one connection down to a sync daemon: status coming up, control changes going down. Owns no radio. |
-| **sync daemon** | the tight loop of BLE message timing. The only thing that talks to a timecode box or a camera. On the Mac it is a process; on the box it is the firmware, from the same source. |
+| **sync daemon** | the tight loop of BLE message timing. The only thing that talks to a timecode box or a camera. On the Mac it is a process; on the box it is to be the firmware, from the same source. No firmware exists yet. |
 
 `doc/box-notes.md` has the diagram, the reasoning, and — more usefully — a
 plain statement of which of the three exist. As of now: the sync daemon does
@@ -185,7 +185,7 @@ trusted — but it defaults to the same per-camera database. So the two of them
 side by side are exactly the pair of writers this section says cannot happen.
 That is the price of running the replacement next to the thing it replaces,
 and it goes away when the cutover does; until then, give the daemon its own
-`--camdb` if you run both.
+`--camera-db PATH` if you run both.
 
 The modes that never write anything take no lock and can be run next to a
 running daemon: `--dry-run`, `--scan-only`, `--watch` and `--poke` for
@@ -912,13 +912,15 @@ Two differences are real and cannot be papered over:
   everything worked immediately. The dongle arrives as a stranger, so the
   camera displays a six-digit passkey — pass it with `--passkey`.
 
-**The dongle can act, but only from the new daemon.** Scanning over it works
-and is what `octomancerd` and the window use. Setting a clock over it needs
-`octomancer-sync --daemon`, which drives the event-loop camera client written
-for the standalone box — see `doc/box-notes.md`. The older blocking tools
-cannot: they wait on a reader thread that no longer exists, so asking one of
-them for a camera over the dongle prints why and stops rather than appearing
-to work. Use `--radio=corebluetooth` for those, or the daemon for the dongle.
+**Over the dongle, only scanning has ever worked.** Scanning is what
+`octomancerd` and the window use, and it has run against real hardware many
+times. Writing a clock over it is written and has never been run: the code is
+`octomancer-sync --daemon`, driving the event-loop camera client built for the
+standalone box -- see `doc/box-notes.md` -- and that path has never reached a
+camera. The older blocking tools cannot drive it at all: they wait on a reader
+thread that no longer exists, so asking one of them for a camera over the
+dongle prints why and stops rather than appearing to work. Use
+`--radio=corebluetooth` for those. Nothing is lost that ever worked.
 
 Sharing matters here and did not use to. One dongle is one HCI link, and the
 daemon needs to hear the timecode boxes *while* it holds a camera, so both

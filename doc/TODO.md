@@ -22,11 +22,10 @@ Still to write, roughly in order:
 
 1. **The persistence record formats** — and only two of them, now that the
    layering has settled what the box is allowed to remember: whether each
-   device is enabled or disabled, and the Bluetooth pairing state. One thing to
-   settle before writing them: whether the enabled flag is keyed on the device
-   or on the link, since the base entity elsewhere is the pair. Pairing state
-   has no such question -- a bond is between two radios. See entry 19 of
-   `doc/KNOWN_ISSUES.md`. Everything
+   device is enabled or disabled, and the Bluetooth pairing state. Both are per
+   *link* rather than per device -- a box may be unreliable from one radio and
+   fine from another -- which on the box needs no compound key, since this box
+   is one end of every link it has. Everything
    about timing stays in RAM and is re-measured after a reboot. Portable,
    tested, no filesystem: the box has NVS and nothing else, and nothing is
    logged to it. See "What layer 3 keeps, and where" in `doc/box-notes.md`.

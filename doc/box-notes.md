@@ -411,16 +411,55 @@ than `id` -- and a third value in `DeviceKind`, which today is `kTentacle` and
 `kCamera`. `DeviceView` already carries `canonical_source` to say which daemon
 a number came from, so the idea has a precedent in the file it belongs in.
 
-One question this leaves genuinely open, and it wants answering before the
-flash record formats are written, because it decides what they hold.
-**Is enable/disable a property of the device or of the link?** Disabling a box
-that has drifted is a statement about the box, and should hold for every
-receiver. Excluding one dongle's view of a box that it hears badly is a
-statement about the link. Both are real. The cheap answer is that the persisted
-flag is per device -- it is what a person meant -- and that a receiver may
-additionally exclude a link it does not trust, which is a judgement and belongs
-to whoever is judging. Pairing state has no such question: a bond is between
-two radios, so it is per pair definitionally.
+**Enable and disable are properties of the link**, and so is pairing. A box may
+be unreliable heard from one dongle and perfectly good heard from another --
+different distance, different walls, different antenna -- and switching it off
+everywhere because one receiver cannot hear it well would be throwing away the
+receivers that can. The judgement is about the path, so it is stored against
+the path.
+
+That turns out to cost nothing to store, which is worth noticing. **On the box
+the receiver half of the pair is implicit**: a sync daemon is one endpoint of
+every link it has, so its flash holds a flag per device as *it* sees them,
+which is already per link. No extra field, no compound key, nothing to migrate
+if a second radio appears later. The pair only has to be spelled out one layer
+up, where rows from several daemons meet and the receiver stops being obvious.
+
+### Cameras, and which radio gets to write
+
+A camera raises the same question and answers it less comfortably, because
+**only one host can hold a camera at a time.** A camera stops advertising while
+something is connected to it -- `src/scanner.h` and `src/syncd.h` both turn on
+that fact -- so two radios cannot both be writing its clock, and "which one is
+allowed to" is not a preference, it is an exclusion.
+
+The intended shape is: a person nominates one *or several* radios that may
+write to a given camera, and the network decides which of them actually masters
+it at any moment. Several, because a rig where the only radio that can reach a
+camera has gone away should fail over rather than stop.
+
+**None of that is being built now, and the simplifying assumptions are written
+here so it is obvious when they break:**
+
+* **A camera is paired with one radio at a time.** Pairing is what nominates
+  it, so the choice is made by where somebody pairs and there is no election to
+  run.
+* **No radio forwards another radio's devices.** Each sync daemon computes its
+  clock from its own links and writes to the cameras paired with it. Nothing is
+  relayed, so there is no mesh to be consistent about.
+
+The consequence of the second one is worth stating rather than discovering:
+**two radios will not agree exactly**, and with each writing its own cameras
+the disagreement shows up as a difference between cameras. That is not a bug
+introduced by the simplification -- it is the receive-path skew that was always
+there, now visible. It is also the argument for showing per-link numbers rather
+than one merged one: the difference is measurable from what layer 2 already
+receives, and a fused network clock would have hidden it.
+
+When the election does get built, what it needs is here already: the permitted
+set is per link, which is the same shape as enable/disable, and the
+`(via …)` naming makes "this camera is currently mastered by that dongle"
+something a person can be shown.
 
 ### Pairing, when there is nobody to ask
 
@@ -481,6 +520,11 @@ the obvious answer when something does.
 the Bluetooth pairing state. Both are things a person decided, neither can be
 re-derived by listening, and losing either one across a power cycle is a
 question somebody has to answer again in a room they may not be standing in.
+
+Both are per *link* rather than per device -- see "The unit is a link, not a
+device" -- and on the box that costs nothing, because the receiving half of
+every link is this box. A flag per device in its own flash is already a flag
+per link.
 
 **Nowhere on the box:** the logs. They go up to layer 2, which has a
 filesystem. See "What lives in flash" below for the flash map this implies.
@@ -1076,6 +1120,12 @@ measured: **whether each device is enabled or disabled**, and **the Bluetooth
 pairing state** -- which is the bonds, plus enough to know that a device has
 been seen and not yet paired. Neither can be re-derived by listening, and both
 are answers somebody gave in a room they may not be standing in again.
+
+Both are properties of a link rather than of a device: a box may be unreliable
+heard from here and fine heard from elsewhere, and disabling it everywhere
+because one receiver hears it badly throws away the receivers that do not. On
+the box that needs no compound key, because this box is one end of every link
+it has -- a flag per device in its own flash is a flag per link already.
 
 Everything about timing stays in RAM and is lost on reboot: what each box's
 offset was, how the last few sightings scattered, what the write delay has

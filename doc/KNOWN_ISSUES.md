@@ -790,18 +790,29 @@ third value in `DeviceKind`, which today is `kTentacle` and `kCamera`. The
 origin has to reach the Mac in the first place, which is the sync-daemon
 identity in `hello`.
 
-**Also unresolved, and it wants deciding before the flash record formats in
-`doc/TODO.md` item 1 are written, because it decides what they hold:** whether
-enable/disable is a property of the device or of the link. Disabling a box that
-has drifted is a statement about the box and should hold everywhere; excluding
-one dongle's view of a box it hears badly is a statement about the link. The
-cheap answer is that the persisted flag is per device and a receiver may
-additionally distrust a link, but it has not been decided. Pairing state has no
-such question -- a bond is between two radios, so it is per pair.
+**Enable and disable are per link**, decided 2026-08-30, and so is pairing. A
+box may be unreliable heard from one dongle and fine heard from another, and
+switching it off everywhere because one receiver hears it badly throws away the
+receivers that can. On the box this needs no compound key -- a sync daemon is
+one end of every link it has, so a flag per device in its own flash is already
+per link. `octomancer-sync` today reads enablement from `cameras.conf`, which
+is keyed on the device alone and has no notion of a receiver at all; that is
+the shape that has to change.
+
+The same question for cameras is **deferred rather than answered**, and the
+scope is written into `doc/box-notes.md` so it is visible when it stops being
+true. Only one host can hold a camera at a time -- it stops advertising while
+something is connected -- so several radios permitted to write to one camera
+means an election, and there is not one. Until there is: a camera is paired
+with a single radio, no radio forwards another's devices, and each sync daemon
+syncs the cameras paired with it from its own clock. The visible consequence is
+that two radios will not agree exactly, and with each writing its own cameras
+that shows up as a difference *between cameras* -- not a new fault, just the
+receive-path skew that was always there, now where somebody can see it.
 
 **What would settle it:** `octomancer status` showing a dongle, its dropped
 broadcast count, and one box listed twice with two different offsets, both
-correct.
+correct -- and one of those two rows disabled while the other stays live.
 
 ### And one piece of dead scaffolding
 

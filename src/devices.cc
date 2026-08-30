@@ -394,9 +394,14 @@ DeviceView build_device_view(const DeviceSources& from) {
 //
 // "unknown" is the one worth spelling out at length. It is not a radio
 // failure; it is CoreBluetooth never having called back at all, which on macOS
-// is what a denied Bluetooth permission looks like. There is no error, no
-// prompt and no state -- and an ad-hoc signed binary loses its grant every
-// time it is rebuilt, so this is an ordinary consequence of `make install`.
+// is what a missing Bluetooth permission looks like. There is no error, no
+// prompt and no state, and under launchd there is nobody to prompt.
+//
+// It used to add "a rebuilt binary loses the approval it had", which is wrong
+// and was written from one bad morning rather than from a measurement. The
+// daemons embed an Info.plist to give macOS a stable identity for exactly this
+// reason, and a rebuild keeps the grant -- checked by watching octomancerd's
+// cdhash change across `make install` while the radio kept working.
 std::string radio_complaint(const std::string& radio) {
   if (radio.empty() || radio == "poweredOn") return "";
   if (radio == "poweredOff") {
@@ -414,9 +419,10 @@ std::string radio_complaint(const std::string& radio) {
   }
   if (radio == "unknown") {
     return "the radio has never reported a state, which on macOS is what a"
-           " refused Bluetooth permission looks like -- there is no prompt and"
+           " missing Bluetooth permission looks like -- there is no prompt and"
            " no error. Approve the daemon in System Settings > Privacy &"
-           " Security > Bluetooth. A rebuilt binary loses the approval it had.";
+           " Security > Bluetooth; running it once from a terminal usually"
+           " raises the prompt.";
   }
   return "the radio reports \"" + radio + "\".";
 }

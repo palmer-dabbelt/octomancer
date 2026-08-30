@@ -31,18 +31,26 @@ worktree -- so if you find yourself under `.claude/worktrees/`, leave with the
 
 ## Traps that have already cost hours
 
-**`make install` revokes the daemons' Bluetooth permission.** The binaries are
-ad-hoc, linker-signed, so their cdhash changes on every rebuild and macOS
-stops recognising them as the thing the Bluetooth grant was given to. Under
-launchd there is nobody to re-prompt, so CoreBluetooth simply never calls back:
-no error, no prompt, no state. `octomancer status` says the radio has never
-reported a state, and the daemons print "Bluetooth did not report a state" to
-their `.err` logs -- but every other symptom looks exactly like an empty room.
+**A missing Bluetooth grant looks exactly like an empty room.** When macOS has
+not granted a daemon Bluetooth, CoreBluetooth never calls back at all: no
+error, no prompt, no state. Under launchd there is nobody to prompt, so it
+fails silently and forever. The tells are `"radio":"unknown"` with zero adverts
+in the JSONL, and "Bluetooth did not report a state" in the daemon's `.err`.
+`octomancer status` now says so directly when the device list is empty --
+that line exists because this was diagnosed the slow way once.
 
-Re-approving is the user's job, in System Settings > Privacy & Security >
-Bluetooth, and cannot be done from here. So: **after `make install`, expect the
-bench to go quiet, and say so** rather than debugging the radio. Verified on
-2026-08-30, when it cost a morning stacked on top of an unrelated radio bug.
+Only the user can grant it, in System Settings > Privacy & Security >
+Bluetooth. Running the binary once from a terminal usually raises the prompt.
+
+**This is *not* caused by rebuilding, and an earlier version of this note said
+it was.** The daemons embed an Info.plist via `-Wl,-sectcreate` precisely so
+macOS has a stable identity to remember the answer against -- see the comment
+in `launchd/com.dabbelt.octomancerd.plist`. Measured on 2026-08-30:
+octomancerd's cdhash went from `526d6e2f` to `2bd2c463` across a rebuild and
+`make install`, and the daemons kept the radio across a restart. So do not tell
+somebody their bench will go quiet after installing; it will not. The morning
+that was lost went to an unrelated radio bug, plus a grant that had gone
+missing for reasons still unknown.
 
 **Every GitHub clone fails here, whatever URL you use.** The global git config
 rewrites GitHub to SSH:

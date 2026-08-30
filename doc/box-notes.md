@@ -66,10 +66,11 @@ it has one, is pointed at a sync daemon and nothing else.
                                                      design either way.
                                       |   ^
        state broadcast, unasked:      |   |   control, when somebody wants
-       per device -- how long ago     |   |   something:
-       it was last seen, its offset,  |   |     enable / disable device ID
-       its signal strength then,      |   |     synchronise device ID now
-       and its pairing state          |   |     passcode for device ID
+       per device -- how long ago it  |   |   something:
+       was last seen, its averaged    |   |     enable / disable device ID
+       offset and signal strength,    |   |     synchronise device ID now
+       its pairing state, and the     |   |     passcode for device ID
+       last few exact measurements    |   |
                                       v   |
              one connection per sync daemon, carrying both directions.
              src/boxmsg.h framing: one message per line, the broadcast
@@ -144,14 +145,49 @@ The point of the split is that layer 3 keeps almost nothing, so the broadcast
 is not a summary of a database it holds -- it is very nearly everything it
 knows.
 
-**Upward, unasked, per device:** how long ago it was last seen, the offset
-measured then, the signal strength then, and its pairing state. Age rather than
-a timestamp, because two clocks that disagree is exactly the thing this project
-exists to be careful about, and a number counted forward from the last sighting
-needs no agreement about what time it is. The offset and the RSSI are what they
-were at that sighting, not an average: averaging is a judgement, judgements
-belong upstairs, and a control daemon given the raw pair can compute whatever
-it likes.
+**Upward, unasked, per device:** how long ago it was last seen, the **averaged**
+offset and the **averaged** signal strength, its pairing state, and a short
+sliding window of the last few exact measurements.
+
+Age rather than a timestamp, because two clocks that disagree is exactly the
+thing this project exists to be careful about, and a number counted forward
+from the last sighting needs no agreement about what time it is.
+
+Averaged rather than raw, and this reverses what an earlier draft of this
+section argued. It said averaging was a judgement and judgements belonged
+upstairs, so the box should send the last raw pair and let the control daemon
+decide. That is wrong for one decisive reason: **the averaged offset is the
+number the sync daemon actually synchronises on.** `measure_bench()` in
+`src/syncd.cc` votes with each device's `median_offset` and takes the median of
+those; the raw last sighting is not in the arithmetic anywhere. A UI showing
+the last raw
+sighting would be showing a number no decision was ever made from, differing
+from the real one by the jitter the averaging exists to remove, and somebody
+would eventually spend an evening on why the displayed offset and the applied
+offset disagree. Show the number that was used.
+
+The window of exact measurements rides along for the other audience. A person
+looking at a screen wants the average; a log, or somebody chasing a bad box,
+wants the individual sightings and what they scattered by. Sending a few of
+them costs almost nothing, and it is the raw material layer 2 needs to fit
+anything the box cannot -- drift in particular, which needs a lever arm of
+fifteen minutes or more and is refused outright from a short one (see
+`src/registry.h`). The box cannot hold an hour of samples, so it cannot fit
+drift; the control daemon has been receiving and logging the exact
+measurements all along, and can.
+
+"A few" is doing real work in that sentence, and there is a measured reason to
+be careful about it.
+
+> **Read out of `src/registry.h`, 2026-08-30.** The retention defaults are a
+> Mac's: a one-hour window capped at 8192 samples, and `Sample` is two doubles.
+> That is **128 KB per device**, and there are usually five Tentacles in the
+> room. The nRF52840 has 256 KB of RAM in total, shared with the controller and
+> **(unverified: that figure is from memory and is not measured here -- see
+> `doc/standalone-notes.md`)**. Whichever way the uncertainty falls, one
+> device's window would be about half of everything and five would not fit, so
+> the box's window is not this one and the number wants choosing deliberately
+> rather than inheriting.
 
 **Downward, when somebody wants something:**
 
@@ -199,10 +235,18 @@ Minimising this is a design goal rather than an economy, because the box has
 NVS and nothing else, and because state that is only in one place cannot get
 out of step with itself.
 
-**In RAM, and lost on reboot:** everything about message latency and timing --
-what each box's offset was, how the last few sightings scattered, what the
-write delay has converged to. It is cheap to re-measure, it goes stale anyway,
-and none of it is worth a flash write.
+**In RAM, and lost on reboot:** everything about message latency and timing.
+That is a sliding window of the last few sightings per device, the averages
+computed from it, and what the write delay has converged to. It is cheap to
+re-measure, it goes stale anyway, and none of it is worth a flash write.
+
+The size of that window is the one number here that has to be chosen rather
+than inherited, because it is the only thing in layer 3 whose cost grows with
+the room. `Registry`'s Mac defaults would be 128 KB per device -- see above --
+on a part with 256 KB in total. What the box keeps is a *few* samples: enough
+to average over and enough to send up for logging, and not one more. Anything
+that needs a longer arm than that -- drift being the example -- is computed by
+layer 2 out of the measurements it has been receiving all along.
 
 **In flash, and only this:** whether each device is enabled or disabled, and
 the Bluetooth pairing state. Both are things a person decided, neither can be

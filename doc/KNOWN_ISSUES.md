@@ -448,13 +448,14 @@ configured, except by typing lines into a socket by hand.
 over `octomancer-syncd.sock`. Even a one-verb debug client would do it, and
 would be worth having before the control daemon rather than after.
 
-### 5. The state broadcast is a poll, and carries judgements
+### 5. The state broadcast is a poll, and the wrong shape
 
 The model has the sync daemon saying what it knows, unasked: per device, how
-long ago it was last seen, the offset measured then, the signal strength then,
-and its pairing state. Nearly all of that exists -- `src/syncd.cc`'s `dev` line
-already carries `id`, `name`, `rssi`, `live`, `age` and `offset`. Three things
-are wrong with it.
+long ago it was last seen, the averaged offset and signal strength, its pairing
+state, and a short sliding window of the last few exact measurements. Much of
+that exists in `src/syncd.cc`'s `dev` line, which already carries `id`, `name`,
+`rssi`, `live`, `age`, `offset`, `median`, `samples` and `ppm`. Four things are
+wrong with it.
 
 It is **a reply, not a broadcast**. `dev` lines come back from `devices`, so a
 control daemon has to ask, on a timer it picks, and anything that happened
@@ -464,16 +465,30 @@ wrong granularity in both directions. It is the answer rather than the
 observations, and it is one line about the bench as a whole rather than a line
 about each device, so a control daemon cannot see which box moved.
 
-It carries **derived values**: `median`, `samples` and `ppm`. Those are
-judgements about a history, and the whole point of the split is that judgements
-belong in the latency-tolerant half. Worse, keeping them means the sync daemon
-keeps the history they are computed from, which is exactly the state the box is
-trying not to have.
+The **averaging is right but incomplete**. `median` is the number the daemon
+actually synchronises on and is exactly what a person should be shown, so it
+belongs in the broadcast -- an earlier version of this entry argued the
+opposite and was wrong. What is missing beside it is the averaged RSSI, and the
+window of individual sightings that a log or somebody chasing a bad box wants.
+`rssi` is the last sighting's, unaveraged, which is the one place the line
+still shows a raw number where an averaged one is wanted.
+
+`ppm` is **the one derived value that should move up**, and not because it is a
+judgement: because it needs a lever arm. Drift is refused outright from less
+than fifteen minutes of samples, and the box cannot hold fifteen minutes of
+samples -- `Registry`'s Mac defaults are an hour capped at 8192 two-double
+samples, or 128 KB per device, on a part with 256 KB in total and five
+Tentacles in a typical room. Layer 2 has
+been receiving the exact measurements all along and can fit it; layer 3 cannot
+and should stop trying. Which also means **the window the box does keep has to
+be chosen deliberately**, because it is the only state in layer 3 whose cost
+grows with the number of boxes in the room.
 
 It has **no pairing state**, which entry 7 is about.
 
 **What would settle it:** a control daemon that never sends `devices` and still
-has a complete, current roster, because everything arrives on its own.
+has a complete, current roster, because everything arrives on its own -- and a
+box whose per-device RAM is a fixed number somebody chose.
 
 ### 6. The control vocabulary is a different set from the one the box needs
 

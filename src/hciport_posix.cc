@@ -7,6 +7,7 @@
 #include <fcntl.h>
 #include <poll.h>
 #include <string.h>
+#include <sys/ioctl.h>
 #include <termios.h>
 #include <unistd.h>
 
@@ -112,9 +113,36 @@ int open_raw(const std::string& path, std::string* err) {
   // indefinitely with no diagnostic at all.
   int fd = ::open(path.c_str(), O_RDWR | O_NOCTTY | O_NONBLOCK);
   if (fd < 0) {
-    if (err) *err = path + ": " + std::strerror(errno);
+    if (err) {
+      // EBUSY here is somebody else's TIOCEXCL, set below. Worth naming,
+      // because "Device busy" on a serial port reads like a driver problem
+      // and is in fact another octomancer program holding the dongle.
+      if (errno == EBUSY) {
+        *err = path +
+               ": already open by another program (a dongle drives one"
+               " process at a time)";
+      } else {
+        *err = path + ": " + std::strerror(errno);
+      }
+    }
     return -1;
   }
+  // Exclusive use, so that the second opener is refused instead of silently
+  // joining in.
+  //
+  // src/hcishare.h ended this within one process: two hci::Links on one port
+  // read the same byte stream, each takes the other's replies for corruption,
+  // and it surfaces as a radio that powered itself off. Nothing stopped it
+  // happening *between* processes, and it was reachable -- `octomancer start`
+  // runs two agents, and under --radio auto both of them pick the first
+  // dongle they find. The ProcLocks do not help: they are named per program,
+  // not per radio.
+  //
+  // TIOCEXCL is what a tty has for exactly this. It costs one ioctl and turns
+  // a silent, hours-to-diagnose corruption into EBUSY at open. Not fatal if
+  // the driver will not do it: a device that refuses exclusivity is no worse
+  // than the situation before this line existed.
+  ::ioctl(fd, TIOCEXCL);
   // Back to blocking now that the port is open; reads are gated by poll().
   int flags = ::fcntl(fd, F_GETFL, 0);
   if (flags >= 0) ::fcntl(fd, F_SETFL, flags & ~O_NONBLOCK);

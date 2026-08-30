@@ -43,7 +43,7 @@ class HciScanner : public Scanner {
   // see src/hcishare.h.
   HciScanner(hci::SharedLink* radio, AdvertHandler on_advert,
              SightingHandler on_camera, StateHandler on_state)
-      : radio_(radio),
+      : borrowed_(radio),
         on_advert_(std::move(on_advert)),
         on_camera_(std::move(on_camera)),
         on_state_(std::move(on_state)),
@@ -53,6 +53,12 @@ class HciScanner : public Scanner {
   ~HciScanner() override { stop(); }
 
   bool start(std::string* err) override {
+    // Back to the radio this scanner was built with, which stop() cleared.
+    // Deriving it here rather than leaving it in place is what stops a
+    // stop-then-start from silently deciding it owns the dongle: it does not,
+    // and opening a second link on a port somebody else is already driving is
+    // the exact failure src/hcishare.h exists to end.
+    radio_ = borrowed_;
     if (!radio_) {
       hci::Link::Options opts;
       opts.device = radio_options().device;
@@ -166,7 +172,11 @@ class HciScanner : public Scanner {
     return id;
   }
 
-  // Either somebody else's radio or own_'s, never neither once started.
+  // The radio this scanner was handed, or null if it is meant to open its
+  // own. Never cleared, because it is the answer to "whose radio is this",
+  // which does not change when the scan stops.
+  hci::SharedLink* const borrowed_ = nullptr;
+  // Either borrowed_ or own_'s, and null while stopped.
   hci::SharedLink* radio_ = nullptr;
   std::unique_ptr<hci::SharedLink> own_;
   std::unique_ptr<hci::SharedLink::User> user_;

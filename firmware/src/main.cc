@@ -32,6 +32,7 @@
 #include <string>
 
 #include "boxadmin.h"
+#include "faultlog.h"
 #include "boxclock.h"
 #include "boxmsg.h"
 #include "cdcpeer.h"
@@ -116,7 +117,32 @@ int main() {
     clock.set(t.wall);
   });
 
-  peer.on_open([&daemon, &peer]() { daemon.peer_opened(&peer); });
+  // Why the last run ended, and whether this build can print the numbers the
+  // protocol is made of. Both are answered once, at boot, and told to whoever
+  // attaches -- a box with no console can only report a problem to somebody
+  // who is listening, and the first host to open the port is the first
+  // opportunity there has ever been.
+  const octo::FaultRecord last_fault = octo::take_last_fault();
+  const std::string fault_line = octo::describe_fault(last_fault);
+  const bool floats_ok = octo::can_format_doubles();
+
+  peer.on_open([&daemon, &peer, &fault_line, floats_ok]() {
+    daemon.peer_opened(&peer);
+    auto say = [&peer](const std::string& text) {
+      octo::Message msg;
+      msg.verb = "say";
+      msg.set("text", text);
+      peer.send(octo::encode(msg));
+    };
+    if (!fault_line.empty()) say(fault_line);
+    // The failure this catches is silent from both ends: every number in every
+    // message comes out empty and nothing reports an error. Saying so is the
+    // difference between one line and another evening.
+    if (!floats_ok) {
+      say("this build cannot format floating point -- every number in this "
+          "protocol will be empty (CONFIG_PICOLIBC_IO_FLOAT)");
+    }
+  });
   peer.on_close([&daemon, &peer]() { daemon.peer_closed(&peer); });
   peer.on_line([&daemon, &peer](const std::string& line) {
     // Two verbs mean something only on a box -- see firmware/src/boxadmin.h.

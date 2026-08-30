@@ -79,6 +79,22 @@ struct Message {
 
 // One line, without the terminator. Never contains a newline: values are
 // escaped, and the verb is rejected at encode time if it is not a bare token.
+// Whether this build's C library can format the numbers this protocol is made
+// of. True everywhere it should be; ask anyway, once, at boot.
+//
+// Not a hypothetical. A dongle is built against picolibc, which ships printf
+// in two flavours and links the integer-only one unless asked -- and the
+// integer-only one does not fail on "%f", it prints nothing for it. So
+// set_double quietly produced `offset=` with no number after it, for every
+// offset, spread, uptime and drift figure the box has, while set_int worked
+// perfectly and the build was clean and silent. One Kconfig line away, and
+// invisible from the host end except as a protocol that had gone strange.
+//
+// Round trip rather than string comparison: what matters is that a number put
+// into a message comes back out of one, which is the only promise anything
+// downstream relies on.
+bool can_format_doubles();
+
 std::string encode(const Message& msg);
 
 // Parse one line. A trailing '\r' is tolerated, because a person typing into a

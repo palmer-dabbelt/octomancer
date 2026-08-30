@@ -36,6 +36,7 @@ target_sources(app PRIVATE
   src/boxadmin.cc
   src/boxclock.cc
   src/cdcpeer.cc
+  src/faultlog.cc
   src/loop_zephyr.cc
   src/scanner_zephyr.cc
 )

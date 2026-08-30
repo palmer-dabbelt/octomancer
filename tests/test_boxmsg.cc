@@ -10,6 +10,7 @@
 #include "boxmsg.h"
 #include "harness.h"
 
+using octo::can_format_doubles;
 using octo::decode;
 using octo::encode;
 using octo::LineReader;
@@ -260,8 +261,22 @@ void test_the_line_reader_ignores_empty_lines_at_the_message_layer() {
 
 }  // namespace
 
+// The self-check the firmware runs at boot, checked here so that a build which
+// cannot print a float fails on a Mac before it reaches a dongle -- where the
+// only symptom is a protocol full of empty numbers.
+void test_this_build_can_format_doubles() {
+  CHECK(can_format_doubles());
+  // And the thing it is really asserting, spelled out: a fraction survives.
+  Message msg;
+  msg.set_double("offset", -6.231, 3);
+  CHECK_STR(msg.get("offset"), "-6.231");
+  msg.set_double("spread", 0.0206, 4);
+  CHECK_STR(msg.get("spread"), "0.0206");
+}
+
 int main() {
   test_a_message_round_trips();
+  test_this_build_can_format_doubles();
   test_a_hostile_name_cannot_break_the_line();
   test_an_empty_value_survives();
   test_unknown_fields_are_kept_not_rejected();

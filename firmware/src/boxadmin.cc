@@ -6,6 +6,7 @@
 #include <zephyr/sys/reboot.h>
 
 #include "boxmsg.h"
+#include "faultlog.h"
 #include "scanner_zephyr.h"
 
 namespace octo {
@@ -37,6 +38,10 @@ bool handle_box_admin(const std::string& line, CdcPeer* peer) {
     out.set_int("tx_dropped", peer->dropped_tx());
     out.set_int("rx_dropped", peer->dropped_rx());
     out.set_int("long_lines", peer->long_lines());
+    // Whether this build can print the numbers it is being asked for. If this
+    // is 0 then every other figure in this message is an integer that happened
+    // to survive, and every double the box has sent is empty.
+    out.set_bool("floats", can_format_doubles());
     // Free heap is not reported. There is no supported way to ask picolibc's
     // arena how much of it is left, and a figure invented here would be worse
     // than the silence -- it is exactly the kind of number that gets believed.

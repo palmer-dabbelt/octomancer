@@ -117,6 +117,22 @@ void Message::set_bool(const std::string& key, bool value) {
   set(key, value ? "1" : "0");
 }
 
+bool can_format_doubles() {
+  // A value with a fraction that no integer path could produce by accident,
+  // and a magnitude in the range the protocol actually carries.
+  Message msg;
+  msg.verb = "selftest";
+  msg.set_double("x", -6.25, 3);
+  if (msg.get("x") != "-6.250") return false;
+
+  Message back;
+  std::string err;
+  if (!decode(encode(msg), &back, &err)) return false;
+  double out = 0.0;
+  if (!back.get_double("x", &out)) return false;
+  return out > -6.2505 && out < -6.2495;
+}
+
 std::string encode(const Message& msg) {
   if (!is_bare_token(msg.verb)) return std::string();
   std::string out = msg.verb;

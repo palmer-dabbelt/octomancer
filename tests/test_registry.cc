@@ -7,6 +7,8 @@
 #include "harness.h"
 
 #include <cmath>
+#include <cstdlib>
+#include <ctime>
 #include <vector>
 
 using namespace octo;
@@ -36,59 +38,110 @@ void feed(Registry* reg, const std::string& id, double offset, double mono,
   reg->observe(id, "box", -40, pkt.data(), pkt.size(), mono, wall);
 }
 
-// A box that has not been told the time yet.
+// A box that has not been told the time yet -- which is every dongle, from
+// power-up until a host says otherwise, and quite possibly forever: a dongle
+// in a bag with no computer attached is still supposed to be working.
 //
-// This is the state every dongle boots into and no Mac is ever in, which is
-// why it went unnoticed until firmware existed: firmware/src/boxclock.h
-// answers zero until a host says otherwise, and zero used to be subtracted
-// like any other timestamp. The result was not a small error. Every box on the
-// bench got an offset of about fifty thousand seconds -- the distance from
-// midnight UTC in 1970 to the time of day the Tentacle was broadcasting -- and
-// the daemon downstream reported a bench, a spread and five happy devices
-// built entirely out of the clock it did not have.
-void test_a_box_with_no_wall_clock_reports_no_offsets() {
+// The claim being pinned is that it works completely for the question the
+// bench exists to answer. Offsets measured against a free-running clock are
+// all displaced by one unknown constant, so every *difference* between them --
+// the spread, the disagreement between boxes -- is exact. Only the absolute
+// reading is missing, and the snapshot says so rather than implying otherwise.
+void test_a_box_with_no_wall_clock_still_measures_the_spread() {
   Registry reg({}, 0.0);
-  for (int i = 0; i < 10; ++i) {
-    const std::vector<uint8_t> pkt = micros_packet(45000.0 + i);
-    reg.observe("a", "Tentacle", -40, pkt.data(), pkt.size(), i, 0.0);
+  // Three boxes, deliberately disagreeing by known amounts, fed against a
+  // clock that starts near zero the way a dongle's does.
+  const double spreads[3] = {0.0, 0.020, -0.005};
+  for (int i = 0; i < 12; ++i) {
+    const double mono = i * 0.5;
+    for (int b = 0; b < 3; ++b) {
+      const std::vector<uint8_t> pkt = micros_packet(45000.0 + spreads[b]);
+      reg.observe("box" + std::to_string(b), "Tentacle", -40, pkt.data(),
+                  pkt.size(), mono, mono);
+    }
   }
 
-  const Snapshot snap = reg.snapshot(10, 0.0);
-  // Heard, named, counted: the device is on the page, because it really is
-  // there and saying so is not a guess.
-  CHECK_EQ(snap.devices, 1);
-  const DeviceSnapshot& d = snap.device[0];
-  CHECK_STR(d.name, "Tentacle");
-  CHECK_EQ(static_cast<long long>(d.adverts), 10LL);
-  CHECK_EQ(static_cast<long long>(d.decoded), 10LL);
-  // ...and no time against it, which is the whole point.
-  CHECK(!d.has_time);
-  CHECK_EQ(static_cast<long long>(d.samples), 0LL);
-  CHECK(!snap.has_bench);
-  CHECK_EQ(static_cast<long long>(snap.unclocked_total), 10LL);
-  CHECK_EQ(static_cast<long long>(snap.undecodable_total), 0LL);
+  const Snapshot snap = reg.snapshot(6.0, 6.0);
+  CHECK_EQ(snap.devices, 3);
+  CHECK_EQ(snap.live, 3);
+  // Measured, not refused: the readings are real readings.
+  CHECK(snap.has_bench);
+  for (const DeviceSnapshot& d : snap.device) CHECK(d.has_time);
+  // And the disagreement between the boxes is exact, despite nobody knowing
+  // what time it is. 25 ms from the box 5 ms slow to the box 20 ms fast.
+  CHECK_NEAR(snap.bench_spread, 0.025, 1e-4);
+  // ...while the snapshot is honest about what the offsets are worth.
+  CHECK(!snap.wall_is_real);
+  CHECK(static_cast<long long>(snap.free_running_total) > 0LL);
 }
 
-// ...and starts measuring the moment somebody says what time it is, without
-// dragging the readings it could not use into the answer.
-void test_offsets_begin_when_the_clock_arrives() {
+// The other half of the same claim: a Mac, which does know the time, is not
+// affected by any of this and still reports absolute offsets.
+// The free-running reference does not consult a timezone, and this is what
+// says so.
+//
+// It matters because it is the difference between a Mac being able to test
+// what a dongle will do and only appearing to. A dongle has no zone; a Mac
+// running these tests has whatever the machine is set to. Reaching for
+// local_seconds_of_day() in the free-running case would apply one of those and
+// not the other, so the two would compute different offsets from identical
+// input -- and every spread would still come out right, because a constant
+// cancels, which is exactly how this would go unnoticed.
+void test_the_free_running_reference_ignores_the_timezone() {
+  setenv("TZ", "XXX8", 1);  // eight hours behind UTC, per POSIX's spelling
+  tzset();
+
   Registry reg({}, 0.0);
-  for (int i = 0; i < 10; ++i) {
-    const std::vector<uint8_t> pkt = micros_packet(45000.0 + i);
-    reg.observe("a", "Tentacle", -40, pkt.data(), pkt.size(), i, 0.0);
-  }
-  for (int i = 10; i < 20; ++i) {
-    feed(&reg, "a", -6.25, i, wall_at(i));
+  const double sod = 45000.0;
+  for (int i = 0; i < 12; ++i) {
+    const double mono = i * 0.5;
+    const std::vector<uint8_t> pkt = micros_packet(sod);
+    reg.observe("a", "Tentacle", -40, pkt.data(), pkt.size(), mono, mono);
   }
 
-  const Snapshot snap = reg.snapshot(20, wall_at(20));
-  const DeviceSnapshot& d = snap.device[0];
-  CHECK(d.has_time);
-  CHECK_EQ(static_cast<long long>(d.samples), 10LL);   // ten, not twenty
-  CHECK_NEAR(d.median_offset, -6.25, 1e-3);
-  CHECK(snap.has_bench);
-  CHECK_NEAR(snap.bench_offset, -6.25, 1e-3);
-  CHECK_EQ(static_cast<long long>(snap.unclocked_total), 10LL);
+  const Snapshot snap = reg.snapshot(6.0, 6.0);
+  CHECK(!snap.wall_is_real);
+  // The reading at mono 5.5, measured against the day modulus and nothing
+  // else. Under the zone above this would be eight hours out.
+  const double want = wrap_delta(sod - seconds_of_day_at_offset(5.5, 0));
+  CHECK_NEAR(snap.device[0].offset, want, 1e-6);
+
+  unsetenv("TZ");
+  tzset();
+}
+
+void test_a_host_with_a_real_clock_says_so() {
+  Registry reg({}, 0.0);
+  for (int i = 0; i < 12; ++i) feed(&reg, "a", -6.25, i, wall_at(i));
+
+  const Snapshot snap = reg.snapshot(12, wall_at(12));
+  CHECK(snap.wall_is_real);
+  CHECK_EQ(static_cast<long long>(snap.free_running_total), 0LL);
+  CHECK_NEAR(snap.device[0].median_offset, -6.25, 1e-3);
+}
+
+// And when a host finally does say what time it is, the readings taken against
+// the old reference are dropped rather than averaged in with the new ones.
+// They differ by the whole unknown constant, so mixing them would produce a
+// median that is neither.
+void test_a_host_arriving_replaces_the_free_running_readings() {
+  Registry reg({}, 0.0);
+  for (int i = 0; i < 12; ++i) {
+    const std::vector<uint8_t> pkt = micros_packet(45000.0);
+    reg.observe("a", "Tentacle", -40, pkt.data(), pkt.size(), i * 0.5,
+                i * 0.5);
+  }
+  const uint64_t steps_before = reg.snapshot(6.0, 6.0).clock_steps;
+
+  // The host speaks: the same monotonic instants, now against a real clock.
+  for (int i = 12; i < 24; ++i) feed(&reg, "a", -6.25, i * 0.5, wall_at(i));
+
+  const Snapshot snap = reg.snapshot(12.0, wall_at(24));
+  CHECK(snap.wall_is_real);
+  CHECK(static_cast<long long>(snap.clock_steps) >
+        static_cast<long long>(steps_before));
+  CHECK_EQ(static_cast<long long>(snap.device[0].samples), 12LL);
+  CHECK_NEAR(snap.device[0].median_offset, -6.25, 1e-3);
 }
 
 void test_offset_and_median() {
@@ -369,8 +422,10 @@ void test_forget_reaches_the_camera_too() {
 int main() {
   test_median_helper();
   test_offset_and_median();
-  test_a_box_with_no_wall_clock_reports_no_offsets();
-  test_offsets_begin_when_the_clock_arrives();
+  test_a_box_with_no_wall_clock_still_measures_the_spread();
+  test_the_free_running_reference_ignores_the_timezone();
+  test_a_host_with_a_real_clock_says_so();
+  test_a_host_arriving_replaces_the_free_running_readings();
   test_drift_needs_a_long_lever();
   test_alert_hysteresis();
   test_no_flapping_in_the_band();

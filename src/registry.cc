@@ -155,25 +155,34 @@ void Registry::observe(const std::string& id, const std::string& name, int rssi,
   }
 
   dev.decoded++;
-  // An offset is a difference between two clocks, so it needs both of them. On
-  // a box that has not been told the time yet there is only one, and src/loop.h
-  // says what the other one reads: nothing. Subtracting it anyway does not
-  // produce a slightly wrong offset, it produces a confident one about 1970 --
-  // and the daemon downstream cannot tell that from a real reading, so it
-  // reports a bench and a spread built entirely out of the missing clock.
+  // The box states a local time of day; so does this machine. Their difference
+  // is what "how far off is this box" means, wrapped so that a box a second
+  // past midnight is not reported as almost a day fast.
   //
-  // Recording the sighting but not the sample is the honest shape: the device
-  // is on the page, with a name and a signal strength and an advert count, and
-  // no time against it until there is something to measure time against.
-  if (!wall_known(wall)) {
-    unclocked_total_++;
-    return;
-  }
-
-  // The box states a local time of day; so does the host. Their difference is
-  // what "how far off is this box" means, wrapped so that a box a second past
-  // midnight is not reported as almost a day fast.
-  const double offset = wrap_delta(decoded.sod - local_seconds_of_day(wall));
+  // The reference does not have to be a real clock. A dongle boots without
+  // one -- no network, no RTC, nobody to ask -- and waiting for a host before
+  // measuring anything would make a dongle in a bag useless, which is not what
+  // it is for. So a machine with no real clock measures against its own
+  // free-running one instead: every offset is then shifted by a single unknown
+  // constant, and every *difference* between them survives untouched. The
+  // spread across the bench, which is the number this exists to produce, is
+  // exact either way.
+  //
+  // What the constant costs is the absolute question -- "is this box right?"
+  // as against "do these boxes agree?" -- so which kind of reference was used
+  // travels out in Snapshot::wall_is_real. Nothing downstream may report one
+  // as though it were the other.
+  const bool real = wall_known(wall);
+  wall_is_real_ = real;
+  if (!real) ++free_running_total_;
+  // Deliberately not local_seconds_of_day() in the free-running case. That
+  // asks the C library for a timezone, and applying a real zone to a clock
+  // that starts at zero is arithmetic with one meaningful operand. Taking the
+  // day modulus directly is the same reference on every host, which is what
+  // lets a Mac test what a dongle will do.
+  const double ours = real ? local_seconds_of_day(wall)
+                           : seconds_of_day_at_offset(wall, 0);
+  const double offset = wrap_delta(decoded.sod - ours);
   dev.samples.push_back({mono, offset});
   trim(&dev, mono);
   update_alert(&dev, mono, wall);
@@ -242,7 +251,8 @@ Snapshot Registry::snapshot(double mono, double wall) const {
   snap.radio = radio_;
   snap.adverts_total = adverts_total_;
   snap.undecodable_total = undecodable_total_;
-  snap.unclocked_total = unclocked_total_;
+  snap.free_running_total = free_running_total_;
+  snap.wall_is_real = wall_is_real_;
   snap.clock_steps = clock_steps_;
   snap.alert_threshold = policy_.alert_enter;
 

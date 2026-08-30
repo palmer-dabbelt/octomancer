@@ -1,17 +1,27 @@
-// What time the box thinks it is.
+// What time the box thinks it is, and whether that is a real time.
 //
 // The box has no wall clock and no way to acquire one alone: no network, no
 // battery-backed RTC, no user to ask. src/loop.h already says so -- "on the
-// box there is no wall clock at boot at all" -- and everything that matters
-// here is measured against one. A Tentacle broadcasts a local time of day, and
-// an offset is that time minus ours; without a shared idea of "ours" the two
-// radios in doc/box-notes.md would report offsets that could not be compared,
-// which is the entire experiment.
+// box there is no wall clock at boot at all".
 //
-// So the host tells it, over the same cable as everything else, and this holds
-// the answer. Monotonic time comes from the loop and is trustworthy from the
-// first instant; wall time is that plus a constant, and the constant is
-// unknown until somebody says.
+// What matters is that this does not stop it working. An offset is a
+// difference, and a difference does not need either side to be a real time --
+// it needs both sides measured against the *same* thing. So the clock runs
+// from zero at boot and the box starts measuring immediately: the offsets it
+// reports are all shifted by one unknown constant, and every difference
+// between them -- which is to say the spread across the bench, the thing the
+// box exists to measure -- is exact. A dongle in a bag with no computer
+// attached is doing useful work from the moment it powers up.
+//
+// What the constant costs is the *absolute* question: "is this box right?"
+// rather than "do these boxes agree?". That answer needs a real clock, and
+// until a host provides one this says so through known(), so that nothing
+// downstream reports a relative number as though it were an absolute one.
+// See Snapshot::wall_is_real, which is where that travels.
+//
+// Monotonic time comes from the loop and is trustworthy from the first
+// instant; wall time is that plus a constant, and the constant is zero until
+// somebody says otherwise.
 //
 // Deliberately not smoothed or slewed. A host that corrects the box by a
 // second should move it by a second: this clock is a shared reference for
@@ -29,9 +39,11 @@ class BoxClock {
  public:
   explicit BoxClock(Loop* loop) : loop_(loop) {}
 
-  // False until the host has said. Worth asking rather than assuming: an
-  // offset computed against an unset clock is not a small error, it is a
-  // number about 1970.
+  // Whether this is a real time or a free-running reference.
+  //
+  // False until a host says. Worth asking rather than assuming, but not worth
+  // *waiting* for: an offset measured against the free-running clock is a
+  // perfectly good offset, it is only the absolute reading that is missing.
   bool known() const { return known_; }
 
   void set(double unix_seconds) {
@@ -56,16 +68,22 @@ class BoxClock {
   bool zone_known() const { return zone_known_; }
   int zone() const { return zone_; }
 
-  // Zero when unknown, which is what src/timeutil.h's callers already treat as
-  // "no wall clock": returning loop time instead would look like a plausible
-  // date in 1970 and be silently wrong.
-  double wall() const { return known_ ? loop_->now() + offset_ : 0.0; }
+  // Loop time plus whatever the host said, which before a host says anything
+  // is loop time -- a clock that reads a few seconds past the epoch and keeps
+  // honest time from there.
+  //
+  // This deliberately does not return zero to mean "unknown". A caller reading
+  // a small number cannot tell it from a real reading, so the two would blur
+  // whichever value was picked; known() is what separates them, and it is not
+  // optional. What the small number buys is that everything measured against
+  // it is measured against the same thing, which is all an offset needs.
+  double wall() const { return loop_->now() + offset_; }
 
   // For a reading timestamped when it arrived rather than when it was
   // processed. An advertisement can sit in a queue for tens of milliseconds,
   // and charging the box for that wait is the same mistake syncd.cc's
   // error_from() exists to avoid.
-  double wall_at(double mono) const { return known_ ? mono + offset_ : 0.0; }
+  double wall_at(double mono) const { return mono + offset_; }
 
  private:
   Loop* loop_ = nullptr;

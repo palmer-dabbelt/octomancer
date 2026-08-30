@@ -161,12 +161,20 @@ struct Snapshot {
   uint64_t adverts_total = 0;
   uint64_t undecodable_total = 0;
   uint64_t clock_steps = 0;
-  // Adverts that decoded cleanly and still produced no offset, because this
-  // machine did not know what time it was. Nonzero on a box nobody has told
-  // yet; always zero on a Mac. Worth reporting rather than inferring from an
-  // empty roster: it is the difference between "heard nothing" and "heard
-  // everything and had nothing to compare it against".
-  uint64_t unclocked_total = 0;
+  // Readings measured against a free-running reference rather than a real
+  // clock. Nonzero on a box nobody has told the time to; always zero on a Mac.
+  uint64_t free_running_total = 0;
+
+  // Whether the offsets below can be compared to real time, or only to each
+  // other.
+  //
+  // False on a dongle that has not been told the time. Everything about the
+  // *spread* is still exact -- that is a difference, and the unknown constant
+  // cancels -- but the offsets themselves are all displaced by that constant,
+  // so "this box is 6 seconds slow" is not a sentence this snapshot supports.
+  // Anything that prints an absolute offset, or writes one to a camera, has to
+  // ask first.
+  bool wall_is_real = true;
 
   int devices = 0;
   int live = 0;
@@ -303,7 +311,8 @@ class Registry {
   double started_mono_ = 0.0;
   uint64_t adverts_total_ = 0;
   uint64_t undecodable_total_ = 0;
-  uint64_t unclocked_total_ = 0;
+  uint64_t free_running_total_ = 0;
+  bool wall_is_real_ = true;
   uint64_t clock_steps_ = 0;
   double last_mono_ = 0.0;
   double last_wall_ = 0.0;

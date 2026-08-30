@@ -40,6 +40,7 @@ std::string text(const char* f, ...) {
 
 BenchView measure_bench(const Snapshot& snap, const CamConf* conf) {
   BenchView bench;
+  bench.absolute = snap.wall_is_real;
   std::vector<double> votes;
   for (const DeviceSnapshot& d : snap.device) {
     if (!d.live || !d.has_time) continue;
@@ -263,6 +264,28 @@ void SyncDaemon::begin_cycle() {
             : std::string("no timecode boxes heard -- nothing to sync to");
     say(why);
     finish_cycle("skip:no-tentacle", why);
+    return;
+  }
+
+  // A bench measured against a free-running clock says exactly how far the
+  // boxes are from each other and nothing at all about what time it is. The
+  // write path composes an absolute instant out of this host's clock plus the
+  // bench offset, so running it here would set the camera to a confident,
+  // arbitrary time -- somewhere in 1970, on a dongle that has been up ten
+  // minutes.
+  //
+  // Refusing is the interim answer and not the intended one. A standalone
+  // dongle *can* know the time of day, because a Tentacle broadcasts one; what
+  // it cannot know is the date, or the offset from UTC that the camera's RTC
+  // is kept in. Composing a write from the camera's own clock -- keep its
+  // date, correct it by the error we measured -- needs neither, and is where
+  // this is going. See doc/box-notes.md.
+  if (!cur_.bench.absolute) {
+    const std::string why =
+        "the bench agrees but this host does not know what time it is, so"
+        " there is nothing to set the camera to yet";
+    say(why);
+    finish_cycle("skip:no-clock", why);
     return;
   }
 
@@ -958,6 +981,10 @@ Message SyncDaemon::status_message() const {
     msg.set_double("spread", bench.spread);
     msg.set_int("boxes", bench.boxes);
   }
+  // Which question the offsets above can answer. A box that has not been told
+  // the time reports `clock=free`, and a client that treats those offsets as
+  // absolute is making a mistake this field exists to prevent.
+  msg.set("clock", bench.absolute ? "real" : "free");
   if (bench.skipped > 0) msg.set_int("disabled", bench.skipped);
 
   // A camera stops advertising while something holds a connection to it, so a

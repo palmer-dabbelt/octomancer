@@ -114,6 +114,16 @@ struct BenchView {
   // box in the room is disabled" are different situations, and a person
   // reading the log should not have to guess which one they are in.
   int skipped = 0;
+
+  // Whether `offset` can be compared to real time, or only to the other boxes.
+  //
+  // False on a dongle nobody has told the time to. `spread` is exact either
+  // way -- it is a difference, so the unknown constant cancels -- and that is
+  // the number the bench exists to produce. `offset` is not: it is displaced
+  // by however far the free-running clock is from a real one, which is
+  // arbitrary and can be days. Writing it to a camera would set the camera to
+  // an arbitrary time with complete confidence.
+  bool absolute = true;
 };
 
 BenchView measure_bench(const Snapshot& snap, const CamConf* conf);

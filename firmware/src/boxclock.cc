@@ -37,3 +37,32 @@ extern "C" int gettimeofday(struct timeval* tv, void* tz) {
       static_cast<suseconds_t>((now - static_cast<double>(tv->tv_sec)) * 1e6);
   return 0;
 }
+
+// The C library's, answered from the zone the host gave us.
+//
+// picolibc links a real localtime_r, and it works: it reads TZ, finds nothing,
+// and answers UTC. That is the trap. src/registry.cc compares a Tentacle's
+// *local* time of day against local_seconds_of_day(), so a box quietly working
+// in UTC reports every box on the bench as seven hours out -- a confident
+// number, in the right units, produced by code that did exactly what it was
+// told. Nothing downstream can tell it from a real reading.
+//
+// A fixed offset is the whole of what a zone can mean here, and it is enough:
+// the host is on the other end of the cable and says what the offset is now.
+// So shift the instant and let picolibc do the calendar, which is the part
+// worth not writing twice.
+//
+// Before a host has said, this is UTC -- but the clock is unknown then too, so
+// src/registry.cc has already declined to compute an offset at all. See
+// wall_known() in src/timeutil.h.
+extern "C" struct tm* localtime_r(const time_t* t, struct tm* out) {
+  if (t == nullptr || out == nullptr) return nullptr;
+  const int zone =
+      octo::g_clock != nullptr && octo::g_clock->zone_known()
+          ? octo::g_clock->zone()
+          : 0;
+  const time_t shifted = *t + zone;
+  if (::gmtime_r(&shifted, out) == nullptr) return nullptr;
+  out->tm_isdst = 0;
+  return out;
+}

@@ -25,6 +25,13 @@ double local_seconds_of_day(double unix_seconds) {
   return parts.tm_hour * 3600.0 + parts.tm_min * 60.0 + parts.tm_sec + frac;
 }
 
+double seconds_of_day_at_offset(double unix_seconds, int zone_offset_seconds) {
+  const double local = unix_seconds + zone_offset_seconds;
+  double sod = std::fmod(local, 86400.0);
+  if (sod < 0.0) sod += 86400.0;  // fmod keeps the sign of the dividend
+  return sod;
+}
+
 double wrap_delta(double seconds) {
   double wrapped = std::fmod(seconds + 43200.0, 86400.0);
   if (wrapped < 0.0) wrapped += 86400.0;  // fmod keeps the sign of the dividend

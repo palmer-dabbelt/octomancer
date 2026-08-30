@@ -155,6 +155,21 @@ void Registry::observe(const std::string& id, const std::string& name, int rssi,
   }
 
   dev.decoded++;
+  // An offset is a difference between two clocks, so it needs both of them. On
+  // a box that has not been told the time yet there is only one, and src/loop.h
+  // says what the other one reads: nothing. Subtracting it anyway does not
+  // produce a slightly wrong offset, it produces a confident one about 1970 --
+  // and the daemon downstream cannot tell that from a real reading, so it
+  // reports a bench and a spread built entirely out of the missing clock.
+  //
+  // Recording the sighting but not the sample is the honest shape: the device
+  // is on the page, with a name and a signal strength and an advert count, and
+  // no time against it until there is something to measure time against.
+  if (!wall_known(wall)) {
+    unclocked_total_++;
+    return;
+  }
+
   // The box states a local time of day; so does the host. Their difference is
   // what "how far off is this box" means, wrapped so that a box a second past
   // midnight is not reported as almost a day fast.
@@ -227,6 +242,7 @@ Snapshot Registry::snapshot(double mono, double wall) const {
   snap.radio = radio_;
   snap.adverts_total = adverts_total_;
   snap.undecodable_total = undecodable_total_;
+  snap.unclocked_total = unclocked_total_;
   snap.clock_steps = clock_steps_;
   snap.alert_threshold = policy_.alert_enter;
 

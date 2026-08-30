@@ -259,7 +259,20 @@ class SyncDaemon {
   // ask. Its offsets are measured against a wall clock it can only be given,
   // which is why this is part of the protocol and not a build option. See
   // firmware/src/boxclock.h.
-  using TimeHandler = std::function<void(double wall)>;
+  //
+  // The zone travels with the instant, and separately from it, because they
+  // are two different things the box cannot work out for itself. A Tentacle
+  // broadcasts a *local* time of day, so an offset needs to know which local
+  // -- and a dongle has no timezone database to consult, only whatever the
+  // host on the other end of the cable says. Without it the box compares a
+  // local timecode against UTC and is wrong by the whole offset, which is
+  // seven hours on this bench and looks exactly like a very broken box.
+  struct WallTime {
+    double wall = 0.0;      // seconds since the Unix epoch
+    bool has_zone = false;  // whether the host said
+    int zone = 0;           // seconds east of UTC
+  };
+  using TimeHandler = std::function<void(const WallTime&)>;
   void on_settime(TimeHandler handler);
 
   void start();

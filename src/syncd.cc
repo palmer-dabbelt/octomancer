@@ -1065,13 +1065,36 @@ void SyncDaemon::handle(MsgPeer* peer, const Message& msg) {
       reply(bad);
       return;
     }
-    on_time_(when);
+    WallTime set;
+    set.wall = when;
+    int64_t zone = 0;
+    if (msg.get_int("zone", &zone)) {
+      // A zone the box cannot represent is a host bug, and taking it would
+      // move every offset by a plausible-looking amount. The real range is
+      // -12:00 to +14:00; this is that, rounded outwards to a whole day.
+      if (zone <= -86400 || zone >= 86400) {
+        Message bad;
+        bad.verb = "err";
+        bad.set("reason", "bad-zone");
+        bad.set_int("zone", zone);
+        reply(bad);
+        return;
+      }
+      set.has_zone = true;
+      set.zone = static_cast<int>(zone);
+    }
+    on_time_(set);
+
     Message out;
     out.verb = "ok";
     out.set("what", "time");
     // What the clock reads now, which is the acknowledgement worth having: it
     // is the value actually adopted, and the round trip is visible in it.
     out.set_double("wall", wall(), 3);
+    // Echoed so a host can see whether the zone landed. A box that took the
+    // instant and dropped the zone reads as seven hours out, which looks like
+    // a broken box rather than a missing field.
+    if (set.has_zone) out.set_int("zone", set.zone);
     reply(out);
     return;
   }

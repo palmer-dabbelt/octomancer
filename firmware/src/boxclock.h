@@ -39,6 +39,23 @@ class BoxClock {
     known_ = true;
   }
 
+  // Seconds east of UTC, as the host reported them.
+  //
+  // Separate from the instant because it answers a separate question, and the
+  // box cannot answer it alone: there is no timezone database here, and a
+  // Tentacle broadcasts a *local* time of day. Comparing that against UTC is
+  // not a rounding error, it is the whole offset -- seven hours on this bench,
+  // which reads as a spectacularly broken box rather than a missing field.
+  //
+  // Zero until a host says, and zero is also a perfectly good answer (a bench
+  // in London in winter), so `zone_known()` is the question to ask.
+  void set_zone(int seconds_east) {
+    zone_ = seconds_east;
+    zone_known_ = true;
+  }
+  bool zone_known() const { return zone_known_; }
+  int zone() const { return zone_; }
+
   // Zero when unknown, which is what src/timeutil.h's callers already treat as
   // "no wall clock": returning loop time instead would look like a plausible
   // date in 1970 and be silently wrong.
@@ -54,6 +71,8 @@ class BoxClock {
   Loop* loop_ = nullptr;
   bool known_ = false;
   double offset_ = 0.0;
+  bool zone_known_ = false;
+  int zone_ = 0;
 };
 
 // Make this the clock the C library answers from.

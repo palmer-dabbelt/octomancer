@@ -161,6 +161,12 @@ struct Snapshot {
   uint64_t adverts_total = 0;
   uint64_t undecodable_total = 0;
   uint64_t clock_steps = 0;
+  // Adverts that decoded cleanly and still produced no offset, because this
+  // machine did not know what time it was. Nonzero on a box nobody has told
+  // yet; always zero on a Mac. Worth reporting rather than inferring from an
+  // empty roster: it is the difference between "heard nothing" and "heard
+  // everything and had nothing to compare it against".
+  uint64_t unclocked_total = 0;
 
   int devices = 0;
   int live = 0;
@@ -297,6 +303,7 @@ class Registry {
   double started_mono_ = 0.0;
   uint64_t adverts_total_ = 0;
   uint64_t undecodable_total_ = 0;
+  uint64_t unclocked_total_ = 0;
   uint64_t clock_steps_ = 0;
   double last_mono_ = 0.0;
   double last_wall_ = 0.0;

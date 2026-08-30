@@ -824,14 +824,91 @@ void test_time_is_refused_by_a_daemon_that_has_a_clock() {
   CHECK_STR(err.get("id"), "4");
 }
 
+
+// The zone the box cannot work out for itself.
+//
+// A Tentacle broadcasts a local time of day, so an offset is only meaningful
+// against a host that knows which local. A dongle has no timezone database --
+// picolibc answers UTC and means it -- so the host has to say, and this is
+// where it says it. Getting it wrong is not a subtle failure: every box on the
+// bench reads as a whole UTC offset out, which looks like broken hardware.
+void test_time_carries_the_zone_as_well_as_the_instant() {
+  Rig rig;
+  rig.build();
+  SyncDaemon::WallTime got;
+  int calls = 0;
+  rig.daemon->on_settime([&](const SyncDaemon::WallTime& t) {
+    got = t;
+    ++calls;
+    rig.wall0 = t.wall - (rig.loop.now() - Rig::kMono0);
+  });
+  FakePeer peer;
+  rig.daemon->peer_opened(&peer);
+  rig.daemon->peer_line(&peer, "time wall=1700000000.5 zone=-25200");
+
+  CHECK_EQ(calls, 1);
+  CHECK(got.has_zone);
+  CHECK_EQ(got.zone, -25200);
+  CHECK_NEAR(got.wall, 1700000000.5, 1e-6);
+
+  Message ok;
+  CHECK(peer.last("ok", &ok));
+  CHECK_STR(ok.get("what"), "time");
+  // Echoed, so a host can tell a box that took the zone from one that ignored
+  // it. Without the echo those two look identical until the offsets come back
+  // seven hours out.
+  int64_t zone = 0;
+  CHECK(ok.get_int("zone", &zone));
+  CHECK_EQ(zone, -25200LL);
+}
+
+// A host that says nothing about the zone is not the same as one that says
+// zero, and the box needs to be able to tell: zero is a real answer (a bench
+// in London in winter) and "unset" is not.
+void test_time_without_a_zone_leaves_the_zone_unsaid() {
+  Rig rig;
+  rig.build();
+  SyncDaemon::WallTime got;
+  got.has_zone = true;  // so a handler that never writes it cannot pass
+  rig.daemon->on_settime([&](const SyncDaemon::WallTime& t) { got = t; });
+  FakePeer peer;
+  rig.daemon->peer_opened(&peer);
+  rig.daemon->peer_line(&peer, "time wall=1700000000.5");
+
+  CHECK(!got.has_zone);
+  CHECK_EQ(got.zone, 0);
+  Message ok;
+  CHECK(peer.last("ok", &ok));
+  CHECK_STR(ok.get("zone"), "");
+}
+
+// A zone outside any zone the Earth has is a host bug. Taking it would shift
+// every reading by a plausible-looking amount, so it is refused outright and
+// the clock is left alone rather than half-set.
+void test_an_impossible_zone_is_refused() {
+  Rig rig;
+  rig.build();
+  int calls = 0;
+  rig.daemon->on_settime([&](const SyncDaemon::WallTime&) { ++calls; });
+  FakePeer peer;
+  rig.daemon->peer_opened(&peer);
+  rig.daemon->peer_line(&peer, "time wall=1700000000.5 zone=90000");
+
+  CHECK_EQ(calls, 0);
+  Message err;
+  CHECK(peer.last("err", &err));
+  CHECK_STR(err.get("reason"), "bad-zone");
+  CHECK(!peer.last("ok", &err));
+}
+
 void test_time_sets_the_clock_of_a_daemon_that_has_none() {
   Rig rig;
   rig.build();
   // What firmware/src/boxclock.h does: hold the difference between the
   // monotonic clock, which is trustworthy from the first instant, and the wall
   // clock, which is unknown until somebody says.
-  rig.daemon->on_settime([&rig](double when) {
-    rig.wall0 = when - (rig.loop.now() - Rig::kMono0);
+  rig.daemon->on_settime([&rig](const SyncDaemon::WallTime& t) {
+    rig.wall0 = t.wall - (rig.loop.now() - Rig::kMono0);
   });
   FakePeer peer;
   rig.daemon->peer_opened(&peer);
@@ -856,7 +933,7 @@ void test_time_sets_the_clock_of_a_daemon_that_has_none() {
 void test_time_without_a_value_is_an_error() {
   Rig rig;
   rig.build();
-  rig.daemon->on_settime([](double) {});
+  rig.daemon->on_settime([](const SyncDaemon::WallTime&) {});
   FakePeer peer;
   rig.daemon->peer_opened(&peer);
   rig.daemon->peer_line(&peer, "time");
@@ -1162,6 +1239,9 @@ int main() {
   test_time_is_refused_by_a_daemon_that_has_a_clock();
   test_time_sets_the_clock_of_a_daemon_that_has_none();
   test_time_without_a_value_is_an_error();
+  test_time_carries_the_zone_as_well_as_the_instant();
+  test_time_without_a_zone_leaves_the_zone_unsaid();
+  test_an_impossible_zone_is_refused();
   test_status_says_what_the_bench_is();
   test_devices_streams_and_says_when_it_is_done();
   test_a_peer_can_ask_not_to_be_announced_to();

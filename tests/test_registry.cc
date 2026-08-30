@@ -36,6 +36,61 @@ void feed(Registry* reg, const std::string& id, double offset, double mono,
   reg->observe(id, "box", -40, pkt.data(), pkt.size(), mono, wall);
 }
 
+// A box that has not been told the time yet.
+//
+// This is the state every dongle boots into and no Mac is ever in, which is
+// why it went unnoticed until firmware existed: firmware/src/boxclock.h
+// answers zero until a host says otherwise, and zero used to be subtracted
+// like any other timestamp. The result was not a small error. Every box on the
+// bench got an offset of about fifty thousand seconds -- the distance from
+// midnight UTC in 1970 to the time of day the Tentacle was broadcasting -- and
+// the daemon downstream reported a bench, a spread and five happy devices
+// built entirely out of the clock it did not have.
+void test_a_box_with_no_wall_clock_reports_no_offsets() {
+  Registry reg({}, 0.0);
+  for (int i = 0; i < 10; ++i) {
+    const std::vector<uint8_t> pkt = micros_packet(45000.0 + i);
+    reg.observe("a", "Tentacle", -40, pkt.data(), pkt.size(), i, 0.0);
+  }
+
+  const Snapshot snap = reg.snapshot(10, 0.0);
+  // Heard, named, counted: the device is on the page, because it really is
+  // there and saying so is not a guess.
+  CHECK_EQ(snap.devices, 1);
+  const DeviceSnapshot& d = snap.device[0];
+  CHECK_STR(d.name, "Tentacle");
+  CHECK_EQ(static_cast<long long>(d.adverts), 10LL);
+  CHECK_EQ(static_cast<long long>(d.decoded), 10LL);
+  // ...and no time against it, which is the whole point.
+  CHECK(!d.has_time);
+  CHECK_EQ(static_cast<long long>(d.samples), 0LL);
+  CHECK(!snap.has_bench);
+  CHECK_EQ(static_cast<long long>(snap.unclocked_total), 10LL);
+  CHECK_EQ(static_cast<long long>(snap.undecodable_total), 0LL);
+}
+
+// ...and starts measuring the moment somebody says what time it is, without
+// dragging the readings it could not use into the answer.
+void test_offsets_begin_when_the_clock_arrives() {
+  Registry reg({}, 0.0);
+  for (int i = 0; i < 10; ++i) {
+    const std::vector<uint8_t> pkt = micros_packet(45000.0 + i);
+    reg.observe("a", "Tentacle", -40, pkt.data(), pkt.size(), i, 0.0);
+  }
+  for (int i = 10; i < 20; ++i) {
+    feed(&reg, "a", -6.25, i, wall_at(i));
+  }
+
+  const Snapshot snap = reg.snapshot(20, wall_at(20));
+  const DeviceSnapshot& d = snap.device[0];
+  CHECK(d.has_time);
+  CHECK_EQ(static_cast<long long>(d.samples), 10LL);   // ten, not twenty
+  CHECK_NEAR(d.median_offset, -6.25, 1e-3);
+  CHECK(snap.has_bench);
+  CHECK_NEAR(snap.bench_offset, -6.25, 1e-3);
+  CHECK_EQ(static_cast<long long>(snap.unclocked_total), 10LL);
+}
+
 void test_offset_and_median() {
   Registry reg({}, 0.0);
   // Nine clean samples at -6.231 s and one wild outlier. The median must
@@ -314,6 +369,8 @@ void test_forget_reaches_the_camera_too() {
 int main() {
   test_median_helper();
   test_offset_and_median();
+  test_a_box_with_no_wall_clock_reports_no_offsets();
+  test_offsets_begin_when_the_clock_arrives();
   test_drift_needs_a_long_lever();
   test_alert_hysteresis();
   test_no_flapping_in_the_band();

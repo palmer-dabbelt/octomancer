@@ -108,7 +108,13 @@ int main() {
   // The host telling us what time it is. Until this arrives the roster holds
   // readings with no offset against them, which is the honest state -- see
   // firmware/src/boxclock.h.
-  daemon.on_settime([&clock](double wall) { clock.set(wall); });
+  daemon.on_settime([&clock](const octo::SyncDaemon::WallTime& t) {
+    // Zone first. set() is what makes the clock known, and the registry starts
+    // taking offsets the instant it is -- so adopting the instant before the
+    // zone leaves a window whose readings are wrong by the whole offset.
+    if (t.has_zone) clock.set_zone(t.zone);
+    clock.set(t.wall);
+  });
 
   peer.on_open([&daemon, &peer]() { daemon.peer_opened(&peer); });
   peer.on_close([&daemon, &peer]() { daemon.peer_closed(&peer); });

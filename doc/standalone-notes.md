@@ -162,8 +162,9 @@ inside of one box with a control service and a console hanging off it, and a
 Mac only as a GATT client at the end of a wire. What is missing from it is the
 Mac side having any structure at all. What settled instead is three layers: a
 *sync daemon* that owns the radio — the same source built as Nordic firmware or
-as a Mac process — a *control daemon* on the Mac that owns no radio and
-aggregates several of them, and the interfaces above that. That
+as a Mac process — a *control daemon* on the Mac that never speaks to a
+timecode box or a camera, and aggregates several of them — and the interfaces
+above that. That
 diagram is in `doc/box-notes.md` and is the one to read. The bottom half of
 this one, our host speaking raw HCI in-process to the Zephyr controller, is
 unchanged.

@@ -8,9 +8,12 @@ the reasons in "What it does, and deliberately does not do" below.
 > **Read this first, 2026-08-29.** This file describes `octomancerd` and the
 > two-daemon design it belongs to, and both are being replaced. The split it
 > argues for below -- one program that observes, another that acts -- is being
-> dropped on purpose, in favour of three layers: interfaces, a control daemon
-> that owns no radio, and a sync daemon that owns the radio and does the
-> timing. `doc/box-notes.md` has the shape and the reasoning, and is the
+> dropped on purpose, in favour of three layers split by latency: a sync daemon
+> doing the timing and nothing else, a control daemon doing everything
+> expensive that can afford to wait -- including all of the logging this file
+> describes -- and interfaces above that. Both daemons may hold a radio; what
+> makes the sync daemon the sync daemon is that it is the only thing that ever
+> speaks to a timecode box or a camera. `doc/box-notes.md` has the shape and the reasoning, and is the
 > architecture document now. What is still current here is the wire protocol,
 > the registry's judgement about drift, the log format, and the arguments
 > about why drift is refused rather than estimated. Sections that have gone

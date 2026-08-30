@@ -346,40 +346,52 @@ table by a different route.
 
 ## The three layers, and where the code is not them yet
 
-`doc/box-notes.md` has the model: **interfaces** on top, a **control daemon**
-that owns no radio in the middle holding one connection down to each sync
-daemon, and a **sync daemon** at the bottom that owns the radio and is the only
-thing that speaks to a Tentacle box or a camera. This is the list of places the
-code disagrees with it, written out so they can be worked through rather than
-rediscovered one at a time.
+`doc/box-notes.md` has the model, and the line it divides on is **latency**:
+a **sync daemon** at the bottom doing the timing and nothing else, a **control
+daemon** in the middle doing everything expensive that can afford to wait, and
+**interfaces** on top. Both daemons may hold a radio -- the control daemon
+needs one to reach a sync daemon that is a dongle somewhere other than a USB
+port. What separates them is that the sync daemon is the only thing that ever
+speaks to a timecode box or a camera.
+
+This is the list of places the code disagrees with that, written out so they
+can be worked through rather than rediscovered one at a time.
 
 A note on which file this belongs in, because the boundary matters. The control
 daemon *not existing* is work that has not been done, and it lives in
 `doc/TODO.md` as item 2. What is below is the other thing: code that exists,
-runs, and actively contradicts the model -- a daemon that owns a radio it is
-not supposed to have, a connection pointing the wrong way, two protocols that
-cannot be bridged without inventing state. Those are not absences. They have to
-be *un*built, and each one is a thing somebody will trip over while building
-layer 2.
+runs, and actively contradicts the model -- a daemon listening to timecode
+boxes that should not be, a connection pointing the wrong way, two protocols
+that cannot be bridged without inventing state. Those are not absences. They
+have to be *un*built, and each one is something somebody will trip over while
+building layer 2.
 
-They are roughly in dependency order. The first four are the shape; the rest
-are things that will bite whoever writes the bridge.
+They are roughly in dependency order. The first eight are the shape -- where
+the code and the model disagree about what each half is for -- and the rest are
+things that will bite whoever writes the bridge between them.
 
-### 1. `octomancerd` owns a radio, and layer 2 must not
+### 1. `octomancerd` points its radio at the timecode boxes
 
-`octomancerd` is the binary that keeps the launchd label and becomes the
-control daemon. It builds a `ScanBridge`, wires advert, camera and state sinks
-into a `Registry`, calls `make_ble_scanner()`, and exits 1 if the scanner will
-not start. It is not a control daemon with a radio bolted on that can be
-unbolted quietly: the radio is where all its data comes from.
+`octomancerd` keeps a radio in the target design -- that is how it reaches a
+sync daemon which is a dongle somewhere other than a USB port -- so this is not
+about taking the radio away. It is about what the radio is *for*. Today
+`octomancerd` builds a `ScanBridge`, wires advert, camera and state sinks into
+a `Registry`, calls `make_ble_scanner()`, and exits 1 if the scanner will not
+start: it is listening to timecode boxes itself, which is the one thing layer 2
+must never do.
 
-So this is a removal, not an addition. The scanner comes out, the `Registry`
-stops being its own -- there is already one inside `SyncDaemon` -- and the
-bench arrives over the box protocol instead of off the air. Everything
-`octomancerd` currently reports has to start coming from below it.
+So the change is a substitution rather than a removal. The scanner comes out
+and the roster stops being its own -- there is already a `Registry` inside
+`SyncDaemon` -- and what arrives instead is the sync daemon's state broadcast,
+over whichever of the three transports that daemon is on. The radio stays, and
+gets its real job: being one of those three transports.
 
-**What would settle it:** `octomancerd` starting and serving a useful snapshot
-on a machine with the radio unplugged, because it never wanted one.
+Everything `octomancerd` reports today has to start coming from below it rather
+than off the air.
+
+**What would settle it:** `octomancerd` serving a full and correct roster while
+every timecode box in the room is invisible to it directly -- because the only
+thing it is listening to is a sync daemon.
 
 ### 2. The connection between the daemons runs the wrong way
 
@@ -436,7 +448,99 @@ configured, except by typing lines into a socket by hand.
 over `octomancer-syncd.sock`. Even a one-verb debug client would do it, and
 would be worth having before the control daemon rather than after.
 
-### 5. Two line protocols, and layer 2 sits on the seam
+### 5. The state broadcast is a poll, and carries judgements
+
+The model has the sync daemon saying what it knows, unasked: per device, how
+long ago it was last seen, the offset measured then, the signal strength then,
+and its pairing state. Nearly all of that exists -- `src/syncd.cc`'s `dev` line
+already carries `id`, `name`, `rssi`, `live`, `age` and `offset`. Three things
+are wrong with it.
+
+It is **a reply, not a broadcast**. `dev` lines come back from `devices`, so a
+control daemon has to ask, on a timer it picks, and anything that happened
+between two asks is gone. What is volunteered instead is `bench`, carrying the
+merged offset, its spread and a count of the boxes that went into it -- the
+wrong granularity in both directions. It is the answer rather than the
+observations, and it is one line about the bench as a whole rather than a line
+about each device, so a control daemon cannot see which box moved.
+
+It carries **derived values**: `median`, `samples` and `ppm`. Those are
+judgements about a history, and the whole point of the split is that judgements
+belong in the latency-tolerant half. Worse, keeping them means the sync daemon
+keeps the history they are computed from, which is exactly the state the box is
+trying not to have.
+
+It has **no pairing state**, which entry 7 is about.
+
+**What would settle it:** a control daemon that never sends `devices` and still
+has a complete, current roster, because everything arrives on its own.
+
+### 6. The control vocabulary is a different set from the one the box needs
+
+The model has three things going down: `enable`/`disable device ID`,
+`synchronise device ID now`, and `passcode for device ID`. What
+`src/syncd.cc` serves is eight verbs -- `ping`, `hello`, `status`, `devices`,
+`sync`, `source`, `announce`, `forget` -- of which half are polls that exist
+because the peer was on the same machine and asking was easy.
+
+The nearest equivalents do not line up. `sync` is `synchronise now`, roughly,
+but takes `camera=` and `force=` rather than a device id. Nothing enables or
+disables anything: enablement lives in `cameras.conf`, read from a filesystem
+the box does not have (entry 12). `forget dev=` deletes a device rather than
+disabling it, which is a different operation with a different lifetime.
+
+This is not a rename job. `status` and `devices` should disappear entirely
+rather than being translated, because their answers become the broadcast.
+
+**What would settle it:** a sync daemon whose whole inbound vocabulary is three
+verbs, and a control daemon that never polls.
+
+### 7. There is no pairing flow that works without a person present
+
+`HciCamera` takes a `PasskeyProvider`, and `octomancer-sync` installs one only
+when `--passkey` was given on the command line; with no value it installs
+nothing, `HciCamera` supplies one that always answers false, and pairing is
+abandoned at Passkey Entry. `RadioOptions::prompt_for_passkey` is declared,
+defaults to true, and is read by nothing.
+
+So today the six digits have to be known *before* the daemon starts. On a Mac
+that is merely awkward. On a box on a rig it is impossible: the camera displays
+the digits at the moment it is asked, and there is nobody in front of the box
+to read them or anywhere to type them.
+
+The model routes it through the state broadcast instead. Pairing state is a
+per-device field with three values -- **seen but not paired**, **pairing,
+needs a passcode**, and **paired** -- and the middle one is a request that is
+published rather than sent. The control daemon notices it, shows it to whatever
+interfaces are attached, and one of them asks a person. The answer comes back
+down as `passcode for device ID`. Nothing in the sync daemon knows a person
+exists, and nothing is waiting on a reply that may never come.
+
+This is also the argument for the broadcast being unsolicited: a request that
+must be asked for cannot be seen by a control daemon that connected a second
+too late, and pairing is exactly the case that starts while nobody is watching.
+
+**What would settle it:** a camera paired over the dongle by somebody who
+learned the digits from a UI, having never passed `--passkey`.
+
+### 8. The logging is in the low-latency half
+
+`run_daemon()` in `src/octomancer-sync.cc` opens the JSONL log and writes a
+line at the end of every cycle, and opens the per-camera database and rewrites
+it. Both belong in layer 2: they are the most complicated things the project
+does -- rotation, compaction, a history that has to survive restarts -- and the
+things that care least about being a few hundred milliseconds late. That
+combination is the definition of what goes in the latency-tolerant half.
+
+It is also the only half with a filesystem. The box has NVS and nothing else,
+so the current arrangement is not merely misplaced; it is one of the parts that
+cannot come along at all.
+
+**What would settle it:** `octomancer-sync --daemon` running with no `--log`
+and no camera database, and the same lines appearing on disk because layer 2
+wrote them.
+
+### 9. Two line protocols, and layer 2 sits on the seam
 
 There are two framings over one token layer, carrying three vocabularies:
 
@@ -454,7 +558,7 @@ would have to live. `doc/box-notes.md` records the decision taken -- take
 decision, not a fact, and until it is made the entries below are the bill for
 the other choice.
 
-### 6. `sync` and `source` cannot be relayed, only brokered
+### 10. `sync` and `source` cannot be relayed, only brokered
 
 This is the one where translation is not a rename, and it is the reason the
 control daemon has to hold state.
@@ -476,7 +580,7 @@ the requesting message's `id=` on the resulting `cycle` line, and make the
 pending-request state per-peer. Then the correlation is exact. Doing this
 before the control daemon exists is much easier than after.
 
-### 7. The two event channels are not one-for-one
+### 11. The two event channels are not one-for-one
 
 `src/control.cc` keeps a numbered event list and answers `events since=N` by
 replaying everything newer -- so a client that was not listening, or that
@@ -488,7 +592,7 @@ its own numbered log, which is a second place for the two to disagree about
 what happened. Better to decide which set is canonical and make the sync daemon
 emit that one.
 
-### 8. No verb grants write permission, and the box has no other route
+### 12. No verb grants write permission, and the box has no other route
 
 `src/syncd.h` says permission "will arrive over the control protocol", and
 `SyncdOptions::default_writes` is the field waiting for it. There is no verb
@@ -498,14 +602,24 @@ always installs a `CamConf` read from `cameras.conf` and that wins.
 
 The box has no filesystem, so this is not a nicety: as things stand a Nordic
 box has no way to be told which cameras it may write to, and the default
-permits nothing. Layer 2 should be the authority -- it reads and writes
-`cameras.conf` and pushes permission down as configuration -- which needs a verb
-that does not exist (`writes camera=… on=0|1`, or similar).
+permits nothing. The verb is `enable device ID` / `disable device ID` from
+entry 6, and this is the same missing thing seen from the other side -- entry 6
+is that the vocabulary is wrong, this is what specifically breaks because of
+it.
+
+Where the answer *lives* is worth being exact about, because "who decides" and
+"who stores it" are different questions. Layer 2 decides, and is where a person
+changes it. Layer 3 writes what it was told into flash and then obeys it
+without asking again, because **the box has to keep working when the Mac is
+not there** -- a rig that stopped syncing because a laptop went to sleep would
+be worse than no box at all. So the enabled set is pushed down and kept, not
+looked up.
 
 **What would settle it:** a sync daemon with no `CamConf` at all, told what it
-may write to over the socket, on both platforms.
+may write to over the socket, on both platforms -- and still obeying it after a
+power cycle with nothing connected.
 
-### 9. `scan` and `pair` reach past the socket entirely
+### 13. `scan` and `pair` reach past the socket entirely
 
 `octomancer scan` and `octomancer pair` `exec` the sibling `octomancer-sync`
 binary; `Octomancer.app` runs it as an `NSTask`. Both do it for the same
@@ -514,14 +628,16 @@ reason: that binary is the one holding the Bluetooth grant.
 This cannot survive a long-running sync daemon that already holds the radio --
 the CLI has to print a note telling you to stop the agent first, which is the
 symptom -- and on a Nordic box there is no sibling binary to launch at all.
-Pairing especially has to become a verb, because the passkey has to reach
-whoever owns the radio and there is no second route to it.
 
-Related, and worth fixing at the same time: `RadioOptions::prompt_for_passkey`
-is declared, defaulted to true, and read by nothing. There is no interactive
-passkey prompt anywhere; `--passkey` is the only way in.
+Where each of the two goes is different, which is why this is separate from
+entry 7. **Pairing** becomes the published-request flow there: a state in the
+broadcast and a passcode coming back. **Scanning** does not become a verb at
+all -- the sync daemon is always listening, so what a person actually wants is
+the broadcast it is already sending, and a `scan` command has nothing left to
+do. This entry is only about the subprocess: two front-ends that reach past
+their own socket to run another program, and have to stop.
 
-### 10. Three sockets, and one of them goes
+### 14. Three sockets, and one of them goes
 
 `octomancerd.sock`, `octomancer-sync.sock`, `octomancer-syncd.sock`. Two
 survive and do different jobs: `octomancerd.sock` becomes the one every
@@ -534,7 +650,7 @@ That retirement is not free: `src/control.cc`'s vocabulary has verbs
 `octomancerd`'s does not -- `result`, `events`, `reload` -- and they have to be
 folded in rather than dropped. `doc/TODO.md` item 3 is the cutover.
 
-### 11. Two loops in the tree
+### 15. Two loops in the tree
 
 `octomancerd` runs its own hand-rolled `poll()` loop and drains the scan bridge
 by hand; a comment in it says so. Everything else new runs on `src/loop.{h,cc}`.
@@ -543,7 +659,7 @@ Two implementations of the same ordering arithmetic, one of them untested.
 Worth doing while `octomancerd` is being taken apart for its radio anyway,
 since both changes touch the same forty lines.
 
-### 12. The two sync modes share one camera database
+### 16. The two sync modes share one camera database
 
 `octomancer-sync --daemon` takes a *different* lock file from the legacy mode,
 deliberately, so the replacement can run beside the thing it replaces. It
@@ -555,7 +671,7 @@ and disagreeing about its learned bias.
 Not a bug to fix so much as a cost to remember: pass `--camera-db PATH` to one
 of them, and it goes away at the cutover.
 
-### 13. Small protocol mismatches that will bite the bridge
+### 17. Small protocol mismatches that will bite the bridge
 
 Individually trivial, collectively the reason a translation table would be
 permanent. Settle them *before* the control daemon is written, not after:
@@ -582,7 +698,7 @@ permanent. Settle them *before* the control daemon is written, not after:
   query returned at all and never looks at the text. A bridge that parsed
   everything uniformly would reject them.
 
-### 14. `octomancer status --json` quietly omits the bench
+### 18. `octomancer status --json` quietly omits the bench
 
 The human-readable path asks both daemons and merges. The `--json` path sends
 `json` to `octomancer-sync`'s socket alone, so the Tentacle bench is missing

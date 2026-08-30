@@ -20,9 +20,12 @@ at all.
 
 Still to write, roughly in order:
 
-1. **The persistence record formats** — bonds, and the roster of Tentacle
-   devices seen on the network. Portable, tested, no filesystem: the box has
-   NVS and nothing else, and nothing is logged to it.
+1. **The persistence record formats** — and only two of them, now that the
+   layering has settled what the box is allowed to remember: whether each
+   device is enabled or disabled, and the Bluetooth pairing state. Everything
+   about timing stays in RAM and is re-measured after a reboot. Portable,
+   tested, no filesystem: the box has NVS and nothing else, and nothing is
+   logged to it. See "What layer 3 keeps, and where" in `doc/box-notes.md`.
 2. **The control and state daemon.** Mac only. Aggregates any number of sync
    daemons and serves the window, the TUI and the command line. Replaces the
    `octomancerd` / `octomancer-sync` split, which `doc/box-notes.md` records as
@@ -31,9 +34,10 @@ Still to write, roughly in order:
    by hand.
 
    Most of this item is not writing a new daemon. It is *un*building things
-   that are in the way -- a daemon that owns a radio it should not, a
-   connection pointing the wrong way, two protocols that cannot be bridged
-   without inventing state. Those are enumerated and numbered under "The three
+   that are in the way -- a daemon listening to timecode boxes when that is the
+   other half's job, a connection pointing the wrong way, the logging in the
+   low-latency half, two protocols that cannot be bridged without inventing
+   state. Those are enumerated and numbered under "The three
    layers, and where the code is not them yet" in `doc/KNOWN_ISSUES.md`, which
    is the order to work through.
 

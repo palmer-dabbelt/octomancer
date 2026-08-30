@@ -41,8 +41,11 @@ What replaces it is three layers rather than two daemons:
 | | |
 |---|---|
 | **user interface** | the command-line programs, the TUI and the app. Several at once. None of them holds a radio. |
-| **control daemon** | answers all of them, and holds one connection down to a sync daemon: status coming up, control changes going down. Owns no radio. |
-| **sync daemon** | the tight loop of BLE message timing. The only thing that talks to a timecode box or a camera. On the Mac it is a process; on the box it is to be the firmware, from the same source. No firmware exists yet. |
+| **control daemon** | everything expensive that can afford to wait: merging what the sync daemons report, all of the logging, the permissions, and answering the interfaces. Holds one connection down to each sync daemon — state coming up, control going down. It may hold a radio too, but only ever to reach a sync daemon that is not plugged in. |
+| **sync daemon** | the low-latency half: timing the messages from the timecode boxes and the camera, and doing the writes. The only thing that ever talks to a box or a camera. On the Mac it is a process; on the box it is to be the firmware, from the same source. No firmware exists yet. |
+
+The line the two daemons divide on is **latency**, not hardware. Anything that
+has to be on time is below; anything merely complicated is above.
 
 `doc/box-notes.md` has the diagram, the reasoning, and — more usefully — a
 plain statement of which of the three exist. As of now: the sync daemon does

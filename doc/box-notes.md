@@ -43,52 +43,69 @@ correcting as the churn lands.
 
 ## Three layers, and which of them exist
 
-The daemons still divide, but along a different line: **a tight loop doing
-timecode messaging, a loose loop doing configuration, and the programs a
-person actually looks at.**
+The daemons still divide, but along a different line: **a low-latency half that
+does the timing, and a latency-tolerant half that does everything else.**
+
+That is the whole principle, and it is worth stating before the diagram because
+an earlier version of this section got it wrong. It said the split was about
+which daemon owns a radio, and that the control daemon must own none. It is
+not, and it must not be, for a plain reason: when the sync daemon is a dongle
+sitting somewhere other than a USB port, the only way to reach it is over BLE,
+and something on the Mac has to hold a radio to do that. What the control
+daemon must never do is speak to a **timecode box or a camera**. Its radio, if
+it has one, is pointed at a sync daemon and nothing else.
 
 ```
-  LAYER 3 -- the tight loop. One radio, one event loop, no threads.
+  LAYER 3 -- the low-latency half. One event loop, no threads.
+             The only thing that ever speaks to a box or a camera.
 
-    [Tentacle boxes] --adverts-->  SYNC DAEMON           (Mac: octomancer-sync
-    [Blackmagic cam] <---GATT--->  src/syncd.{h,cc}       --daemon. Later: the
-                                   owns the radio         Nordic, same source)
-                                       |   ^
-       bench, cycle, cam, radio,       |   |  ping, hello, status, devices,
-       alert, dev, status              |   |  sync, source, announce, forget
-       (status, upward)                |   |  (control changes, downward)
-                                       v   |
-              one connection per sync daemon, carrying both directions.
-              src/boxmsg.h framing: one message per line, announcements
-              arrive unasked. A unix socket today; USB CDC, then BLE
-              GATT, for a box that is not this process.
-                                       |   ^
-                                       v   |
+   [Tentacle boxes] --adverts-->  SYNC DAEMON        `octomancer-sync --daemon`
+   [Blackmagic cam] <---GATT--->  src/syncd.{h,cc}   as a Mac process, or as
+                                                     Nordic firmware. The same
+                                                     source and the same
+                                                     design either way.
+                                      |   ^
+       state broadcast, unasked:      |   |   control, when somebody wants
+       per device -- how long ago     |   |   something:
+       it was last seen, its offset,  |   |     enable / disable device ID
+       its signal strength then,      |   |     synchronise device ID now
+       and its pairing state          |   |     passcode for device ID
+                                      v   |
+             one connection per sync daemon, carrying both directions.
+             src/boxmsg.h framing: one message per line, the broadcast
+             arriving unasked. A unix socket when the sync daemon is a
+             process on this Mac; USB CDC when it is a dongle in a port;
+             BLE GATT when it is a dongle somewhere else.
+                                      |   ^
+                                      v   |
 
-  LAYER 2 -- the loose loop. Owns no radio. Mac only.
+  LAYER 2 -- the latency-tolerant half. Mac only. `octomancerd`.
 
-                             CONTROL DAEMON
-                             merges what the sync daemons report into one
-                             roster, drains their logs to disk, keeps the
-                             request state the interfaces poll, holds the
-                             permissions, answers everything above it
-                                       |   ^
-                                       v   |
-                        one socket, one vocabulary, several
-                        concurrent clients, none of them special
-                                       |   ^
-                                       v   |
+                            CONTROL DAEMON
+                            Has a radio, and uses it for exactly one thing:
+                            reaching a sync daemon that is not plugged in.
+                            Never speaks to a timecode box or a camera.
+                            Merges what the sync daemons report, keeps every
+                            log, holds the permissions and the request state,
+                            answers everything above it.
+                                      |   ^
+                                      v   |
+                       one socket, one vocabulary, several
+                       concurrent clients, none of them special
+                                      |   ^
+                                      v   |
 
   LAYER 1 -- user interface. Any number at once.
 
-     octomancer CLI     octomancer tui     Octomancer.app     octomancerctl
+    octomancer CLI     octomancer tui     Octomancer.app     octomancerctl
 ```
 
-**Layer 3 owns the radio, and is the only thing that does.** It hears the
-Tentacle boxes, holds the camera link, runs the decision in `camsync.*`, emits
-announcements, and answers the control protocol. The same source is meant to
-build as Nordic firmware and as a Mac process, and that is the whole point: the
-box is debuggable without a box. Only the Mac half is built today -- the files
+**Layer 3 is the only thing that speaks to a box or a camera.** It hears the
+Tentacle boxes, holds the camera link, runs the decision in `camsync.*`,
+broadcasts what it has seen, and does what it is told. The same source is meant
+to build as Nordic firmware and as a Mac process, and that is the whole point:
+the box is debuggable without a box, and there is one implementation of the
+timing rather than one per host. Only the Mac half is built today -- the files
 cross-compile for cortex-m4, measured object by object below, and nothing has
 been linked into firmware.
 
@@ -101,18 +118,99 @@ the thread running the cycle -- it kept answering its socket, which a second
 thread served, but it could do nothing else until the write left -- and this
 arms a timer and goes back to the loop.
 
-**Layer 2 owns no radio.** One connection down to each sync daemon, carrying
-status up and control changes down -- the same connection for both, because
-the protocol is asynchronous in both directions anyway and a second socket
-would only add a way for the two halves to disagree about whether the daemon
-is still there. Above that it merges what it is told into one roster, drains
-the logs to a filesystem the box does not have, holds the permissions, and
-answers however many interfaces are open.
+**Layer 2 is where the complexity goes.** One connection down to each sync
+daemon, carrying the state broadcast up and control messages down -- the same
+connection for both, because the protocol is asynchronous in both directions
+anyway and a second one would only add a way for the two halves to disagree
+about whether the daemon is still there.
+
+Everything expensive and everything that can wait lives here: merging what the
+sync daemons report into one roster, **all of the logging**, the permissions,
+the request state the interfaces poll, and answering however many interfaces
+are open. Logging in particular is the clearest case of the principle. It is
+the most complicated thing the project does -- rotation, compaction, a
+per-camera history that has to survive restarts -- and it is also the thing
+that cares least about being a few hundred milliseconds late. So it goes as far
+from the timing as it can, which is also the only place with a filesystem.
 
 **Layer 1 is what a person runs.** Several at once, none of them privileged,
 none of them holding a radio, a camera or a lock. A command-line program that
 runs for forty milliseconds and an app that runs all afternoon are the same
 kind of client.
+
+### What the sync daemon says, and what it can be told
+
+The point of the split is that layer 3 keeps almost nothing, so the broadcast
+is not a summary of a database it holds -- it is very nearly everything it
+knows.
+
+**Upward, unasked, per device:** how long ago it was last seen, the offset
+measured then, the signal strength then, and its pairing state. Age rather than
+a timestamp, because two clocks that disagree is exactly the thing this project
+exists to be careful about, and a number counted forward from the last sighting
+needs no agreement about what time it is. The offset and the RSSI are what they
+were at that sighting, not an average: averaging is a judgement, judgements
+belong upstairs, and a control daemon given the raw pair can compute whatever
+it likes.
+
+**Downward, when somebody wants something:**
+
+| told | means |
+|---|---|
+| `enable device ID` / `disable device ID` | whether this box counts toward the bench, or this camera may be written to |
+| `synchronise device ID now` | do it, rather than waiting for the schedule to decide |
+| `passcode for device ID` | the six digits a camera is displaying; see below |
+
+That is a smaller vocabulary than the eight verbs `src/syncd.cc` serves today,
+and deliberately so. The current set grew from what was convenient to ask a
+process on the same machine; this is what a box on the end of a serial cable
+actually needs.
+
+### Pairing, when there is nobody to ask
+
+The sync daemon does the pairing, because pairing is a radio operation and the
+radio is its. The problem is that a camera pairs by displaying six digits and
+waiting, and a box on a rig has no screen, no keyboard, and nobody standing in
+front of it.
+
+So the passcode travels the same way everything else does. Pairing state is
+part of the per-device broadcast, with three values:
+
+* **seen, not paired** -- the device is on the air and nothing has been
+  attempted.
+* **pairing, needs a passcode** -- the exchange has started and is waiting.
+  This is a request, published rather than sent: the sync daemon says what it
+  is waiting for and carries on, and does not care who answers.
+* **paired** -- there is a bond, and it survives a reboot.
+
+The control daemon watches for the middle one, shows it to whichever
+interfaces are attached, and whichever one a person is actually looking at asks
+them for the digits. The answer comes back down as `passcode for device ID`.
+Nothing in the sync daemon knows that a person exists.
+
+This is also why the state broadcast is a broadcast rather than a reply. A
+request that has to be *asked for* cannot be noticed by a control daemon that
+happened to connect a second later, and pairing is precisely the case where
+something started without anybody watching.
+
+### What layer 3 keeps, and where
+
+Minimising this is a design goal rather than an economy, because the box has
+NVS and nothing else, and because state that is only in one place cannot get
+out of step with itself.
+
+**In RAM, and lost on reboot:** everything about message latency and timing --
+what each box's offset was, how the last few sightings scattered, what the
+write delay has converged to. It is cheap to re-measure, it goes stale anyway,
+and none of it is worth a flash write.
+
+**In flash, and only this:** whether each device is enabled or disabled, and
+the Bluetooth pairing state. Both are things a person decided, neither can be
+re-derived by listening, and losing either one across a power cycle is a
+question somebody has to answer again in a room they may not be standing in.
+
+**Nowhere on the box:** the logs. They go up to layer 2, which has a
+filesystem. See "What lives in flash" below for the flash map this implies.
 
 ### Where this is not the system yet
 
@@ -121,14 +219,16 @@ the difference is large enough that reading it as one would send somebody in
 the wrong direction. As of 2026-08-29, checked against the source rather than
 against memory:
 
-- **Layer 2 does not exist at all.** No *daemon* merges rosters, drains a log
-  or fronts anything -- each interface does its own merging, two bullets
-  down. `doc/TODO.md` records it as unstarted and
-  that is accurate.
-- **`octomancerd` is not layer 2 wearing a different hat. It owns a radio.**
-  It builds a scanner, keeps its own roster, and serves it
-  (`src/octomancerd.cc:402`). Making it layer 2 means taking the scanner out,
-  not adding a link to the top of it.
+- **Layer 2 does not exist at all.** No *daemon* merges rosters, holds the
+  logs or fronts anything -- each interface does its own merging, two bullets
+  down. `doc/TODO.md` records it as unstarted and that is accurate.
+- **`octomancerd` uses its radio for the wrong thing.** It keeps one, which is
+  right -- that is how it will reach a sync daemon that is not plugged in --
+  but today it points it at the timecode boxes, scanning for them itself and
+  keeping its own roster (`src/octomancerd.cc:402`). That is layer 3's job and
+  the one thing layer 2 must not do. So the change is not "take the radio
+  out", it is "stop listening to boxes with it, and start using it to reach
+  the daemon that does".
 - **The one connection between the daemons runs the wrong way.** The legacy
   `octomancer-sync` is a *client* of `octomancerd`, polling it for the bench
   and for whether the camera is on the air (`src/octomancer-sync.cc:318`,
@@ -209,20 +309,34 @@ sync daemon should echo the requesting message's `id=` on the resulting
 `cycle` line. Without that, the broker is guessing, and it will guess wrong the
 first time two clients ask about different cameras.
 
-**Permission belongs to layer 2.** Today the sync daemon reads `cameras.conf`
-itself, and only the front-end tools write it. The box has no filesystem, so
-`src/syncd.h` already says permission will have to arrive over the protocol —
-but there is no verb that sets it, and on the Mac the `default_writes` field
-that anticipates one is dead because a `CamConf` is always installed. Making
-layer 2 the authority, pushing permission down as configuration, is what gives
-the Mac and the box the same shape.
+**Permission is decided by layer 2 and kept by layer 3.** Today the sync daemon
+reads `cameras.conf` itself, and only the front-end tools write it. The box has
+no filesystem, so `src/syncd.h` already says permission will have to arrive
+over the protocol -- but there is no verb that sets it, and on the Mac the
+`default_writes` field that anticipates one is dead because a `CamConf` is
+always installed. `enable device ID` / `disable device ID` is that verb.
 
-**`scan` and `pair` become verbs.** They are the one place layer 1 reaches
-past the socket entirely, launching `octomancer-sync` as a subprocess because
-it holds the Bluetooth grant. That cannot survive a long-running sync daemon
-holding the port — the CLI already has to print a note telling you to stop the agent yourself — and
-on a Nordic box there is no sibling binary to launch at all. Pairing
-especially, because the passkey has to reach whoever owns the radio.
+The split of responsibility is worth being precise about, because "the
+authority" and "who stores it" are different questions. Layer 2 is where the
+decision is made and where a person changes it. Layer 3 writes what it was told
+to flash and then obeys it without asking again -- which is the whole point,
+because **the box has to keep working when the Mac is not there.** A rig that
+stopped syncing because a laptop went to sleep would be worse than no box at
+all. So the enabled set is pushed down, not looked up.
+
+**`scan` and `pair` stop being subprocesses.** They are the one place layer 1
+reaches past the socket entirely, launching `octomancer-sync` as a subprocess
+because it holds the Bluetooth grant. That cannot survive a long-running sync
+daemon holding the radio -- the CLI already has to print a note telling you to
+stop the agent yourself -- and on a Nordic box there is no sibling binary to
+launch at all.
+
+Scanning stops being a command at all: the sync daemon is always listening, so
+what a person wants is the state broadcast it is already sending. Pairing
+becomes the published-request flow above -- a pairing state in the broadcast
+and `passcode for device ID` coming back down -- rather than a verb that
+starts something and waits for it. Waiting is the thing a box on the end of a
+serial cable cannot do.
 
 **`octomancerd.sock` is the surviving socket.** It has the muscle memory -- both agents
 carry a launchd label -- so layer 2 keeps it and `octomancer-sync.sock` is retired
@@ -237,6 +351,13 @@ The framing is `src/boxmsg.h`'s -- one message per line, a verb and
 `key=value` fields, unknown keys ignored and unknown verbs answered. What
 follows is the vocabulary `src/syncd.cc` actually implements, which is
 otherwise only written down as code.
+
+**It is not the vocabulary above**, and the difference is the direction of
+travel rather than a discrepancy to be alarmed by. This set grew from what was
+convenient to ask a process on the same machine, so it is question-and-answer
+shaped: `status` and `devices` are polls. The target set is smaller and is
+mostly the other way round -- the daemon says what it knows, unasked, and is
+told three things. `doc/KNOWN_ISSUES.md` has the gap as work.
 
 A request may carry `id=`, and every reply to it carries the same one back.
 Nothing needs it today -- one line in, answers out, in order -- but a client
@@ -674,10 +795,22 @@ link would collide and nothing would notice.
 
 ## What lives in flash
 
-Only two things: bonds, and the roster of Tentacle devices seen on the network
-with whether each is active. **No logs on the box** — the drift log is the
-scientific value of this project and it belongs where there is a filesystem,
-drained to the Mac over the control protocol.
+Only two things, and they are the two a person decided rather than anything
+measured: **whether each device is enabled or disabled**, and **the Bluetooth
+pairing state** -- which is the bonds, plus enough to know that a device has
+been seen and not yet paired. Neither can be re-derived by listening, and both
+are answers somebody gave in a room they may not be standing in again.
+
+Everything about timing stays in RAM and is lost on reboot: what each box's
+offset was, how the last few sightings scattered, what the write delay has
+converged to. It is cheap to re-measure, it goes stale anyway, and none of it
+is worth a flash write.
+
+**No logs on the box** — the drift log is the scientific value of this project
+and it belongs where there is a filesystem, drained to the Mac over the control
+protocol. That is also the general rule the layering follows: logging is the
+most complicated thing here and the least urgent, so it lives as far from the
+timing as it can get.
 
 The consequence is accepted deliberately: the Blackmagic RTC write bias has to
 be re-measured every boot. `doc/protocol-notes.md` records that bias at −75 s

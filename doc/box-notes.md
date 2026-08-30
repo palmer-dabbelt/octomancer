@@ -175,7 +175,8 @@ anything the box cannot -- drift in particular, which needs a lever arm of
 fifteen minutes or more and is refused outright from a short one (see
 `src/registry.h`). The box cannot hold an hour of samples, so it cannot fit
 drift; the control daemon has been receiving and logging the exact
-measurements all along, and can.
+measurements all along, and can. "Two windows" below draws the line between
+what those samples may be used for and what they may not.
 
 **Downward, when somebody wants something:**
 
@@ -237,12 +238,51 @@ being explicit because the obvious reading breaks it.
 > sent are the ones that were never going to add anything -- they are
 > re-measurements of the same second.
 
-One thing this deliberately does not settle: **the window the average is
-computed over need not be the window that is broadcast.** Four samples is a
-thin thing to take a median of, and the current per-device median is over an
-hour. A running average costs one double and no history at all, so the box can
-average over far more than it remembers individually. Which estimator to use is
-open; that it need not be constrained to four samples is not.
+### Two windows, and why both go over the wire
+
+The window the average is computed over is **not** the window that is
+broadcast, and they are decoupled on purpose. They answer different questions.
+
+**The averaging window produces the clock.** What comes out of it is the
+Tentacle network's real time, expressed as a skew against this machine's local
+clock -- and that skew is what a camera's RTC gets written from. It is the
+operational number, the one every write depends on, and it is computed on the
+box out of every advert the radio actually heard.
+
+**The broadcast window is a slice of what feeds it, shipped for the log.** Those
+four samples are the most recent of the measurements the average was made of --
+a slice rather than the whole of it, since the averaging window is free to be
+longer -- sent up so the Mac can keep a record, plot it, and answer "what was
+this box doing at 03:14" long afterwards. Nothing depends on them arriving.
+
+Sent one second at a time, though, the slices join up: four in every broadcast,
+one new one each second, so what the Mac accumulates is the continuous history
+even though no single message carries more than four points of it.
+
+The two therefore show different things, and **that is the reason both are
+worth sending.** If either could be cheaply derived from the other, one of them
+would be waste. In principle the Mac could compute the average itself from the
+whole history of samples it has received -- and that is exactly the thing not
+to do, because it would only be correct if no packet had ever been lost between
+the dongle and the Mac, and over BLE that cannot be relied on. The average is
+computed where the record is complete and shipped as a fact; the samples are
+best-effort telemetry.
+
+Which gives layer 2 a rule that is easy to get wrong later, so it is written
+down here:
+
+> **Never recompute the operational number from the samples you received.**
+> Your copy has holes and the box's does not. Use the broadcast average for
+> anything a camera's clock depends on. Use the samples for logs, plots,
+> debugging, and for the things that tolerate gaps -- drift being the example,
+> since a fit over fifteen minutes or more does not much care about a missing
+> sighting here and there.
+
+Sizing them is then two independent decisions. The broadcast window is four,
+set by the redundancy in "The rates" above. The averaging window is whatever
+makes a good clock, and is not constrained by it at all: a running average
+costs one double and no history, so the box can average over far more than it
+retains individually. Which estimator to use is still open.
 
 ### Pairing, when there is nobody to ask
 

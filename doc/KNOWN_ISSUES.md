@@ -484,10 +484,19 @@ and can fit drift out of them; layer 3 cannot and should stop trying.
 Which is why **the retention on the box is four samples, not a duration.**
 `doc/box-notes.md` has the reasoning under "The rates, which are decided": four
 is 64 bytes a device, and it is set by the redundancy the broadcast provides
-rather than by what fits. Every sample goes out in four consecutive broadcasts,
-so losing a measurement means losing four in a row. The trap to avoid while
-implementing it is that those four must be **one per broadcast interval**, not
-the last four adverts -- a Tentacle advertises about seven times a second
+rather than by what fits.
+
+Note that this is the *broadcast* window and not the averaging window -- the
+two are decoupled, and the `dev` line today conflates them by reporting one
+`median` over one hour-long history. The averaging window produces the number
+camera writes depend on and is computed on the box where nothing is lost; the
+four samples are best-effort telemetry for the log. **A control daemon must
+never recompute the first from the second**, because its copy has holes and the
+box's does not. See "Two windows, and why both go over the wire".
+
+Every sample goes out in four consecutive broadcasts, so losing a measurement
+means losing four in a row. The trap to avoid while implementing that is that
+the four must be **one per broadcast interval**, not the last four adverts -- a Tentacle advertises about seven times a second
 (measured 2026-08-29), so keeping the last four raw adverts would drop three of
 every seven and leave consecutive broadcasts sharing nothing at all, which is
 the exact opposite of the intent.

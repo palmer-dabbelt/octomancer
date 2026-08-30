@@ -360,11 +360,16 @@ The three module images have been carved out of the firmware for disassembly
 
 ## 9. The bench that answers it
 
-*Added 2026-08-27.* An nRF52840 dongle is on the way, and the code to drive it
-is written: `octomancer-zoom`, built on a raw-HCI host stack that lives in
-`src/hci.*`, `src/att.*` and `src/hcilink.*`. `doc/dongle-notes.md` has the
-details; what matters here is that every open question above now has a command
-that asks it.
+*Added 2026-08-27, when the dongle was still on order; it arrived and was
+flashed on 2026-08-29.* The code to drive it is `octomancer-zoom`, built on a
+raw-HCI host stack that lives in `src/hci.*`, `src/att.*` and `src/hcilink.*`.
+The radio is real now: a Raytac MDBT50Q-CX-40 running Zephyr's `hci_uart`,
+which has scanned and decoded live advertisements over this host's own HCI.
+`doc/dongle-notes.md` has the details, and its "Verified against hardware"
+table is the honest boundary — scanning is in it; connecting and advertising
+are not. **What the commands below do against an F6 is (unverified):** none of
+them has been pointed at one. What matters here is that every open question
+above now has a command that asks it.
 
 ```
 octomancer-zoom --scan 30           # everything on the air, fully decoded
@@ -404,5 +409,13 @@ instrument could not be read; that is now fixed.
 once it has connected. The GATT layout is only plumbing. So `--serve` logs
 every write verbatim rather than answering it, and `--tx HEX` sends whatever is
 asked for. If the F6 connects and then says nothing, the next move is a
-sniffer capture of a genuine UltraSync BLUE session — which the same dongle can
-take, with the nRF Sniffer firmware in place of `hci_usb`.
+sniffer capture of a genuine UltraSync BLUE session — which the same dongle
+could take, with nRF Sniffer firmware flashed in place of `hci_uart`. An
+earlier draft of this line said `hci_usb`, which is the wrong sample and is one
+of the four things `doc/dongle-notes.md` records losing a day to.
+
+**(unverified)** that the sniffer would work here at all. Nordic ships that
+image prebuilt for its own board, and this dongle is a Raytac: an image built
+for the wrong board flashes, verifies, reports success and then never appears
+on USB again. It would have to be built for
+`raytac_mdbt50q_cx_40_dongle/nrf52840` first.

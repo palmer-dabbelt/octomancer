@@ -25,8 +25,50 @@ recollection rather than a verified fact it is marked **(unverified)**.*
 >   needed its reader thread to make progress. Removing the thread is what
 >   finally made `tests/test_hcilink.cc` possible.
 >
-> The research below on the ESP32 fallback, the hardware question and what gets
-> reused all still stands.
+> An earlier version of this note said "the ESP32 fallback, the hardware
+> question and what gets reused all still stands", which named three of the
+> twelve headings below and left a reader to guess at the rest. Guessing is the
+> failure mode this note is supposed to prevent, so here is every section:
+>
+> * **The hardware question, and why it is settled** — stands, and the ESP32
+>   research in it is untouched. The board it named was wrong; that is
+>   corrected in place below, with what the error cost.
+> * **What already exists and gets reused**, and **One camera at a time** —
+>   stand.
+> * **The architecture** — the diagram is superseded. See the note under that
+>   heading.
+> * **The host-stack decision** and **Three roles at once** — stand.
+>   `doc/box-notes.md` settles the shape of the daemons above the host, not the
+>   host itself: `CONFIG_BT_HCI_RAW=y` with our own stack on top is still the
+>   bet.
+> * **Control, over two transports** — superseded. There are three transports
+>   and the protocol now exists. See the note under that heading.
+> * **Bond storage is now required** — stands, and `doc/box-notes.md` agrees
+>   from the other end: bonds and the Tentacle roster are the only two things
+>   that live in the box's flash.
+> * **Firmware update** — the two DFU paths and the MCUboot chain still
+>   describe the plan; the flash-budget arithmetic in it is superseded by the
+>   measured 99 KB and by the partition table the board already ships, both
+>   above. One thing in it is wrong rather than superseded: it describes
+>   entering DFU by holding "SW1, the small side button next to the USB
+>   connector, not the one on the end", which is Nordic's two-button PCA10059.
+>   The Raytac has one button. `README.md` has the procedure that works on the
+>   board we actually own, and `doc/dongle-notes.md` records that describing a
+>   board we did not own was part of the day that was lost.
+> * **Constraints worth knowing before designing** — stands, except for log
+>   storage. `doc/box-notes.md` puts no log on the box at all: the drift log is
+>   drained to the Mac over the control protocol, because that is where there
+>   is a filesystem to keep it on.
+> * **Toolchain, and a trap that already cost an hour** — superseded as a
+>   description of this machine. Zephyr, the SDK and a working `nrfutil` are
+>   now all under `third_party/` — the SDK and `nrfutil` fetched by
+>   `tools/flash-dongle.sh --setup`, the Zephyr tree a pinned submodule that
+>   `--setup` refuses to run without — and
+>   `doc/dongle-notes.md` has the current procedure. The trap itself is still
+>   real; the workaround written below is not the one that works.
+> * **The order to do this in** — step 1 is half done (scanning over the dongle
+>   works; connecting, pairing and writing a clock have still never been run
+>   against hardware), step 2 is done, and the rest stands.
 
 The goal: a box that does what the Mac does — read Tentacle timecode off the
 air, decide whether a Blackmagic camera's clock needs setting, and set it —
@@ -35,11 +77,25 @@ control; Bluetooth for control and firmware update as well.
 
 ## The hardware question, and why it is settled
 
-The dongle already bought is an **nRF52840 (PCA10059)**, and it is not a
-peripheral — it is a complete SoC with 1 MB of flash and 256 KB of RAM
-**(unverified: from memory, check the datasheet)**. Running the whole program
-on it is the plan. It is enclosed, it has a USB-C connector and nothing else,
-and it is Nordic, which is where we would rather be anyway.
+The dongle already bought is a **Raytac MDBT50Q-CX-40** — an nRF52840 module,
+*not* Nordic's own PCA10059 — and it is not a peripheral: it is a complete SoC
+with 1 MB of flash and 256 KB of RAM **(unverified: the RAM figure is from
+memory. The 1 MB is not a guess any more — the partition table the board ships
+sums to exactly that, see `doc/box-notes.md`)**. Running the whole program on
+it is the plan. It is enclosed, it has a USB-C connector and nothing else, and
+it is Nordic silicon, which is where we would rather be anyway.
+
+**This section said PCA10059 until 2026-08-29, and that is the mistake that
+cost a day.** Every nRF52840 dongle is the same chip, so an image built for
+Nordic's board flashes onto the Raytac, verifies, reports success — and then
+never appears on USB again, which is indistinguishable from an empty port.
+Nordic's board file enables the high-voltage regulator and switches the core
+supply to DC/DC, which needs external inductors the Raytac module does not
+have, so the supply collapses during board init, before USB and before any LED
+could say so. `doc/dongle-notes.md` has the whole diagnosis, and
+`tools/flash-dongle.sh` defaults to `raytac_mdbt50q_cx_40_dongle/nrf52840`
+because of it. Anything below that reasons from the board rather than the chip
+should be read with that in mind.
 
 An ESP32 was considered and is the fallback. What the research found, so it
 does not have to be repeated:
@@ -101,6 +157,17 @@ the controller's connection limit is, we are nowhere near it.
 
 ## The architecture
 
+**The diagram is superseded by `doc/box-notes.md`, 2026-08-29.** It draws the
+inside of one box with a control service and a console hanging off it, and a
+Mac only as a GATT client at the end of a wire. What is missing from it is the
+Mac side having any structure at all. What settled instead is three layers: a
+*sync daemon* that owns the radio — the same source built as Nordic firmware or
+as a Mac process — a *control daemon* on the Mac that owns no radio and
+aggregates several of them, and the interfaces above that. That
+diagram is in `doc/box-notes.md` and is the one to read. The bottom half of
+this one, our host speaking raw HCI in-process to the Zephyr controller, is
+unchanged.
+
 ```
    Tentacle boxes  ──adverts──▶  ┌──────────────────────────────┐
                                  │  scanner  ──▶  camsync       │
@@ -121,14 +188,24 @@ the controller's connection limit is, we are nowhere near it.
 Zephyr can be used two ways here, and the choice determines everything else.
 
 **Chosen: `CONFIG_BT_HCI_RAW=y` and our own host.** This is the same
-configuration the stock `hci_usb` image uses — the controller is exposed as
-raw HCI — except that instead of bridging those packets to USB, the host runs
-on-chip. `bt_enable_raw()` hands you a FIFO of incoming buffers and
-`bt_send()` pushes outgoing ones **(unverified: check the current Zephyr API;
-the `hci_uart` and `hci_usb` samples are the reference)**. The transport shim
-is then a new `src/hciport_zephyr.cc` implementing the existing `octo::Port`
-byte-pipe by prepending and stripping the H4 type byte. `hcilink.cc` and
-everything above it does not change.
+configuration the stock `hci_uart` image uses — its `prj.conf` sets exactly
+that, and the controller is exposed as raw HCI — except that instead of
+bridging those packets out over the UART, the host runs on-chip.
+`bt_enable_raw()` hands you a FIFO of incoming buffers and `bt_send()` pushes
+outgoing ones **(unverified: check the current Zephyr API; the `hci_uart`
+sample is the reference)**. The transport shim is then a new
+`src/hciport_zephyr.cc` implementing the existing `octo::Port` byte-pipe by
+prepending and stripping the H4 type byte. `hcilink.cc` and everything above
+it does not change.
+
+*This note said `hci_usb` in five places until 2026-08-29, and every one of
+them was wrong.* `hci_usb` builds a USB Bluetooth *class* device
+(`CONFIG_SERIAL=n`, `CONFIG_USBD_BT_HCI=y`) with no serial port on it at all;
+Linux binds that with `btusb`, macOS has no driver for the class, and this
+project talks to a serial port on both. `hci_uart` is what is actually
+flashed, and the dongle's board file aims its UART at CDC ACM. The trap is
+that the wrong sample is the one with the better name — see
+`doc/dongle-notes.md`.
 
 Why this way: one codebase, one set of tests, and the Mac build stays the
 development environment for the hard parts. The alternative throws away
@@ -145,7 +222,7 @@ tested in `crypto.cc`, and the nRF52840's controller supports the
 `CONFIG_BT_CTLR_ECDH` **(unverified)** — but it is real work.
 
 **This risk is resolved before any firmware is written.** The dongle in stock
-`hci_usb` mode, driven from the Mac, answers it: if `octomancer-sync` can pair
+`hci_uart` mode, driven from the Mac, answers it: if `octomancer-sync` can pair
 with and write to a camera over the dongle, the firmware inherits a stack that
 demonstrably works. If it cannot, we learn exactly why while we still have a
 debugger, a screen and a packet trace. **Do that first.**
@@ -168,6 +245,22 @@ Note the pleasing accident: the peripheral half needs a GATT **server**, and
 They get a second use here.
 
 ## Control, over two transports
+
+**Superseded by `doc/box-notes.md`, 2026-08-29, except for the passkey.** There
+are three transports and not two — USB CDC, a BLE characteristic and a unix
+socket — because the same protocol turned out to be the right thing to speak to
+a Mac-side daemon as well. The protocol itself is no longer a plan: the framing
+is `src/boxmsg.h`, and `src/syncd.cc` answers `ping`, `hello`, `status`,
+`devices`, `sync`, `source`, `announce` and `forget` over it today. The
+transports mostly are, though. Only the unix socket exists; the serial port and
+the characteristic are still the future tense, which is the point of having
+written one message language for all three. Read the verb table in
+`doc/box-notes.md` rather than the command table below.
+
+What survives from here is the reason the channel exists at all: **no verb in
+that protocol carries a passkey yet**, and until one does, a screenless box
+cannot answer the six digits a camera puts on its own display. On the Mac that
+is `--passkey` on a command line, which a box does not have.
 
 The device has no screen and one button, so everything is done over a control
 channel. The same command set is exposed twice:
@@ -210,7 +303,7 @@ Two paths, and they are not equally easy.
 
 **Over USB** is nearly free. The dongle ships with Nordic's Open Bootloader,
 which does USB CDC DFU — that is what `tools/flash-dongle.sh --flash` already
-drives with `nrfutil`, and how the stock `hci_usb` image gets on there in the
+drives with `nrfutil`, and how the stock `hci_uart` image gets on there in the
 first place. Entering it is SW1 (the small side button next to the USB
 connector, **not** the one on the end) held while plugging in.
 
@@ -227,6 +320,15 @@ is perhaps 48 KB, and dual-slot then means two slots of ~420 KB. Our
 application — a C++ BLE host with `std::string` and `std::map` — plausibly
 fits in 250–350 KB, but that has never been measured. **Measure it before
 designing around it.**
+
+The reasoning was right, and the arithmetic was wrong everywhere it mattered.
+The one guess that held up was the slot size — "two slots of about 420 KB"
+against a measured 408 KB, which is close enough to have been useful. Measured on
+2026-08-29: the application is about 99 KB, and the map did not have to be
+designed at all — Zephyr's own board directory ships one, with the nRF5
+bootloader at `0xF4000` where a Raytac keeps it rather than the `0xE0000`
+guessed above, MCUboot at the bottom and two slots of 408 KB. It is in
+`doc/box-notes.md`; use that and not the arithmetic here.
 
 Because we control both ends, the BLE side does not need MCUmgr: a small image
 transfer service on our own ATT server can write into slot 1 with Zephyr's
@@ -245,7 +347,11 @@ refuse unsigned ones; MCUboot does the verification.
 * **No external flash.** Whatever is left of the 1 MB is all the log storage
   there is. The drift log is the entire scientific value of this project, so
   it needs a compact binary circular format and a way to drain it — not the
-  JSONL the Mac writes.
+  JSONL the Mac writes. **Settled differently, 2026-08-29:** because the
+  scientific value is the reason to keep it, it is kept where there is a
+  filesystem. `doc/box-notes.md` puts no log on the box at all and drains it
+  to the Mac over the control protocol; flash holds bonds and the Tentacle
+  roster and nothing else.
 * **256 KB of RAM, shared with the controller.** The C++ core leans on
   `std::string`, `std::map` and `std::vector`. This is the single most likely
   thing to force a rewrite of otherwise-portable code. Measure early.
@@ -289,13 +395,18 @@ are the DFU tools, if it is not deleted first.
 
 ## The order to do this in
 
-1. **Test the existing stack against real hardware.** Stock `hci_usb` on the
+1. **Test the existing stack against real hardware.** Stock `hci_uart` on the
    dongle, `octomancer-zoom --scan 10` from the Mac, then a real camera pair
    and clock write with `octomancer-sync`. Everything below is built on the
-   assumption that this works, and none of it has been verified.
+   assumption that this works. **Half done, 2026-08-29:** the scan works and
+   decoded a Blackmagic camera's adverts, and `doc/dongle-notes.md` has the
+   table of exactly which lines that verified. Connecting, pairing and writing
+   a clock have still never been run against hardware, so the SMP risk above is
+   still open.
 2. **Measure.** Build the portable core for ARM and find out what it costs in
    flash and RAM. If it does not fit, that changes the design, not the
-   schedule.
+   schedule. **Done, 2026-08-29:** about 99 KB of flash, in a slot of 408 KB.
+   It fits. RAM has not been measured.
 3. **Portable work, testable on the Mac today:** the thread/time shim, the
    control-command parser, the compact log format, the bond store as an
    abstract interface. All of it gets a test in `tests/`.

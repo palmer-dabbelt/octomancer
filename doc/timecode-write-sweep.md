@@ -58,10 +58,16 @@ real and is not an encoding mistake at our end.
 ## Finding 2 — 4.7 Timecode Source is writable
 
 `4.7` appears in the connection state dump as `[int8] op=2 [0]`. It is
-undocumented in the parameter table, it was missed when the earlier report
-enumerated the state dump (that list omits group 4 entirely), and
-`bmd::param_name()` does not know it — so `--watch` renders the most
-interesting parameter on the camera as an anonymous `4.7  0`.
+undocumented in the parameter table, and it was missed when the earlier report
+enumerated the state dump (that list omits group 4 entirely). So the most
+interesting parameter on the camera shows up as an anonymous `4.7  0`.
+
+That is the state dump's own doing and not a gap in the tables: it formats the
+group and parameter numbers itself and never asks for a name, then or now.
+`bmd::param_name()` has since learned `4.7` -- it returns "Output/timecode
+source" -- but nothing prints it, because its only caller is `bmd::describe()`
+and `bmd::describe()` has no callers at all. `--watch` prints `4.7  0` still,
+and will until something asks for the name.
 
 Writing it works, and it is echoed back:
 
@@ -98,8 +104,15 @@ catastrophically off — and the response to a large error is to write the RTC,
 which will not fix it, because in that mode the timecode is not following the
 RTC at all.
 
-Reading 4.7 on connect and refusing to sync when it is 1 is the obvious guard.
-It is not implemented yet.
+Reading 4.7 on connect and refusing to sync when it is not 0 was the obvious
+guard, and it is now in. `decide()` in `src/camsync.cc` asks it immediately
+after permission and recording, before the size of the error is judged at all,
+and returns the `kSkipTimecodeSource` action with a message naming the source
+it saw. Both callers fill that field from the camera's own 4.7 — `src/syncd.cc`
+for the daemon, `src/octomancer-sync.cc` for the blocking path — so neither can
+answer this mode with an RTC write. A camera that has never reported 4.7 is not
+refused, on the grounds that silence is not a refusal; `test_camsync` pins both
+directions.
 
 ## What was not established
 

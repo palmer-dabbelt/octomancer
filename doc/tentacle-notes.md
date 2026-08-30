@@ -256,8 +256,16 @@ rather than that it was re-jammed by hand. That is inference, not observation.
 
 So: **a box being precise says nothing about it being correct.** Any tool that
 picks a sync reference should check that the rest of the bench agrees with the
-box it picked, rather than trusting resolution alone. `tentacle_ref.py` does
-this and refuses to quietly use a reference that disagrees with the majority.
+box it picked, rather than trusting resolution alone. The Python prototype that
+did that, `tentacle_ref.py`, is gone; what carries the idea now is that nothing
+picks a single box at all. `src/registry.cc` reduces each box to its own median
+offset, and `measure_bench()` in `src/syncd.cc` takes the median across the
+live, enabled boxes — one vote each — so a box that has fallen out of the sync
+group is outvoted rather than followed. The disagreement is still reported: the
+spread between the extreme boxes travels with the reading, and a spread wider
+than `--bench-spread` (0.5 s by default) prints a warning. It warns and then
+syncs anyway, which is worth knowing before trusting a write that happened
+during one.
 
 ## 10. Comparing boxes correctly
 
@@ -322,7 +330,7 @@ this will probably make the same ones.
 ## 13. Reproducing
 
 ```
-./octomancerd --probe 45                     # scan, decode, and pick a reference
+./octomancerd --probe 45                     # scan, decode, print, exit
 ./octomancerd --log cap.jsonl --log-interval 5 --foreground   # for analysis
 octomancerctl json | jq .                    # what the running service can see
 ```

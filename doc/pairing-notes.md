@@ -155,9 +155,19 @@ What has **not** been verified, and should not be read as working:
   range -- and the daemon has to come back without a person present. That path
   ends in pairing, and pairing needs somebody to read a code, so there may be
   nothing to do but say so clearly. It is the obvious next thing to test.
-* **`read_status` is not implemented for the dongle backend.** It returns an
-  error saying so. That wants doing alongside the SMP work rather than as a
-  stub that half answers.
+* **Reading Camera Status over the dongle is an open question, not a missing
+  stub.** This list used to say `read_status` "is not implemented for the
+  dongle backend", which described a stub that no longer exists: there is no
+  dongle `CameraLink` at all. `make_camera_link()` refuses the dongle outright
+  when one is asked for (`src/radio_camera.cc`), and the dongle's camera is
+  `HciCamera` in `src/camhci.h`, which runs on the event loop and has no
+  `read_status` member to fill in. So the work is to re-ask the question
+  against a completion-based API rather than to finish a stub: the blocking
+  `read_status()` sits out the whole pairing deadline, because what it waits
+  for is a person reading six digits off a screen, and nothing on the event
+  loop may block like that. Over the dongle it is `subscribe()` that first
+  demands an encrypted link and so drives SMP -- a different trigger from the
+  Mac's, and one that has never run against a camera.
 * **The `refused` verdict has never been produced by a radio.** Its matcher is
   tested against strings written from the documentation, not against strings a
   camera caused.

@@ -30,11 +30,40 @@ it and reports what happened, and the host is now this project.
 ## What the dongle is not
 
 It is not a replacement for CoreBluetooth. Machines without a dongle carry on
-exactly as before; the choice is made at run time and defaults to whichever
-radio is actually present. `octomancerd` and `octomancer-sync` did not change
-shape — `make_ble_scanner()` and `make_camera_link()` kept their names and
-their signatures, and `src/radio.cc` is the only thing that had to learn there
-were two possibilities.
+exactly as before, and the choice is made at run time -- though not by one rule
+any more, which is the correction below. `make_ble_scanner()` and
+`make_camera_link()` kept their names and their signatures, so nothing that
+still calls them had to change shape. Not everything still calls them: the sync
+daemon's dongle path goes through `make_hci_scanner_on()` instead, because the
+factory would open a second port on a radio the daemon already has open. The
+two factories no longer sit in one file: `make_ble_scanner()` is in
+`src/radio.cc` and `make_camera_link()` is in `src/radio_camera.cc`. A static
+library is linked an object at a time, so a single file defining both drags
+CoreBluetooth's camera half into `octomancerd`, which asks only for a scanner
+and then fails to link on a symbol nobody wanted.
+
+**The two halves answer different questions, since 2026-08-29.** The scanner
+takes whichever radio is present, because the dongle can scan. The blocking
+camera link takes CoreBluetooth unless the dongle was *explicitly asked for* --
+it tests `dongle_requested()` rather than `dongle_selected()` -- because for a
+blocking camera link CoreBluetooth is the only thing that works, and `--radio
+auto` means "pick something that works".
+
+**Why it used to test the weaker question, and what that cost.** The price was
+not a worse choice of radio, it was a restart loop. The shipped
+`octomancer-sync` LaunchAgent runs the blocking path with no `--radio` flag,
+that path exits 1 on a null link, and launchd's `KeepAlive` brought it straight
+back every ten seconds, forever. Plugging in a dongle -- which `README.md`
+invites -- was enough to start it, and the only visible symptom was an agent
+that always looked like it was running.
+
+**The refusal is still loud when the dongle is insisted on**, because a null
+link is reported everywhere as "no radio" and that would be a lie: the dongle
+is right there and its scanner half works. What is missing is a *blocking*
+camera client for it, and there will not be one. The dongle's camera half is
+`src/camhci.h`, on the event loop, and `octomancer-sync --daemon` is what
+drives it -- which is the way to write a clock over the dongle, and what the
+refusal now says to do.
 
 It is also not custom firmware. The dongle runs a stock Zephyr `hci_uart`
 image, so there is no embedded code in this repository to maintain, and every
@@ -92,13 +121,22 @@ found out twice. The tell for which protocol a package uses is the init packet
 inside the zip: 69 bytes is secure DFU, 14 bytes is the legacy one that will
 be ignored.
 
-DFU mode is the small side button (SW1, next to the USB connector — not the one
-on the end) held while plugging in. The red LED pulses slowly when the
-bootloader is listening.
+DFU mode depends on the board, and this file described Nordic's while we were
+holding a Raytac. The Raytac has **one** button: unplug, hold it, plug in while
+still holding, keep holding about a second after it seats. Letting go as it
+goes in just starts the existing firmware. Nordic's PCA10059 has two, and the
+sideways one is RESET, pressed while it stays plugged in. `README.md` has both,
+side by side, and is the copy to trust; describing a board we did not own is
+one of the four things that cost the day recorded at the end of this file.
+Either way the LED settles into a slow pulse when the bootloader is listening.
 
-If you would rather not install a Zephyr toolchain, any prebuilt `hci_uart`
-image for the `nrf52840dongle` board works; skip `--build` and start at
-`--package`.
+If you would rather not install a Zephyr toolchain, a prebuilt `hci_uart` image
+will do -- but it has to be built for **your** board, not for
+`nrf52840dongle`. Do not read that as a generic target: it is Nordic's, the
+regulator settings differ, and an image built for the wrong one flashes,
+verifies, reports success and then never appears on USB again. That is the
+failure at the end of this file, and reaching for somebody's prebuilt image is
+the easiest way back into it.
 
 **It has to be `hci_uart` and not `hci_usb`, which is a trap, because the
 wrong one is the one with the better name.** `hci_usb` builds a USB Bluetooth
@@ -166,10 +204,22 @@ stranger with an address the camera has never seen, so **the camera will
 display a six-digit passkey and wait for it**. That is why `src/crypto.cc` and
 `src/smp.cc` exist.
 
-Supply the passkey with `--passkey` or `OCTOMANCER_PASSKEY`. On a terminal you
-will be prompted if you do not. Under launchd there is nobody to prompt, so an
-unattended `octomancer-sync` needs the value configured or it will not be able
-to write a clock — it will say so rather than failing quietly.
+Supply the passkey with `--passkey` or `OCTOMANCER_PASSKEY`. **There is no
+terminal prompt; it was never implemented.** `RadioOptions::prompt_for_passkey`
+in `src/radio.h` is declared and defaulted to true and is read by nothing, so
+the sentence that used to be here — that a terminal would ask — was false for
+as long as it stood. What actually happens when no passkey was given is that
+`octomancer-sync` never installs a passkey provider at all -- it installs one
+only when a value was given -- `HciCamera` supplies one that always answers
+false, and the exchange fails at
+Passkey Entry with "no passkey was supplied". The pairing is abandoned and the
+reason is reported; it does not hang and it does not fail quietly.
+
+Half of the old sentence was sound. Under launchd there is nobody to ask, so
+an unattended `octomancer-sync` has to be given the value or it cannot write a
+clock, and that half is why `--passkey` exists. What was wrong is the other
+half: it promised a person at a terminal something better, and there is nothing
+better. Everyone passes `--passkey`.
 
 There is no bond storage yet, so a camera pairs afresh on every connection.
 That costs a passkey each time. It also means there is never a stale key that
@@ -293,6 +343,8 @@ seen over our own Bluetooth host for the first time.
 | The AD decoder | flags, 16- and 128-bit service UUIDs, service data, manufacturer data, tx power and names all decoded |
 | Private addresses are called out | resolvable private addresses are marked `(private)` |
 | Silence is reported as silence | before flashing, the timeout named the unanswered command instead of hanging |
+| One radio does both jobs at once | `octomancer-sync --daemon --radio dongle` ran four cycles with the scanner and the camera client on a single `hci::Link` (`src/hcishare.h`); one file descriptor on `/dev/cu.usbmodem212101` throughout, and no spurious `poweredOff` |
+| The Tentacle clock survives a camera scan | a bench of -3.56 s from two boxes at 3.7 ms spread held across three separate 20-second camera scans, and the roster still answered `age=0.1` over the box socket while a scan was running |
 
 Still untested against hardware: connecting, pairing, and writing a clock.
 Scanning is receive only.

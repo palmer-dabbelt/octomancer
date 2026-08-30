@@ -4,6 +4,16 @@ Derived from `doc/BlackmagicCameraControl.pdf` (August 2025), page numbers refer
 to it, plus what a real Pocket Cinema Camera 6K Pro actually does on the air.
 Where the two disagree, the camera wins and it's called out below.
 
+**This file is about one protocol only** — the one Blackmagic cameras speak on
+the air — and not about either of the line protocols this program speaks to
+itself. Those two are documented in their own headers: `src/proto.h` is the
+escaped key=value text the user-facing programs exchange with `octomancerd`,
+and `src/boxmsg.h` is the
+one-line-per-message language a sync daemon speaks — over a unix socket today
+(`src/boxsock.*`), and written to be carried unchanged over a serial port or a
+BLE characteristic once the sync daemon is a Nordic. `doc/box-notes.md`
+describes the processes that carry them.
+
 ## The shape of the thing
 
 The BLE "Outgoing Camera Control" characteristic is a dumb tunnel for the

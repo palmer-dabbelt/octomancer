@@ -214,9 +214,12 @@ pair, write. `doc/dongle-notes.md` is the table of which line of that is real.
 
 `octomancer --set` and `octomancer-sync` in its older modes still print that
 the camera half moved and return no link, rather than returning one that would
-hang. Those tools block by construction and there is nothing left for them to
-block on; the daemon is the answer for them too, and it is not yet their
-answer.
+hang -- but only when the dongle was asked for by name. Since 2026-08-29
+`--radio auto` no longer counts as asking (`src/radio_camera.cc:31`), so with a
+dongle merely plugged in those tools quietly get CoreBluetooth instead; the
+entry below on the restart loop is what that change was for. Either way they
+block by construction and there is nothing left for them to block on; the
+daemon is the answer for them too, and it is not yet their answer.
 
 **What would settle the rest of it:** a camera, switched on, and one cycle.
 
@@ -234,6 +237,27 @@ which is what the box will have to do. Verified on 2026-08-29: four cycles,
 one file descriptor on the port, and the Tentacle roster still ageing 0.1 s
 during a camera scan.
 
+That was only the half of it inside one process. Two processes on one dongle
+was just as real and had no fix at all: `octomancer start` runs both agents,
+and under `--radio auto` each takes the first dongle it finds, so `octomancerd`
+and `octomancer-sync` would open the same `cu.*` device and read one byte
+stream between them. macOS does not refuse the second open. The ProcLocks were
+never going to help -- they are named per program, not per radio
+(`default_lock_path("octomancerd")` at `src/octomancerd.cc:53`,
+`default_lock_path("octomancer-sync")` at `src/octomancer-sync.cc:119`), so
+each program takes its own lock, both succeed, and both then take the same
+antenna. A lock on the program is not a lock on the hardware.
+
+Fixed 2026-08-29 with `TIOCEXCL` on the port (`src/hciport_posix.cc:145`),
+which is what a tty has for exactly this and costs one ioctl. Verified the same
+day by starting a second daemon while the first held the dongle: it was refused
+at open with `already open by another program`, rather than joining in. That
+sentence is written out in `src/hciport_posix.cc` because `EBUSY` on a serial
+port renders as "Device busy", which reads like a driver fault and is in fact
+another octomancer. The ioctl is not checked, deliberately: a driver that
+declines exclusivity leaves things exactly as they were before the line
+existed. No such driver has been met **(unverified)**.
+
 What is **not** verified is the half that needs a camera. No connection has
 been made over the dongle, so "the scan comes back after a successful connect"
 is pinned by `tests/test_hcishare.cc` against a scripted controller and by
@@ -243,6 +267,51 @@ camera, switched on, and one cycle would settle it.
 The limitation that remains by design: ATT, SMP, advertising and raw commands
 are *not* arbitrated. They are reached through `User::link()` and have one
 owner by convention. Two things doing ATT on one link would collide silently.
+
+### The LaunchAgent restart loop: fixed 2026-08-29, and why nobody saw it
+
+Plugging a dongle into a Mac put the shipped `octomancer-sync` LaunchAgent into
+a ten-second restart loop. `make_camera_link()` used to test
+`dongle_selected()`, which is true under `--radio auto` the moment a dongle
+appears on any USB port, and it returned null, because there is no blocking
+camera client for the dongle and there is not going to be one. The agent runs
+the blocking path with no `--radio` flag; that path exits 1 on a null link
+(in `src/octomancer-sync.cc`); `KeepAlive`/`SuccessfulExit` false with a
+`ThrottleInterval` of 10 brings it back. Forever.
+
+Two things hid it. The symptom is an agent that always looks like it is
+running -- `launchctl` shows a live pid every time, because there always is
+one, just never the same one for long. And the line it printed was
+`octomancer-sync: no CoreBluetooth on this host`, said on a Mac. That reads as
+nonsense to be ignored rather than as a bug to be chased, and it was: the null
+came from the dongle branch and the complaint came from the CoreBluetooth
+branch, which had no idea why the link was missing.
+
+It has not bitten on this machine, which is the part worth remembering, and
+that is an observation about one Mac rather than about the bug. The link is
+asked for once, before the poll loop, so the loop needs the dongle to be
+present at the moment the agent starts -- and the agent starts at login while
+the dongle has always gone in afterwards. The bug was reachable the whole time
+and was kept away by the order two things happened in, which is not a defence.
+
+Fixed by asking `dongle_requested()` instead (`src/radio_camera.cc`): auto
+means "pick something that works", so auto picks CoreBluetooth and says
+nothing, while `--radio dongle` still gets the honest refusal naming
+`src/camhci.h` and `--daemon`. The lie went with it --
+`octomancer-sync` now says "no CoreBluetooth" only when the dongle
+was not the thing that refused.
+
+Half of this was measured and half was not, so be exact about which. With the
+dongle plugged in, `octomancer-sync --poll 60 --dry-run` and
+`octomancer-sync --scan-only` both now run, where before the fix both exited 1;
+`--radio dongle` still refuses and now names what to run instead. So the exit
+that fed the loop is gone, watched rather than reasoned.
+
+**What would settle the rest:** with a dongle plugged in, `launchctl bootout`
+then `bootstrap` the agent and read its pid twice a minute apart. The same pid
+is the answer. Nobody has watched the agent itself, before or after, so that
+the loop existed at all is still reasoned from the plist and the exit path
+**(unverified)**.
 
 ### `read_status()` is gone rather than stubbed
 
@@ -274,6 +343,36 @@ table by a different route.
   still stands: the SMP key-derivation functions are not pinned to the
   specification's worked examples, LE Secure Connections is not implemented,
   and none of it has been run against an nRF52840.
+
+## Nothing a person runs can talk to the sync daemon
+
+`octomancer-sync --daemon` is real. It owns the radio, runs the cycle, and
+serves `octomancer-syncd.sock` (`src/boxsock.cc:43`) in the message language of
+`src/boxmsg.h`. Nothing anybody types speaks that language. `octomancer` and
+Octomancer.app each open the two *other* sockets themselves -- octomancerd's
+and the legacy control socket (`src/octomancer.cc:54`, `ui/main.mm:402`) -- and
+merge the answers in the client, and the shipped LaunchAgent starts the legacy
+mode rather than the daemon. The only clients of the box protocol in the tree
+are tests: `tests/test_boxmsg.cc` for the codec, `tests/test_boxsock.cc` for
+the transport, and -- the one that actually exercises the vocabulary --
+`tests/test_syncd.cc`, whose `FakePeer` speaks real verbs at the daemon and
+decodes what comes back.
+
+The consequence is that the daemon is invisible. It cannot be asked what it
+thinks, it cannot be told to do anything, and it cannot be configured, except
+by typing lines into a socket by hand.
+
+What this is *not* is the reason so many entries in this file end in "a camera,
+switched on, and one cycle" and then stay open. Those stay open because there
+is no camera switched on. The daemon schedules its own cycles and writes each
+one to the console and the log, so running it in a terminal settles them with
+no client involved -- which is how the four-cycle measurement two sections
+above was taken. Blaming the missing layer for that would be a tidier story
+than the true one, and the true one is already written down.
+
+Not a defect in anything that was built. It is the layer that was never
+started, showing up as an absence: `doc/TODO.md` item 2 is the missing daemon,
+and item 3 is the cutover that follows it.
 
 ## Tests
 

@@ -941,8 +941,10 @@ C/Open Bootloader Pre-Loaded) BT5.4 FCC IC CE Pre-Certified". Other nRF52840
 dongles should work; nothing here is Raytac-specific. Three things in that
 listing are the ones that matter:
 
-* **nRF52840.** The firmware is built for Zephyr's `nrf52840dongle` board. An
-  nRF52832 is a different chip and will not take this image.
+* **nRF52840.** An nRF52832 is a different chip and will not take this image.
+  Note that the same chip is not the same *board*: the firmware here is built
+  for `raytac_mdbt50q_cx_40_dongle`, and building for the wrong board target is
+  the mistake described further down that costs a dongle until you find it.
 * **Open Bootloader pre-loaded.** This is the line to look for, and the one
   most easily skimmed past. It is what lets you program the dongle over the
   USB port with nothing but a cable. A dongle without it needs an SWD debug

@@ -34,6 +34,30 @@
 #include "server.h"
 #include "timeutil.h"
 
+// A view whose origin is its top-left corner, used for exactly one thing: the
+// document view of a scrolling page.
+//
+// AppKit's default is the other way up, and NSClipView takes its own
+// flippedness from whatever it is scrolling. An unflipped clip view whose
+// document is shorter than itself puts the document at the *bottom* -- so
+// every page in this window with less content than the tab was tall drew
+// against the bottom edge with a band of nothing above it, which is what it
+// looked like: the Devices page is 72 points tall inside a 630-point tab, and
+// all 558 points of the difference went above it.
+//
+// Pinning the page to the clip view's top does not fix this on its own, which
+// is what made it confusing -- the constraint was there and was satisfied.
+// The clip view scrolls to the origin *it* considers the start, and for an
+// unflipped view that is the bottom.
+@interface OctoFlippedView : NSView
+@end
+
+@implementation OctoFlippedView
+- (BOOL)isFlipped {
+  return YES;
+}
+@end
+
 namespace {
 
 constexpr double kRefreshSeconds = 2.0;
@@ -975,16 +999,30 @@ const CGFloat kWindowWidth = 460.0;
   scroll.borderType = NSNoBorder;
   scroll.scrollerStyle = NSScrollerStyleOverlay;
 
+  // The page goes inside a flipped wrapper rather than straight into the
+  // scroll view; see OctoFlippedView for what that is worth. The wrapper is
+  // the document view, and hugs the page exactly, so it changes nothing about
+  // the layout except which end of the tab a short page settles against.
+  OctoFlippedView* document = [[OctoFlippedView alloc] init];
+  document.translatesAutoresizingMaskIntoConstraints = NO;
   content.translatesAutoresizingMaskIntoConstraints = NO;
-  scroll.documentView = content;
+  [document addSubview:content];
+  [NSLayoutConstraint activateConstraints:@[
+    [content.leadingAnchor constraintEqualToAnchor:document.leadingAnchor],
+    [content.trailingAnchor constraintEqualToAnchor:document.trailingAnchor],
+    [content.topAnchor constraintEqualToAnchor:document.topAnchor],
+    [content.bottomAnchor constraintEqualToAnchor:document.bottomAnchor],
+  ]];
+
+  scroll.documentView = document;
   NSClipView* clip = scroll.contentView;
   [NSLayoutConstraint activateConstraints:@[
-    [content.leadingAnchor constraintEqualToAnchor:clip.leadingAnchor],
-    [content.trailingAnchor constraintEqualToAnchor:clip.trailingAnchor],
+    [document.leadingAnchor constraintEqualToAnchor:clip.leadingAnchor],
+    [document.trailingAnchor constraintEqualToAnchor:clip.trailingAnchor],
     // Top only. Pinning the bottom as well would stretch a short page down to
     // fill the tab; leaving it free lets the page keep its own height and sit
     // at the top, which is where every one of them starts reading from.
-    [content.topAnchor constraintEqualToAnchor:clip.topAnchor],
+    [document.topAnchor constraintEqualToAnchor:clip.topAnchor],
   ]];
   item.view = scroll;
   return item;
@@ -1395,7 +1433,32 @@ const CGFloat kWindowWidth = 460.0;
   // wrapping label's height is a function of its width: asking before fixing
   // the width answers for a shape the page will never have, and the answer is
   // always too short.
-  const CGFloat page_width = kWindowWidth - 32.0;
+  //
+  // Both of the numbers this needs are asked of the tab view rather than
+  // guessed, which is the change that mattered. The guesses were "the page is
+  // 32 points narrower than the window" and "the tab strip is 40 points" --
+  // and they were out by six each, in the direction that makes a page too
+  // tall for the space measured for it. Six points is one line of a wrapped
+  // note, so the Details page came up with a scroll bar it did not need and
+  // nothing on screen said why.
+  //
+  // Two separate insets are in play and they are easy to conflate. A tab
+  // view's *frame* is bigger than its *alignment rect*, which is what the
+  // width constraint above is really setting; and its contentRect is smaller
+  // again, by the strip and the border. So the frame is built from the
+  // alignment rect the constraint will give it, and the answer read back.
+  const CGFloat tabs_align_width = kWindowWidth - 32.0;
+  _tabs.frame = [_tabs frameForAlignmentRect:NSMakeRect(0, 0, tabs_align_width,
+                                                        400.0)];
+  const NSRect tab_content = [_tabs contentRect];
+  const CGFloat page_width = NSWidth(tab_content);
+  // How much taller the tab view's alignment rect must be than the page it
+  // holds. Expressed against the alignment rect, because that is what the
+  // height constraint below is measured in.
+  const CGFloat tab_chrome =
+      NSHeight([_tabs alignmentRectForFrame:_tabs.frame]) -
+      NSHeight(tab_content);
+
   CGFloat tallest = 320.0;
   for (NSView* page in @[ devicesStack, detailsStack, configStack, notifyPage ]) {
     NSLayoutConstraint* fixed =
@@ -1405,13 +1468,20 @@ const CGFloat kWindowWidth = 460.0;
     tallest = MAX(tallest, page.fittingSize.height);
     fixed.active = NO;
   }
-  // Room for the tab strip itself, which is inside the tab view's height and
-  // not inside any page's -- and then a ceiling, because "as tall as the
-  // tallest page" is only a good rule while the tallest page fits on a screen.
-  // Past this the page scrolls, which is the other thing the scroll view is
-  // for.
-  tallest = MIN(tallest, 620.0);
-  [[_tabs.heightAnchor constraintGreaterThanOrEqualToConstant:tallest + 40.0]
+  // A ceiling, because "as tall as the tallest page" is only a good rule while
+  // the tallest page fits on a screen. It used to be a flat 620, which was
+  // less than the Details page needs on any display made this decade -- so the
+  // one page that had to scroll was the one somebody opens to read a number
+  // off. Ask the screen instead, and leave room for the title bar, the two
+  // status lines above the tabs and a margin.
+  // mainScreen rather than the window's own: there is no window yet, this
+  // being what decides how big to make it.
+  CGFloat ceiling = 620.0;
+  NSScreen* screen = [NSScreen mainScreen];
+  if (screen != nil) ceiling = NSHeight(screen.visibleFrame) - 200.0;
+  tallest = MIN(tallest, MAX(320.0, ceiling));
+  [[_tabs.heightAnchor
+      constraintGreaterThanOrEqualToConstant:tallest + tab_chrome]
       setActive:YES];
 
   _window = [[NSWindow alloc]

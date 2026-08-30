@@ -299,6 +299,7 @@ check_PROGRAMS = \
 	tests/test_fakecamera \
 	tests/test_fakedaemon \
 	tests/test_radio \
+	tests/test_scenario \
 	tests/test_crypto \
 	tests/test_devices \
 	tests/test_devicedb \
@@ -357,6 +358,10 @@ tests_test_radio_LDADD = libocto.a
 
 tests_test_advert_SOURCES = tests/test_advert.cc tests/harness.h
 tests_test_advert_LDADD = libocto.a
+
+tests_test_scenario_SOURCES = tests/test_scenario.cc tests/scenario.h \
+	tests/harness.h
+tests_test_scenario_LDADD = libocto.a
 
 tests_test_devicedb_SOURCES = tests/test_devicedb.cc tests/harness.h
 tests_test_devicedb_LDADD = libocto.a

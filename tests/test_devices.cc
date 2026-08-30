@@ -523,6 +523,117 @@ void test_camera_notes_follow_the_uis_precedence() {
   CHECK_STR(octo::build_device_view(from).rows[0].note, "recording");
 }
 
+// A camera in the file that neither daemon has heard.
+//
+// Both camera sources are records of something being heard, so a camera
+// somebody had named and asked to be warned about used to vanish from the
+// list entirely the moment it stopped advertising -- and looked exactly like
+// a camera that had never existed. Nothing said it was missing.
+void test_a_configured_camera_is_listed_even_when_never_heard() {
+  Snapshot snap;
+  snap.device.push_back(box("A", "Tentacle_A", true, -3.5));
+
+  Status status;  // octomancer-sync is answering and has heard no camera
+
+  CamConf conf = conf_with(
+      "never-heard", "camera cam-1 writes=on name=A:1EAE18A7 warn=on\n");
+
+  DeviceSources from;
+  from.bench = &snap;
+  from.cameras = &status;
+  from.conf = &conf;
+  from.now_wall = kNow;
+  const DeviceView v = octo::build_device_view(from);
+
+  const DeviceRow* row = find_row(v, "A:1EAE18A7");
+  CHECK(row != nullptr);
+  CHECK(row->kind == DeviceKind::kCamera);
+  CHECK(row->link == LinkState::kOffTheAir);
+  // No age and no offset. There is no instant to count from, and an age of
+  // zero would render as "now", which is the opposite of true.
+  CHECK(!row->has_age);
+  CHECK(!row->has_offset);
+
+  // And it is yellow, which is the whole point: the menu-bar blip had nothing
+  // to colour before, so a camera that was switched off left the icon grey.
+  CHECK(row->warn);
+  CHECK(row->warn_level == WarnLevel::kUnsure);
+  CHECK(v.worst_warning == WarnLevel::kUnsure);
+
+  const std::string text = octo::render_devices(v, false, false);
+  CHECK(contains(text, "A:1EAE18A7"));
+  CHECK(contains(text, "off the air"));
+}
+
+// Only octomancer-sync goes looking for cameras. With it not answering,
+// "off the air" would be a claim about a radio nobody was driving.
+void test_a_configured_camera_is_unknown_when_sync_is_not_answering() {
+  Snapshot snap;
+  snap.device.push_back(box("A", "Tentacle_A", true, -3.5));
+
+  CamConf conf = conf_with(
+      "no-sync", "camera cam-1 writes=on name=A:1EAE18A7 warn=on\n");
+
+  DeviceSources from;
+  from.bench = &snap;
+  from.cameras = nullptr;
+  from.conf = &conf;
+  from.now_wall = kNow;
+  const DeviceView v = octo::build_device_view(from);
+
+  const DeviceRow* row = find_row(v, "A:1EAE18A7");
+  CHECK(row != nullptr);
+  CHECK(row->link == LinkState::kUnknown);
+}
+
+// A camera that is switched off in the file stays switched off. Being in the
+// file is not on its own a reason to appear -- otherwise disabling one would
+// be no relief from being told about it.
+void test_a_configured_camera_that_is_disabled_is_still_hidden() {
+  Status status;
+  CamConf conf = conf_with(
+      "off-not-heard", "camera cam-1 writes=off name=A:1EAE18A7 warn=on\n");
+
+  DeviceSources from;
+  from.cameras = &status;
+  from.conf = &conf;
+  from.now_wall = kNow;
+  const DeviceView v = octo::build_device_view(from);
+
+  CHECK(find_row(v, "A:1EAE18A7") == nullptr);
+  CHECK_EQ(v.hidden, 1);
+  CHECK(v.worst_warning == WarnLevel::kNone);
+}
+
+// ...and a camera that IS being heard gets one row, not two.
+void test_a_configured_camera_that_is_heard_is_not_duplicated() {
+  Status status;
+  CameraStatus c = camera("cam-1", "A:1EAE18A7");
+  c.present = true;
+  c.has_last_seen = true;
+  c.last_seen_wall = kNow - 2.0;
+  status.cameras.push_back(c);
+
+  CamConf conf = conf_with(
+      "heard-once", "camera cam-1 writes=on name=A:1EAE18A7 warn=on\n");
+
+  DeviceSources from;
+  from.cameras = &status;
+  from.conf = &conf;
+  from.now_wall = kNow;
+  const DeviceView v = octo::build_device_view(from);
+
+  int cameras = 0;
+  for (const DeviceRow& r : v.rows) {
+    if (r.kind == DeviceKind::kCamera) ++cameras;
+  }
+  CHECK_EQ(cameras, 1);
+  const DeviceRow* row = find_row(v, "A:1EAE18A7");
+  CHECK(row != nullptr);
+  CHECK(row->link == LinkState::kOnTheAir);
+  CHECK(row->has_age);
+}
+
 void test_a_disabled_camera_is_hidden() {
   Status status;
   status.cameras.push_back(camera("cam-1", "A:1EAE18A7"));
@@ -1014,6 +1125,10 @@ int main() {
   test_camera_age_prefers_last_seen_over_the_snapshot();
   test_camera_error_is_shown_only_against_a_bench();
   test_camera_notes_follow_the_uis_precedence();
+  test_a_configured_camera_is_listed_even_when_never_heard();
+  test_a_configured_camera_is_unknown_when_sync_is_not_answering();
+  test_a_configured_camera_that_is_disabled_is_still_hidden();
+  test_a_configured_camera_that_is_heard_is_not_duplicated();
   test_a_disabled_camera_is_hidden();
   test_missing_octomancerd_borrows_the_other_bench();
   test_missing_octomancer_sync_still_lists_what_was_heard();

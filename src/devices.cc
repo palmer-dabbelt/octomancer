@@ -351,6 +351,57 @@ DeviceView build_device_view(const DeviceSources& from) {
     }
   }
 
+  // --- cameras that are in the file and nowhere else --------------------
+  //
+  // Both sources above are records of something being *heard*. So a camera
+  // somebody had named, given permission to write to, and asked to be warned
+  // about disappeared from this list entirely the moment it stopped
+  // advertising -- switched off, carried out of the room, or claimed by
+  // another app -- and looked exactly like a camera that had never existed.
+  // Nothing said it was missing, and the menu-bar blip stayed grey because
+  // there was no row for it to colour.
+  //
+  // That is this project's recurring failure in another guise: silence and
+  // absence rendered identically. A camera in the configuration now always
+  // has a row, and warn_level_for turns it yellow on the strength of having
+  // no age at all.
+  if (from.conf != nullptr) {
+    for (const CameraConfig& c : from.conf->cameras()) {
+      if (std::find(listed.begin(), listed.end(), c.id) != listed.end()) {
+        continue;
+      }
+      // The block above may have added it from octomancerd's side without it
+      // being in `listed`, which is octomancer-sync's list.
+      bool already = false;
+      for (const DeviceRow& r : v.rows) {
+        if (r.kind == DeviceKind::kCamera && r.id == c.id) {
+          already = true;
+          break;
+        }
+      }
+      if (already) continue;
+      if (!camera_is_enabled(from.conf, c.id)) {
+        ++v.hidden;
+        continue;
+      }
+
+      DeviceRow r;
+      r.kind = DeviceKind::kCamera;
+      r.id = c.id;
+      r.name = c.name.empty() ? c.id : c.name;
+      // "Off the air" is a claim about the radio, and only octomancer-sync
+      // goes looking for cameras. With it not answering, the honest answer is
+      // that nobody knows.
+      r.link = from.cameras != nullptr ? LinkState::kOffTheAir
+                                       : LinkState::kUnknown;
+      // Deliberately no age. Nothing in this view has ever heard this camera,
+      // so there is no instant to count from, and an age of zero would render
+      // as "now" -- the exact opposite of what is true.
+      r.note = "in the configuration, not heard";
+      v.rows.push_back(r);
+    }
+  }
+
   // Timecode boxes first, then cameras; within each, what we hear before
   // what we are not. Stable so that everything else stays in the order the
   // daemon listed it, which does not jump about between polls.

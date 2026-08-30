@@ -60,6 +60,7 @@
 /tests/test_proto
 /tests/test_advert
 /tests/test_radio
+/tests/test_scenario
 /tests/test_registry
 /tests/test_smp
 /tests/test_syncd

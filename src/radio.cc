@@ -51,6 +51,8 @@ bool parse_radio_kind(const std::string& text, RadioKind* out) {
     *out = RadioKind::kCoreBluetooth;
   } else if (text == "dongle" || text == "hci" || text == "nrf") {
     *out = RadioKind::kDongle;
+  } else if (text == "fake" || text == "none") {
+    *out = RadioKind::kFake;
   } else {
     return false;
   }
@@ -62,6 +64,7 @@ const char* radio_kind_name(RadioKind kind) {
     case RadioKind::kAuto: return "auto";
     case RadioKind::kCoreBluetooth: return "corebluetooth";
     case RadioKind::kDongle: return "dongle";
+    case RadioKind::kFake: return "fake";
   }
   return "auto";
 }
@@ -72,13 +75,22 @@ bool radio_options_from_env(std::string* err) {
     if (*v && !parse_radio_kind(v, &opts.kind)) {
       if (err) {
         *err = std::string("OCTOMANCER_RADIO=") + v +
-               " is not one of auto, corebluetooth, dongle";
+               " is not one of auto, corebluetooth, dongle, fake";
       }
       return false;
     }
   }
   if (const char* v = std::getenv("OCTOMANCER_DONGLE")) {
     if (*v) opts.device = v;
+  }
+  if (const char* v = std::getenv("OCTOMANCER_FAKE")) {
+    // Setting the bench selects the fake radio. Requiring both this and
+    // OCTOMANCER_RADIO=fake would mean a spec that silently did nothing, which
+    // is the failure that costs the most time here: the output of a run
+    // against no bench looks like the output of a run against a real one that
+    // heard nothing.
+    opts.fake = v;
+    if (opts.kind == RadioKind::kAuto) opts.kind = RadioKind::kFake;
   }
   if (truthy(std::getenv("OCTOMANCER_HCI_TRACE"))) opts.trace = true;
   if (const char* v = std::getenv("OCTOMANCER_PASSKEY")) {
@@ -100,6 +112,12 @@ bool radio_options_from_env(std::string* err) {
 
 std::string describe_radio() {
   const RadioOptions& opts = radio_options();
+  if (opts.kind == RadioKind::kFake) {
+    return "a fake bench -- no radio is in use (" +
+           (opts.fake.empty() ? std::string("the standard bench")
+                              : opts.fake) +
+           ")";
+  }
   if (dongle_selected()) {
     if (!opts.device.empty()) return "dongle at " + opts.device;
     std::vector<std::string> ports = hci::list_candidate_ports();
@@ -137,6 +155,10 @@ std::string describe_radio() {
 std::unique_ptr<Scanner> make_ble_scanner(Scanner::AdvertHandler on_advert,
                                           Scanner::SightingHandler on_camera,
                                           Scanner::StateHandler on_state) {
+  if (radio_options().kind == RadioKind::kFake) {
+    return make_fake_scanner(std::move(on_advert), std::move(on_camera),
+                             std::move(on_state));
+  }
   if (dongle_selected()) {
     return make_hci_scanner(std::move(on_advert), std::move(on_camera),
                             std::move(on_state));

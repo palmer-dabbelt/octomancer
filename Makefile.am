@@ -104,7 +104,9 @@ libocto_a_SOURCES = \
 # which is why the tools with no radio in them do not grow a serial port.
 libocto_a_SOURCES += \
 	src/camera_hci.cc \
+	src/fakebench.cc \
 	src/radiopick.cc \
+	src/scanner_fake.cc \
 	src/scanner_hci.cc
 
 # radio.cc has to know whether there is a second backend to choose from. The
@@ -277,6 +279,7 @@ check_PROGRAMS = \
 	tests/test_camconf \
 	tests/test_camsync \
 	tests/test_control \
+	tests/test_fakebench \
 	tests/test_radio \
 	tests/test_crypto \
 	tests/test_devices \
@@ -332,6 +335,9 @@ tests_test_boxsock_LDADD = libocto.a
 
 tests_test_radio_SOURCES = tests/test_radio.cc tests/harness.h
 tests_test_radio_LDADD = libocto.a
+
+tests_test_fakebench_SOURCES = tests/test_fakebench.cc tests/harness.h
+tests_test_fakebench_LDADD = libocto.a
 
 tests_test_camsync_SOURCES = tests/test_camsync.cc tests/harness.h
 tests_test_camsync_LDADD = libocto.a

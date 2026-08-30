@@ -109,6 +109,23 @@ void test_a_port_cannot_influence_auto_on_a_host_with_a_radio() {
   }
 }
 
+// The fake radio is never a dongle, whatever else is set. It matters that this
+// is checked rather than assumed: OCTOMANCER_DONGLE may well still be set in a
+// shell that is now running a fake bench, and a fake run that quietly opened a
+// real serial port -- taking it exclusively, from whatever else wanted it --
+// would be the worst of both.
+void test_a_fake_bench_never_reaches_for_a_port() {
+  for (int named = 0; named <= 1; ++named) {
+    for (int host = 0; host <= 1; ++host) {
+      for (int port = 0; port <= 1; ++port) {
+        CHECK_EQ(choose_dongle(RadioKind::kFake, named != 0, host != 0,
+                               port != 0),
+                 false);
+      }
+    }
+  }
+}
+
 // have_host_radio() is a fact about the build, not the machine, so the only
 // thing to assert is that it agrees with the macro the rest of the tree
 // compiles against. Without this the suite would pass on a Mac built without
@@ -132,6 +149,7 @@ int main() {
   test_naming_a_port_is_asking_for_it();
   test_corebluetooth_refuses_the_dongle();
   test_a_port_cannot_influence_auto_on_a_host_with_a_radio();
+  test_a_fake_bench_never_reaches_for_a_port();
   test_have_host_radio_matches_the_build();
   return octotest::report("test_radio");
 }

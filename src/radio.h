@@ -34,6 +34,11 @@ enum class RadioKind {
   kAuto,
   kCoreBluetooth,
   kDongle,
+  // No radio at all: a bench of boxes and a camera that are not there, built
+  // from OCTOMANCER_FAKE. Never selected by `auto` -- it has to be asked for,
+  // because a program that silently invented its own devices would be worse
+  // than one that found none. See src/fakebench.h.
+  kFake,
 };
 
 struct RadioOptions {
@@ -60,6 +65,10 @@ struct RadioOptions {
   // Whether to ask on the terminal when a passkey is wanted and none was
   // given. False under launchd, where there is nobody to ask.
   bool prompt_for_passkey = true;
+
+  // The synthetic bench, when `kind` is kFake. Empty means the standard one.
+  // See FakeBench::parse for the grammar.
+  std::string fake;
 };
 
 // Process-wide, set once during argument parsing and read by the factories.
@@ -88,7 +97,9 @@ bool dongle_selected();
 // The rule dongle_selected() applies, with the two things it has to go and
 // look up passed in instead. Pure, so it can be tested; see tests/test_radio.
 //
-//   kind          what --radio / OCTOMANCER_RADIO said
+//   kind          what --radio / OCTOMANCER_RADIO said (kFake is never a
+//                 dongle, and is refused here so a fake run cannot end up
+//                 opening a serial port)
 //   named         a specific port was given (--dongle, OCTOMANCER_DONGLE)
 //   host_radio    this build has a radio of its own -- CoreBluetooth
 //   port_present  some cu.usbmodem*/ttyACM* exists
@@ -131,6 +142,11 @@ std::string describe_radio();
 std::unique_ptr<Scanner> make_hci_scanner(Scanner::AdvertHandler on_advert,
                                           Scanner::SightingHandler on_camera,
                                           Scanner::StateHandler on_state);
+
+// The bench that is not there. Never reached unless it was asked for.
+std::unique_ptr<Scanner> make_fake_scanner(Scanner::AdvertHandler on_advert,
+                                           Scanner::SightingHandler on_camera,
+                                           Scanner::StateHandler on_state);
 
 // The same scanner, over a radio somebody else owns.
 //

@@ -26,6 +26,10 @@ bool choose_dongle(RadioKind kind, bool named, bool host_radio,
                    bool port_present) {
   if (kind == RadioKind::kDongle) return true;
   if (kind == RadioKind::kCoreBluetooth) return false;
+  // Before the `named` check below, deliberately: OCTOMANCER_DONGLE may well
+  // be set in a shell that is now running a fake, and a fake radio that opened
+  // a real serial port would be the worst of both.
+  if (kind == RadioKind::kFake) return false;
   // Naming a port is asking for it, whatever `kind` says: there is no reason
   // to give a path to a program and mean something else by it.
   if (named) return true;

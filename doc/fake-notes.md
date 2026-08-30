@@ -167,6 +167,36 @@ The things it *can* arrange that hardware cannot, on demand:
 Each of those is an afternoon's work with five boxes in a room, which is why
 none of them had ever been tested.
 
+## The daemons
+
+The radio is one seam; the sockets between the four programs are the others.
+`tests/fakedaemon.h` has a fixture for each, and they are built the same way the
+radio fake is — the **real** server implementation with fake data poured in:
+
+| fixture | is | stands in for |
+| --- | --- | --- |
+| `FakeBenchDaemon` | a `Registry` fed from a `FakeBench`, behind the real `registry_handler` | `octomancerd` |
+| `FakeControlDaemon` | a real `octo::Control`, behind the real `octo::Server` | `octomancer-sync`'s control socket |
+| `FakeBoxDaemon` | a real `SyncDaemon` and `LineServer` on a real loop | `octomancer-sync --daemon` |
+| `LineClient` | a connection held open, read line by line | the control daemon that does not exist yet |
+
+Nothing there reimplements a protocol, and that is the whole design. A
+hand-written mock of a wire format is a second implementation that agrees with
+the first right up until somebody changes one of them — and what it produces
+then is a test that passes while the program is broken, which is worse than no
+test because it is believed. The only mock worth having is one that cannot
+drift, and the way to get one is to fake the data rather than the protocol.
+
+The first run of these found a bug that had been in the tree the whole time.
+`events since=N` filtered with `seq > N` while reporting `next` as the sequence
+the *next* event would be given, so the first event after every poll was dropped
+— and since events arrive one at a time, that was very nearly all of them.
+`Octomancer.app` polls every two seconds and hands `next` straight back, so its
+notifications had essentially never fired for a real event. Neither half was
+wrong on its own, which is why no parser test had caught it in either direction.
+`doc/KNOWN_ISSUES.md` has the rest, including the `- 1` in the passing test that
+had been holding it in place.
+
 ## How far the fake is trusted
 
 The adverts are built by `octo::encode_timecode` in `src/tentacle.h`, which is

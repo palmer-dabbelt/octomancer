@@ -450,6 +450,14 @@ configured, except by typing lines into a socket by hand.
 over `octomancer-syncd.sock`. Even a one-verb debug client would do it, and
 would be worth having before the control daemon rather than after.
 
+*Partly answered, 2026-08-30.* `octomancer-sync --daemon --radio fake` runs
+the whole thing on a bench that is not there, and `tests/fakedaemon.h`'s
+`FakeBoxDaemon` and `LineClient` connect to a real `SyncDaemon` over a real
+socket and read its announcements — so the protocol has now been spoken by
+something other than the daemon that serves it, and whoever writes the control
+daemon has something to connect to on their first afternoon. What is still
+true is the entry above: nothing a *person* runs speaks it.
+
 ### 5. The state broadcast is a poll, and the wrong shape
 
 The model has the sync daemon saying what it knows, unasked, once a second:

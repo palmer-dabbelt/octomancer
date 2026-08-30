@@ -21,6 +21,7 @@
 #include "../src/client.h"
 #include "../src/control.h"
 #include "../src/devices.h"
+#include "../src/boxmsg.h"
 #include "../src/proto.h"
 #include "fakedaemon.h"
 #include "harness.h"
@@ -296,6 +297,83 @@ void test_a_daemon_that_is_not_there_is_not_an_error() {
   control.stop();
 }
 
+// ------------------------------------------------------- the box protocol
+//
+// The seam nothing outside tests has ever connected to (doc/KNOWN_ISSUES.md
+// entry 4). Checked here as a *client* would see it -- open a socket, read
+// what arrives -- rather than by calling the daemon's methods, because the
+// question this answers is "can something connect to this and get anywhere",
+// and that has never had an answer.
+void test_the_box_protocol_greets_and_answers_a_stranger() {
+  octotest::FakeBoxDaemon daemon;
+  std::string err;
+  CHECK(daemon.start(&err));
+  CHECK_STR(err, "");
+
+  octotest::LineClient client;
+  CHECK(client.connect(daemon.path(), &err));
+  CHECK_STR(err, "");
+
+  // The greeting arrives unasked, which is what makes the protocol usable by
+  // something that connected without knowing what it had connected to.
+  std::string line;
+  CHECK(client.next(&line, 3.0));
+  octo::Message hello;
+  CHECK(octo::decode(line, &hello, &err));
+  CHECK_STR(hello.verb, "hello");
+  CHECK_STR(hello.get("role"), "sync");
+
+  // And it answers a question. `devices` is the one a control daemon needs
+  // first, being the roster it would merge.
+  client.send("devices");
+  int devices = 0;
+  bool ended = false;
+  for (int i = 0; i < 40 && !ended; ++i) {
+    if (!client.next(&line, 3.0)) break;
+    octo::Message msg;
+    if (!octo::decode(line, &msg, &err)) continue;
+    if (msg.verb == "dev") ++devices;
+    if (msg.verb == "end" && msg.get("what") == "devices") ended = true;
+  }
+  CHECK(ended);
+  CHECK_EQ(devices, 5);
+  daemon.stop();
+}
+
+// The half that makes this protocol different from the other two: messages
+// arrive that nobody asked for. A control daemon is built around that, and it
+// has never been observed from outside the daemon that sends them.
+void test_the_box_protocol_announces_without_being_asked() {
+  octotest::FakeBoxDaemon daemon;
+  std::string err;
+  CHECK(daemon.start(&err));
+
+  octotest::LineClient client;
+  CHECK(client.connect(daemon.path(), &err));
+
+  // Nothing is sent. Everything below arrives because the daemon decided to.
+  int benches = 0;
+  std::string line;
+  for (int i = 0; i < 60 && benches < 2; ++i) {
+    if (!client.next(&line, 3.0)) break;
+    octo::Message msg;
+    if (!octo::decode(line, &msg, &err)) continue;
+    if (msg.verb != "bench") continue;
+    ++benches;
+    // ...and it is the bench, not an empty placeholder: five boxes about
+    // 3.59 s out, which is the fake bench having reached the daemon through
+    // the registry and back out over the socket.
+    double offset = 0.0;
+    if (msg.get_double("offset", &offset)) {
+      CHECK_NEAR(offset, -3.59, 0.05);
+    }
+  }
+  // Two, so that this is a repeating announcement rather than one greeting
+  // that happened to look like one.
+  CHECK_EQ(benches, 2);
+  daemon.stop();
+}
+
 }  // namespace
 
 int main() {
@@ -306,5 +384,7 @@ int main() {
   test_events_replay_for_a_client_that_was_not_listening();
   test_the_merged_view_comes_off_two_sockets();
   test_a_daemon_that_is_not_there_is_not_an_error();
+  test_the_box_protocol_greets_and_answers_a_stranger();
+  test_the_box_protocol_announces_without_being_asked();
   return octotest::report("test_fakedaemon");
 }

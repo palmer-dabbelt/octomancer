@@ -45,6 +45,7 @@
 /tests/test_camdb
 /tests/test_camsync
 /tests/test_control
+/tests/test_devicedb
 /tests/test_devices
 /tests/test_fakebench
 /tests/test_fakecamera

@@ -937,7 +937,7 @@ added, at which point a failure is known to be the radio's.
 2. The protocol codec, and the persistence record formats. Portable, tested.
    **Codec done; the record formats are not.**
 3. The Mac sync daemon and control daemon -- layers 3 and 2. The churn. **The
-   sync daemon is done** -- `src/syncd.{h,cc}`, cross-compiling for cortex-m4, thirty-four
+   sync daemon is done** -- `src/syncd.{h,cc}`, cross-compiling for cortex-m4, thirty-five
    properties pinned against a fake camera on a clock that is a variable, and
    run against the room over a real dongle. The control daemon is not started.
 4. Standalone firmware over USB.
@@ -1233,7 +1233,7 @@ is.
   a room with 37 LE devices in it. Everything past the scan -- connect,
   discover, subscribe, pair, write -- still waits for a camera to be switched
   on.
-* The sync daemon **against a camera**. Thirty-four properties are pinned
+* The sync daemon **against a camera**. Thirty-five properties are pinned
   against a fake one, which is a statement about this program's arithmetic and
   not about a Blackmagic body. The first real cycle is still ahead.
 * Whether the nRF52840's controller will scan, advertise, hold a central link

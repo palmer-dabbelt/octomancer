@@ -246,8 +246,21 @@ struct Rig {
   Rig() : registry(default_policy(), kMono0) {
     // A wall instant whose local time of day is known to this process and far
     // from midnight is not something a test can arrange, so it takes the one
-    // it has. Only differences matter to anything below.
-    wall0 = wall_now();
+    // it has -- but truncated to a whole second, which matters more than it
+    // looks.
+    //
+    // This used to be `wall_now()` outright, with a comment saying only
+    // differences mattered below. They do not: a write is *aligned* to land on
+    // a whole second of wall-clock time, so the fraction of a second the rig
+    // starts on decides where in each cycle the write falls. The suite was
+    // therefore sampling one random phase per run and failing on about six per
+    // cent of them -- 17 failures in 300 runs, all of them a verification that
+    // arrived before the daemon was listening for it.
+    //
+    // Truncating fixes the phase at zero. The phases that are no longer
+    // sampled by accident are swept on purpose in
+    // test_a_write_lands_on_a_boundary_at_any_phase.
+    wall0 = std::floor(wall_now());
     opt.sync.poll = 60.0;
     opt.sync.scan_timeout = 2.0;
     opt.sync.connect_timeout = 2.0;
@@ -430,6 +443,46 @@ void test_a_cycle_writes_on_a_second_boundary() {
 
   // And the packet is an RTC write rather than anything else.
   CHECK_EQ(static_cast<int>(rig.camera.writes[0].size() > 8), 1);
+}
+
+// `aligned_wait` exists so that a write lands on a whole second of wall-clock
+// time whatever fraction of a second the daemon started on. That property was
+// only ever sampled -- one random phase per run, from the real clock -- and
+// this sweeps it.
+//
+// The verification here is driven the way a camera really behaves, by reporting
+// timecode repeatedly rather than once at a moment the test guessed. That is
+// what makes it phase-independent: a test that speaks once has to know when the
+// daemon is listening, and a test that keeps speaking does not.
+void test_a_write_lands_on_a_boundary_at_any_phase() {
+  for (int i = 0; i < 10; ++i) {
+    const double frac = i / 10.0;
+    Rig rig;
+    rig.wall0 = std::floor(rig.wall0) + frac;
+    rig.camera_error = 4.0;
+    rig.build();
+    rig.feed_boxes(3, -6.0);
+    rig.daemon->start();
+    rig.reach_camera(-6.0);
+    rig.loop.advance(2.0);
+    CHECK_EQ(static_cast<int>(rig.camera.writes.size()), 1);
+    if (rig.camera.writes.empty()) continue;
+
+    const double send_wall =
+        rig.wall0 + (rig.camera.write_monos[0] - Rig::kMono0);
+    const double lead = effective_lead(rig.opt.sync, rig.daemon->state());
+    const double target = send_wall + lead + (-6.0);
+    CHECK_NEAR(target - std::floor(target + 0.5), 0.0, 1e-6);
+
+    // The write landed, and the camera says so for as long as it takes.
+    rig.camera_error = 0.0;
+    for (int k = 0; k < 60 && rig.cycles.empty(); ++k) {
+      rig.report_now(-6.0);
+      rig.loop.advance(0.1);
+    }
+    CHECK_STR(rig.last_action(), "write:ok");
+    CHECK(rig.last().verified);
+  }
 }
 
 void test_a_good_write_is_verified() {
@@ -1032,6 +1085,7 @@ int main() {
   test_a_disabled_box_does_not_vote();
   test_no_boxes_means_the_camera_is_not_touched();
   test_a_cycle_writes_on_a_second_boundary();
+  test_a_write_lands_on_a_boundary_at_any_phase();
   test_a_good_write_is_verified();
   test_a_write_that_changes_nothing_is_not_called_verified();
   test_recording_is_never_written_over();

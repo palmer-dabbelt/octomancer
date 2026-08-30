@@ -825,6 +825,25 @@ needs it.
 
 ## Tests
 
+* ~~**`test_syncd` is flaky.**~~ **Fixed 2026-08-30, and the comment that
+  caused it said the opposite.** The rig anchored its wall clock to the real
+  one -- `wall0 = wall_now()` -- above a comment explaining that only
+  *differences* mattered below. They do not. A write is aligned to land on a
+  whole second of wall-clock time, so the fraction of a second the rig started
+  on decides where in each cycle the write falls, and two tests then reported
+  the camera's confirming timecode at a fixed offset afterwards. On unlucky
+  phases the confirmation arrived before the daemon was listening for it and
+  the write came back `write:unverified`. Measured: **17 failures in 300
+  runs**, and none of them reproducible on its own -- it passed eight times out
+  of eight in isolation, which is what kept it hidden. `wall0` is now truncated
+  to a whole second, so the phase is fixed at zero; the phases that used to be
+  sampled at random are swept deliberately in
+  `test_a_write_lands_on_a_boundary_at_any_phase`, which also drives the
+  verification the way a camera really behaves -- reporting repeatedly rather
+  than once at a guessed moment. 0 failures in 300 runs after. The new test was
+  mutation-checked (a deliberate 0.37 s error in the expected boundary made all
+  ten phases fail) so that it is known to have teeth rather than assumed to.
+
 * ~~**`test_proclock` is flaky.**~~ **Fixed 2026-08-29, and the diagnosis
   above was wrong.** It was not impatience and widening the window did not fix
   it -- the window had already been widened to thirty seconds and it still

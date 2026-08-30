@@ -8,9 +8,101 @@
 // behaviour on 2026-08-30 was found by a bench going quiet rather than by the
 // suite. There is no I/O and no factory here, so tests/test_radio.cc links it
 // and nothing else.
+#include <cstdlib>
+#include <cstring>
+#include <string>
+
 #include "radio.h"
 
 namespace octo {
+
+namespace {
+
+bool truthy(const char* v) {
+  if (!v || !*v) return false;
+  return std::strcmp(v, "0") != 0 && std::strcmp(v, "no") != 0 &&
+         std::strcmp(v, "false") != 0;
+}
+
+}  // namespace
+
+// The options themselves, and the parsing of them, live here rather than
+// beside the factories for the same reason choose_dongle does: radio.cc
+// names make_corebluetooth_scanner, so a test that only wanted to say which
+// radio to use had to link a CoreBluetooth backend to say it. Nothing below
+// touches a radio, a port or a file.
+
+RadioOptions& radio_options() {
+  static RadioOptions opts;
+  return opts;
+}
+
+bool parse_radio_kind(const std::string& text, RadioKind* out) {
+  if (!out) return false;
+  if (text == "auto") {
+    *out = RadioKind::kAuto;
+  } else if (text == "corebluetooth" || text == "mac" || text == "apple") {
+    *out = RadioKind::kCoreBluetooth;
+  } else if (text == "dongle" || text == "hci" || text == "nrf") {
+    *out = RadioKind::kDongle;
+  } else if (text == "fake" || text == "none") {
+    *out = RadioKind::kFake;
+  } else {
+    return false;
+  }
+  return true;
+}
+
+const char* radio_kind_name(RadioKind kind) {
+  switch (kind) {
+    case RadioKind::kAuto: return "auto";
+    case RadioKind::kCoreBluetooth: return "corebluetooth";
+    case RadioKind::kDongle: return "dongle";
+    case RadioKind::kFake: return "fake";
+  }
+  return "auto";
+}
+
+bool radio_options_from_env(std::string* err) {
+  RadioOptions& opts = radio_options();
+  if (const char* v = std::getenv("OCTOMANCER_RADIO")) {
+    if (*v && !parse_radio_kind(v, &opts.kind)) {
+      if (err) {
+        *err = std::string("OCTOMANCER_RADIO=") + v +
+               " is not one of auto, corebluetooth, dongle, fake";
+      }
+      return false;
+    }
+  }
+  if (const char* v = std::getenv("OCTOMANCER_DONGLE")) {
+    if (*v) opts.device = v;
+  }
+  if (const char* v = std::getenv("OCTOMANCER_FAKE")) {
+    // Setting the bench selects the fake radio. Requiring both this and
+    // OCTOMANCER_RADIO=fake would mean a spec that silently did nothing, which
+    // is the failure that costs the most time here: the output of a run
+    // against no bench looks like the output of a run against a real one that
+    // heard nothing.
+    opts.fake = v;
+    if (opts.kind == RadioKind::kAuto) opts.kind = RadioKind::kFake;
+  }
+  if (truthy(std::getenv("OCTOMANCER_HCI_TRACE"))) opts.trace = true;
+  if (const char* v = std::getenv("OCTOMANCER_PASSKEY")) {
+    if (*v) {
+      char* end = nullptr;
+      long n = std::strtol(v, &end, 10);
+      if (end == v || *end != '\0' || n < 0 || n > 999999) {
+        if (err) {
+          *err = std::string("OCTOMANCER_PASSKEY=") + v +
+                 " is not a six-digit number";
+        }
+        return false;
+      }
+      opts.passkey = static_cast<int>(n);
+    }
+  }
+  return true;
+}
 
 bool have_host_radio() {
 #ifdef OCTO_HAVE_COREBLUETOOTH

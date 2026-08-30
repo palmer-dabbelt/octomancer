@@ -299,6 +299,11 @@ bool FakeBench::parse(const std::string& spec_in, FakeBench* out,
         if (err) *err = "not a frame rate: " + f[4];
         return false;
       }
+      if (f.size() > 5 && !f[5].empty() &&
+          !to_double(f[5], &bench.camera.write_latency_s)) {
+        if (err) *err = "not a write latency in seconds: " + f[5];
+        return false;
+      }
       continue;
     }
 

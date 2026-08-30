@@ -143,6 +143,9 @@ std::unique_ptr<Scanner> make_hci_scanner(Scanner::AdvertHandler on_advert,
                                           Scanner::SightingHandler on_camera,
                                           Scanner::StateHandler on_state);
 
+// The camera that is not there. Never reached unless it was asked for.
+std::unique_ptr<CameraLink> make_fake_camera_link();
+
 // The bench that is not there. Never reached unless it was asked for.
 std::unique_ptr<Scanner> make_fake_scanner(Scanner::AdvertHandler on_advert,
                                            Scanner::SightingHandler on_camera,

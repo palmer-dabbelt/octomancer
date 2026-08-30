@@ -23,6 +23,7 @@
 
 #include "../src/bmd.h"
 #include "../src/loopfake.h"
+#include "../src/tentacle.h"
 #include "../src/timeutil.h"
 #include "harness.h"
 
@@ -211,16 +212,10 @@ class FakePeer : public MsgPeer {
   std::vector<std::string> lines;
 };
 
-// A 0x32 Tentacle payload: microseconds since midnight, 40-bit big-endian.
-std::vector<uint8_t> micros_packet(double sod) {
-  const uint64_t us = static_cast<uint64_t>(llround(sod * 1e6));
-  std::vector<uint8_t> pkt = {0x32, 0x3d, 0x18, 0, 0, 0, 0, 0};
-  for (int i = 0; i < 5; ++i) {
-    pkt[7 - i] = static_cast<uint8_t>((us >> (8 * i)) & 0xFF);
-  }
-  return pkt;
-}
-
+// A 0x32 Tentacle payload used to be built here, byte by byte. It is
+// octo::encode_micros now -- a second copy of a wire format is a second thing
+// to keep in step with the decoder, and this one was written before there was
+// an encoder to use.
 std::string temp_path(const char* tag) {
   return "/tmp/octo-syncd-" + std::to_string(getpid()) + "-" + tag + ".conf";
 }
@@ -304,7 +299,7 @@ struct Rig {
       const double w = wall0 + (mono - kMono0);
       for (int b = 0; b < n; ++b) {
         const std::vector<uint8_t> pkt =
-            micros_packet(local_seconds_of_day(w) + offset);
+            octo::encode_micros(local_seconds_of_day(w) + offset);
         Advert advert;
         advert.id = "box" + std::to_string(b);
         advert.name = "Tentacle_" + std::to_string(b);

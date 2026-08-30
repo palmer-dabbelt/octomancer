@@ -88,6 +88,21 @@ struct FakeCamera {
   // 4.7. A camera whose timecode does not follow its clock cannot be synced,
   // and saying so is a case worth being able to arrange.
   bool timecode_follows_clock = true;
+
+  // How long a control packet takes to land, in seconds.
+  //
+  // Not a detail. The daemon aims a write so that a whole second arrives on a
+  // boundary: it sends `lead` early, expecting the packet to spend `lead` in
+  // transit. If the two differ the camera ends up wrong by exactly the
+  // difference -- and with a fake that applied writes instantly, every write
+  // left the camera one whole lead ahead, which is what a first run of this
+  // showed (a +54 ms residual against a 50 ms lead). That is not a bug in the
+  // program; it is a fake that could not exercise the part of the program that
+  // matters most, because the lead-learning loop had nothing to converge on.
+  //
+  // The default is what a real Blackmagic link measured at: see the "142ms
+  // lead, 42ms latency" line in the field logs.
+  double write_latency_s = 0.042;
 };
 
 struct FakeBench {
@@ -100,7 +115,7 @@ struct FakeBench {
   // different experiment from the one somebody meant to run.
   //
   //   box,<name>,<offset_s>[,<fps>][,<kind>][,<drift_ppm>]
-  //   cam,<id>,<name>,<error_s>[,<fps>]
+  //   cam,<id>,<name>,<error_s>[,<fps>][,<write_latency_s>]
   //
   // separated by ';'. `kind` is one of frame+us, frame, us, static. A leading
   // '@' means the rest is a path to read the spec from, so a long bench does

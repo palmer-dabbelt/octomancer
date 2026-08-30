@@ -14,6 +14,9 @@
 namespace octo {
 
 std::unique_ptr<CameraLink> make_camera_link() {
+  if (radio_options().kind == RadioKind::kFake) {
+    return make_fake_camera_link();
+  }
   // Only when the dongle was actually asked for.
   //
   // This used to test dongle_selected(), which is true under `--radio auto`

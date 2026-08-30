@@ -97,13 +97,64 @@ capped at 103 bytes, and the path above is 56 of them. A `$HOME` more than
 about forty characters deep fails with `socket path is too long`, which is at
 least a clear message but is not obviously about `$HOME`.
 
+## The camera
+
+`--radio fake` also replaces the camera link, so the whole program runs:
+
+```
+HOME=$FAKE OCTOMANCER_RADIO=fake ./octomancer-sync --no-daemon --poll 5
+```
+
+```
+12:55:20  tentacles -3.593s (5 boxes, spread 0.025s) | camera 12:55:19:21 err +3.329s
+12:55:20    wrote RTC 19:55:17 UTC (bias +0s, 50ms lead, 0ms latency)
+12:55:23    verified: error +3.329s -> +0.015s
+```
+
+The camera holds a clock, drifts, reports whole frames and nothing finer, and
+accepts a write — after which it reports the time it was told rather than the
+time it had. That last sentence is the whole point: every other part of this
+program exists to get that one moment right, and until now it could only be
+reached with a camera switched on in front of somebody.
+
+Two things it models on purpose, because leaving them out makes the fake worse
+than useless — it makes it *convincing* and wrong:
+
+* **The RTC carries whole seconds.** Writing the truncated value of an
+  arbitrary instant leaves the camera behind by the fraction that was dropped.
+  That is the reason the daemon aims a write at a second boundary instead of
+  sending whenever it is ready, and a fake without it would let a version that
+  had forgotten to align its writes pass.
+
+* **A control packet takes time to land.** The daemon sends `lead` early
+  expecting the packet to spend that long in transit; if the two differ the
+  camera ends up wrong by exactly the difference, and that difference is what
+  the lead-learning loop converges on. The first version of this fake applied
+  writes instantly, so every write left the camera one whole lead fast — a
+  +54 ms residual against a 50 ms lead — and the loop had nothing to learn
+  from. `cam,...,<write_latency_s>` sets it; the default is the 42 ms a real
+  Blackmagic link measured at.
+
+It is deliberately obedient otherwise. There is no failed write, no dropped
+connection, no camera reporting a rate it is not running at. Those are worth
+having and are not here; when they arrive they belong in `FakeCamera` as flags,
+so a spec can ask for them by name.
+
 ## What it does not do
 
 It is not a simulation of Bluetooth. There is no advertising jitter, no packet
-loss, no connection state machine, and the timing is a sleep in a loop rather
-than a radio. It answers "what does the program above do when it is told these
-things", which is the question that has been unanswerable — not "does the radio
-work", which only hardware can answer.
+loss, and the timing is a sleep in a loop rather than a radio. It answers "what
+does the program above do when it is told these things", which is the question
+that has been unanswerable — not "does the radio work", which only hardware can
+answer.
+
+**It cannot close out the hardware verification `doc/KNOWN_ISSUES.md` is
+waiting on.** A fake camera applies a write when it is told to; a real one has
+a radio, a stack and a firmware between the packet and the clock, and the
+number that matters is how long that takes. `doc/dongle-notes.md` draws the
+line between what is pinned to a published vector and what is not, and
+everything here is on the far side of it: pinned to a model, which is a
+statement about this program's understanding rather than about a camera.
 
 The things it *can* arrange that hardware cannot, on demand:
 

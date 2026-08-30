@@ -31,7 +31,10 @@ code existed twice and was debugged once. `octomancer-sync --daemon` is the
 replacement — one process, one event loop, no threads — and `doc/box-notes.md`
 explains what is given up with it. It is not the daemon you should be running
 yet: on a Mac the only asynchronous camera backend is the dongle's, so without
-one plugged in it listens, answers, and syncs nothing. Until it takes over,
+one plugged in it listens, answers, and syncs nothing. With one plugged in it
+now does both jobs on that single radio — hearing the timecode boxes while it
+looks for a camera — which is the arrangement the box will have to live with.
+Until it takes over,
 what protects a recording stops being a binary that structurally cannot write
 and becomes `cameras.conf`, which disables writes for any camera nobody has
 named.

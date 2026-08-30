@@ -2,7 +2,7 @@
 
 *Written 2026-08-29, and added to the same day when the sync daemon was
 built: everything below that describes the daemon as future work has been
-corrected in place, and the section "One radio is one job" is a thing running
+corrected in place, and the section "One radio, several jobs" is a thing running
 it taught. No firmware exists yet. Everything below is either
 measured on this machine and said so, checked against the source and cited, or
 marked **(unverified)**. The Nordic has never held a camera link, never
@@ -157,7 +157,7 @@ The second measurement is the one that made this cheap rather than alarming.
 > | file | bytes | file | bytes |
 > |---|---|---|---|
 > | `hcilink.cc` | 25040 | `camconf.cc` | 9306 |
-> | `camera_hci.cc` | 18383 | `proto.cc` | 9035 |
+> | `camera_hci.cc` | 18719 | `proto.cc` | 9035 |
 > | `control.cc` | 16450 | `registry.cc` | 8521 |
 > | `hci.cc` | 11787 | `bmd.cc` | 5394 |
 > | `att.cc` | 10232 | `camsync.cc` | 5148 |
@@ -167,7 +167,8 @@ The second measurement is the one that made this cheap rather than alarming.
 > | `jsonlog.cc` | 2519 | `loopfake.cc` | 2468 |
 > | `logscan.cc` | 2427 | `pairing.cc` | 2120 |
 > | `tentacle.cc` | 1401 | `timeutil.cc` | 1197 |
-> | `syncd.cc` | 19751 | `escape.cc` | 317 |
+> | `syncd.cc` | 20011 | `escape.cc` | 317 |
+> | `hcishare.cc` | 8024 | `scanner_hci.cc` | 2462 |
 >
 > Only `camdb.cc` fails to port, because it is a file-backed database -- and
 > on-box logging is excluded by design anyway. Earlier failures on `gmtime_r`,
@@ -175,21 +176,25 @@ The second measurement is the one that made this cheap rather than alarming.
 > `__STRICT_ANSI__`; `-std=gnu++17` fixes them.
 
 That table is the whole tree, which is not what the firmware links. The set the
-box actually needs -- the HCI host and its camera client, the crypto and
-pairing under them, the sync arithmetic, the loop, the message codec, the
-roster and now the daemon that drives them -- comes to **121 KB against a
-408 KB slot, or 30% of it**. There is room, and there is room by a factor of
-three.
+box actually needs -- the HCI host and its sharing layer, the scanner and the
+camera client on top of them, the crypto and pairing underneath, the sync
+arithmetic, the loop, the message codec, the roster and the daemon that drives
+all of it -- comes to **131 KB against a 408 KB slot, or 32% of it**. There is
+room, and there is room by a factor of three.
 
-> **Re-measured 2026-08-29 with `src/syncd.cc` in it.** The set was 101 KB
-> before the daemon; the daemon is 19751 bytes of it. `camconf.cc` is excluded
-> from that sum and from the ones before it, because it reads a file and the
-> box has no filesystem -- permission will have to arrive over the control
-> protocol instead. The three files that deliberately do *not* cross-compile
-> are the seam working as intended: `loop_posix.cc` on `poll.h`, `boxsock.cc`
-> on `sys/socket.h`, and `scanbridge.cc` on `std::mutex` -- the last one being
-> a file that exists only to carry another thread's work to this one, on a
-> target that has no other thread.
+> **Re-measured 2026-08-29, a third time, with `src/hcishare.cc` in it.** The
+> set was 101 KB before the sync daemon and 121 KB with it. Sharing the radio
+> added 11 KB: 8024 bytes of `hcishare.cc`, 336 more in `camera_hci.cc`, and
+> 2462 for `scanner_hci.cc` -- which was missing from the two earlier sums and
+> should not have been, because a box that cannot scan has nothing to sync to.
+>
+> `camconf.cc` is excluded from all three, because it reads a file and the box
+> has no filesystem -- permission will have to arrive over the control protocol
+> instead. The three files that deliberately do *not* cross-compile are the
+> seam working as intended: `loop_posix.cc` on `poll.h`, `boxsock.cc` on
+> `sys/socket.h`, and `scanbridge.cc` on `std::mutex` -- the last one being a
+> file that exists only to carry another thread's work to this one, on a target
+> that has no other thread.
 
 ### De-threading made the HCI host twice as big
 
@@ -439,37 +444,70 @@ that completion is entitled to call `connect()` again. Every asynchronous
 interface in this program should hold to it; `tests/test_hcilink.cc` pins it
 for the HCI host.
 
-## One radio is one job, and finding that out cost a live run
+## One radio, several jobs, and finding that out cost a live run
 
-The first time the daemon was started with a dongle plugged in, it reported
-the radio powering off. Nothing was wrong with the dongle.
+The first time the daemon was started with a dongle plugged in, it reported the
+radio powering off. Nothing was wrong with the dongle.
 
 **One dongle is one HCI link, and the scanner and the camera each opened their
 own.** macOS does not refuse the second open -- a `cu.*` device hands out
 another descriptor without complaint -- so two `hci::Link`s read the same byte
 stream, each sees the other's replies as corruption, and the link closes.
-`lsof` showed one process holding the port twice, which is what made it
-obvious and would not have been obvious from the log.
+`lsof` showed one process holding the port twice, which is what made it obvious
+and would not have been obvious from the log.
 
-The Mac can work around this, because it has two radios:
+The first fix was a workaround: give each radio one job, so the dongle either
+listened or drove the camera but never both. That kept the Mac working and left
+the box with nothing, since the box has one radio and must do both.
 
-| | listens | drives the camera |
-|---|---|---|
-| `--radio dongle` | the dongle | nothing |
-| `--radio corebluetooth` | this Mac | the dongle, if one is plugged in |
+**The real fix is `src/hcishare.h`.** The program that runs opens one
+`hci::Link` and hands out `SharedLink::User` subscriptions; the scanner takes
+one and the camera takes another. Three things are genuinely contended and are
+arbitrated there rather than fought over:
 
-The second row is the useful arrangement on a desk and is what the live run
-above used. The choice is made in the daemon rather than in the radio
-factories, because it is a statement about how many links there are rather
-than about which radio is better.
+| contended | resolution |
+|---|---|
+| whether to scan | reference counted; the radio scans if anybody wants it |
+| passive or active | union — active wins, and the passive user loses nothing |
+| the scan across a connection | restored after the connection is **up**, not only after it fails |
 
-**The box cannot work around it**, and this is now the first item in
-`doc/TODO.md`. It has one radio, and the daemon there has to scan and hold a
-camera at once. What is in the way is not the controller -- the nRF52840's is
-expected to manage concurrent roles, which is separately unverified above --
-but `src/hcilink.h`'s one-handler-per-link model: `set_closed_handler`,
-`set_att_handler` and `set_smp_handler` each hold one function, and the
-scanner and the camera both want the first.
+The third is not a detail. `Link::connect` has to stop scanning, because a
+controller cannot scan and initiate at once, and by itself it puts the scan
+back only when the attempt failed. On a desk that was invisible. On a rig it
+means the daemon goes deaf to the Tentacle broadcast for the length of a
+connect-pair-write — which is to say, for exactly the window in which the
+reference clock is the thing being used. Routing `connect` through a `User` is
+what makes the restore unconditional.
+
+There is a related trap underneath it, which the tests pin because nothing
+about it is visible in a log. `Link`'s own restore starts the scan **passive**,
+whatever it was before. A shared layer that trusted its own record of the
+parameters would hand the camera back a silently downgraded scan, and the
+symptom would be a camera that stopped advertising a name it had always
+advertised. So after any connection attempt the parameters are re-applied
+rather than assumed.
+
+> **Measured 2026-08-29, on the dongle at `/dev/cu.usbmodem212101`.**
+> `octomancer-sync --daemon --radio dongle` — the configuration that used to
+> fail — ran four cycles: one open file descriptor on the port, no
+> `poweredOff`, and a bench of −3.56 s from two boxes with a 3.7 ms spread that
+> held across three separate 20-second camera scans. Queried over the box
+> socket **during** a camera scan, both Tentacles showed `age=0.1` and their
+> sample counts climbed by about seven a second each — so the listener was
+> genuinely still hearing the room while the other half of the radio was
+> looking for a camera. `--radio corebluetooth` still works and still hears
+> more boxes (four, at a 9 ms spread), because it is a better antenna in a
+> worse position for timing.
+
+What is still **(unverified)** is the same thing that was unverified before:
+the camera is switched off, so no connection has been made over the dongle, and
+the connect-restores-the-scan behaviour above is pinned by
+`tests/test_hcishare.cc` against a scripted controller and by nothing else.
+
+What is *not* arbitrated, and is written down rather than policed: ATT, SMP,
+advertising and raw commands are reached through `User::link()` and have
+exactly one owner in every program that exists. Two things doing ATT on one
+link would collide and nothing would notice.
 
 ## What lives in flash
 

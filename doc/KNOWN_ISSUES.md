@@ -220,17 +220,29 @@ answer.
 
 **What would settle the rest of it:** a camera, switched on, and one cycle.
 
-### The daemon and the scanner cannot share one dongle
+### Sharing one dongle: fixed, and what is still unproven about it
 
-`hci::Link` has one closed handler, one ATT handler and one SMP handler, so
-the scanner and the camera cannot both attach to a link. Each therefore opens
-its own -- over the same serial port, which macOS permits -- and the two read
-the same byte stream until it collapses, reported as the radio powering off.
+*Was: the scanner and the camera each opened their own `hci::Link` over the
+same serial port, which macOS permits, and the two read the same byte stream
+until it collapsed -- reported as the radio powering off.*
 
-On a Mac this is worked around by giving each radio one job: `--radio dongle`
-listens and has no camera, `--radio corebluetooth` listens on this Mac and
-leaves the dongle for the camera. On the box there is one radio and no
-workaround, which is why `doc/TODO.md` now opens with it.
+`src/hcishare.h` is the fix. The daemon owns one link and hands out
+subscriptions; scanning is reference counted, active beats passive, and the
+scan is restored after a connection comes **up** rather than only after one
+fails. `--radio dongle` now listens and drives the camera on the same radio,
+which is what the box will have to do. Verified on 2026-08-29: four cycles,
+one file descriptor on the port, and the Tentacle roster still ageing 0.1 s
+during a camera scan.
+
+What is **not** verified is the half that needs a camera. No connection has
+been made over the dongle, so "the scan comes back after a successful connect"
+is pinned by `tests/test_hcishare.cc` against a scripted controller and by
+nothing on real hardware. The same sentence as everywhere else in this file: a
+camera, switched on, and one cycle would settle it.
+
+The limitation that remains by design: ATT, SMP, advertising and raw commands
+are *not* arbitrated. They are reached through `User::link()` and have one
+owner by convention. Two things doing ATT on one link would collide silently.
 
 ### `read_status()` is gone rather than stubbed
 

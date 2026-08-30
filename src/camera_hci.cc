@@ -21,25 +21,51 @@ HciCamera::~HciCamera() {
   if (!loop_) return;
   loop_->cancel(pairing_timer_);
   loop_->cancel(scan_timer_);
+  // Destroying the user withdraws this camera's share of the radio, so a
+  // camera torn down mid-scan does not leave the dongle scanning actively for
+  // a listener that only ever wanted passive.
+  user_.reset();
 }
 
 std::unique_ptr<HciCamera> HciCamera::open(Loop* loop, DoneHandler on_ready,
                                            std::string* err) {
-  std::unique_ptr<HciCamera> cam(new HciCamera(loop));
-  cam->on_ready_ = std::move(on_ready);
-
   hci::Link::Options opts;
   opts.device = radio_options().device;
   opts.trace = radio_options().trace;
 
-  HciCamera* raw = cam.get();
-  cam->link_ = hci::Link::open(
-      loop, opts,
-      [raw](bool ok, const std::string& why) { raw->on_ready(ok, why); }, err);
-  if (!cam->link_) return nullptr;
+  std::unique_ptr<hci::SharedLink> radio =
+      hci::SharedLink::open(loop, opts, err);
+  if (!radio) return nullptr;
 
-  cam->link_->set_connection_handlers(
+  std::unique_ptr<HciCamera> cam =
+      attach(loop, radio.get(), std::move(on_ready), err);
+  if (!cam) return nullptr;
+  // Taken last, so that a failure above leaves the radio to be closed here
+  // rather than half-owned by a camera that was never returned.
+  cam->own_ = std::move(radio);
+  return cam;
+}
+
+std::unique_ptr<HciCamera> HciCamera::attach(Loop* loop,
+                                             hci::SharedLink* radio,
+                                             DoneHandler on_ready,
+                                             std::string* err) {
+  if (!radio) {
+    if (err) *err = "no radio";
+    return nullptr;
+  }
+  std::unique_ptr<HciCamera> cam(new HciCamera(loop));
+  cam->on_ready_ = std::move(on_ready);
+  cam->user_ = radio->add_user("camera");
+  cam->link_ = cam->user_->link();
+
+  HciCamera* raw = cam.get();
+  // Connections are fanned out to every user of the radio; in practice this is
+  // the only one that has any, because a controller has one initiator.
+  cam->user_->set_connection_handlers(
       nullptr, [raw](uint16_t handle, uint8_t) { raw->on_gone(handle); });
+  // ATT and SMP are not shared and are not arbitrated. There is one camera per
+  // radio; see the note at the top of src/hcishare.h.
   cam->link_->set_att_handler(
       [raw](uint16_t conn, const std::vector<uint8_t>& pdu) {
         raw->on_att(conn, pdu);
@@ -48,6 +74,8 @@ std::unique_ptr<HciCamera> HciCamera::open(Loop* loop, DoneHandler on_ready,
       [raw](uint16_t conn, const std::vector<uint8_t>& pdu) {
         raw->on_smp(conn, pdu);
       });
+  cam->user_->when_ready(
+      [raw](bool ok, const std::string& why) { raw->on_ready(ok, why); });
   return cam;
 }
 
@@ -99,8 +127,8 @@ void HciCamera::scan(double seconds, const std::string& name_hint,
   // An active scan, so a device that keeps its name in the scan response still
   // gets one. Unlike the passive Tentacle scan, here the name is worth
   // provoking: it is what a person recognises the camera by.
-  link_->start_scan(
-      /*active=*/true, /*filter_duplicates=*/false,
+  user_->start_scan(
+      /*active=*/true,
       [state, camera_service, fdac](const hci::AdvReport& r) {
         hci::AdInfo info = hci::summarise_ad(hci::parse_ad(r.data));
         std::string id = hci::address_to_string(r.addr);
@@ -135,7 +163,10 @@ void HciCamera::scan(double seconds, const std::string& name_hint,
         scan_timer_ = loop_->after(seconds, [this, state, name_hint, want_all,
                                              done] {
           scan_timer_ = kNoTimer;
-          link_->stop_scan(nullptr);
+          // Stop wanting the scan, which is not the same as stopping the
+          // radio: the Tentacle listener sharing this dongle usually still
+          // wants it, and keeping it running is the point.
+          user_->stop_scan(nullptr);
 
           ScanResult result;
           result.total = static_cast<int>(state->seen.size());
@@ -207,7 +238,11 @@ void HciCamera::try_connect(const hci::Address& peer, size_t type_index,
 
   hci::Address target = peer;
   target.type = kTypes[type_index];
-  link_->connect(
+  // Through the user rather than the link, so that the scan the controller has
+  // to drop in order to initiate is put back once the connection is up. The
+  // sync daemon's reference clock is the Tentacle broadcast, and it is needed
+  // during the connection, not only before it.
+  user_->connect(
       target, timeout / 2.0,
       [this, peer, target, type_index, timeout, done](
           bool ok, uint16_t handle, const std::string& err) {

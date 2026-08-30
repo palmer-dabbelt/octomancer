@@ -43,6 +43,7 @@
 #include "camera.h"
 #include "hci.h"
 #include "hcilink.h"
+#include "hcishare.h"
 #include "loop.h"
 #include "smp.h"
 
@@ -61,11 +62,20 @@ class HciCamera : public AsyncCamera {
   // ask -- under launchd there is not.
   using PasskeyProvider = std::function<bool(uint32_t* passkey)>;
 
-  // Opens the dongle. As with hci::Link, the port either opens or does not and
-  // says so straight away, while the controller coming up is several round
-  // trips later and arrives at `on_ready`.
+  // Opens the dongle, for this camera alone. As with hci::Link, the port
+  // either opens or does not and says so straight away, while the controller
+  // coming up is several round trips later and arrives at `on_ready`.
   static std::unique_ptr<HciCamera> open(Loop* loop, DoneHandler on_ready,
                                          std::string* err);
+
+  // The same camera, over a radio somebody else owns. This is the one the sync
+  // daemon wants: it also has a scanner listening to Tentacle boxes, and two
+  // Links on one serial port is the failure src/hcishare.h was written to end.
+  //
+  // The SharedLink must outlive the camera.
+  static std::unique_ptr<HciCamera> attach(Loop* loop, hci::SharedLink* radio,
+                                           DoneHandler on_ready,
+                                           std::string* err);
   ~HciCamera() override;
 
   HciCamera(const HciCamera&) = delete;
@@ -158,7 +168,16 @@ class HciCamera : public AsyncCamera {
   void note(const CameraView& v);
 
   Loop* loop_ = nullptr;
-  std::unique_ptr<hci::Link> link_;
+  // The radio, when this camera opened one for itself. Declared before the
+  // user so that it is destroyed after it.
+  std::unique_ptr<hci::SharedLink> own_;
+  // This camera's share of the radio: its scan, its connection, and being told
+  // when the dongle goes away.
+  std::unique_ptr<hci::SharedLink::User> user_;
+  // The controller underneath, for ATT, SMP and encryption -- the parts that
+  // have exactly one owner and so need no arbitration. Owned by the SharedLink,
+  // never by this.
+  hci::Link* link_ = nullptr;
   DoneHandler on_ready_;
   PasskeyProvider passkey_;
   ViewHandler on_view_;

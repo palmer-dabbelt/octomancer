@@ -23,6 +23,10 @@
 
 namespace octo {
 
+namespace hci {
+class SharedLink;
+}  // namespace hci
+
 enum class RadioKind {
   // Use the dongle if one is plugged in, otherwise CoreBluetooth. A dongle
   // that is present but broken is an error rather than a silent fallback:
@@ -92,6 +96,20 @@ std::string describe_radio();
 std::unique_ptr<Scanner> make_hci_scanner(Scanner::AdvertHandler on_advert,
                                           Scanner::SightingHandler on_camera,
                                           Scanner::StateHandler on_state);
+
+// The same scanner, over a radio somebody else owns.
+//
+// This is the one a program with more than one job for the dongle wants. The
+// factory above opens the port itself, which is correct for a program that
+// only listens and wrong for one that also drives a camera: two Links on one
+// serial port is not refused and presents as a radio that powered off. See
+// src/hcishare.h, which exists because of exactly that.
+//
+// The SharedLink must outlive the Scanner.
+std::unique_ptr<Scanner> make_hci_scanner_on(hci::SharedLink* radio,
+                                             Scanner::AdvertHandler on_advert,
+                                             Scanner::SightingHandler on_camera,
+                                             Scanner::StateHandler on_state);
 
 // There is deliberately no make_hci_camera_link().
 //

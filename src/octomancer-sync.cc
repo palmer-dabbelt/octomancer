@@ -43,6 +43,7 @@
 #include "jsonlog.h"
 #include "boxsock.h"
 #include "camhci.h"
+#include "hcishare.h"
 #include "hciport.h"
 #include "registry.h"
 #include "scanbridge.h"
@@ -2030,42 +2031,48 @@ int run_daemon(Options& opt) {
     return 1;
   }
 
-  // The camera, and the honest statement of what is available.
+  // One radio, two jobs.
   //
-  // CameraLink blocks by contract and cannot be driven from a loop, so the
-  // only asynchronous camera backend that exists is the dongle's. That makes
-  // the arithmetic here awkward and worth spelling out, because getting it
-  // wrong is invisible: **one dongle is one HCI link, and the scanner and the
-  // camera each want their own.** Opening the port twice is not refused by
-  // macOS -- a cu.* device happily hands out a second descriptor -- so two
-  // links read the same byte stream, each sees the other's replies as
-  // corruption, and the whole thing presents as a radio that powered off.
-  // That is exactly what the first run of this daemon did.
+  // The daemon listens to Tentacle boxes continuously and it goes and connects
+  // to a camera, and for a while each half opened the dongle for itself -- one
+  // hci::Link in scanner_hci.cc, another in camera_hci.cc, both on the same
+  // serial port. macOS does not refuse the second open of a cu.* device, so
+  // two HCI hosts read one byte stream, each took the other's replies for
+  // corruption, and it surfaced as a radio that had powered off. See
+  // src/hcishare.h.
   //
-  // So the rule is one job per radio:
+  // So the daemon owns the link, and hands out a share of it to each half.
+  // Which radio listens is now a preference rather than a workaround:
   //
-  //   --radio dongle       the dongle listens; there is no camera.
-  //   --radio corebluetooth  CoreBluetooth listens and the dongle, if one is
-  //                        plugged in, drives the camera. On a Mac this is
-  //                        the useful configuration and it is why the choice
-  //                        is made here rather than by the radio factories.
-  //
-  // On the box neither applies: there is one radio and one link, and the
-  // scanner and the camera will have to share it. That is a change to
-  // src/hcilink.h -- one handler per link is what stops it today -- and it is
-  // the next thing this needs.
+  //   --radio dongle         the dongle listens *and* drives the camera.
+  //   --radio corebluetooth  CoreBluetooth listens, the dongle drives the
+  //                          camera. Better on a Mac -- two antennas do two
+  //                          jobs -- and it is what the box cannot do.
   const bool listening_on_dongle = octo::dongle_selected();
   const bool have_dongle = listening_on_dongle ||
                            !octo::radio_options().device.empty() ||
                            !octo::hci::list_candidate_ports().empty();
+
+  std::unique_ptr<octo::hci::SharedLink> radio;
+  if (have_dongle) {
+    octo::hci::Link::Options lopts;
+    lopts.device = octo::radio_options().device;
+    lopts.trace = octo::radio_options().trace;
+    radio = octo::hci::SharedLink::open(&loop, lopts, &err);
+    if (!radio && listening_on_dongle) {
+      std::fprintf(stderr, "octomancer-sync: %s\n", err.c_str());
+      return 1;
+    }
+    if (!radio) {
+      say("no dongle (%s) -- listening only, with no camera backend",
+          err.c_str());
+    }
+  }
+
   std::unique_ptr<octo::HciCamera> camera;
-  if (listening_on_dongle) {
-    say("the dongle is being used to listen, so there is no camera backend --"
-        " run with --radio corebluetooth to listen on this Mac and leave the"
-        " dongle for the camera");
-  } else if (have_dongle) {
-    camera = octo::HciCamera::open(
-        &loop,
+  if (radio) {
+    camera = octo::HciCamera::attach(
+        &loop, radio.get(),
         [](bool ok, const std::string& why) {
           if (ok) {
             say("dongle ready");
@@ -2154,9 +2161,20 @@ int run_daemon(Options& opt) {
   bridge.on_state(
       [&daemon](const std::string& state) { daemon.set_radio_state(state); });
 
-  auto scanner = octo::make_ble_scanner(bridge.advert_sink(),
+  // The factory in radio.cc chooses by --radio and opens its own link when it
+  // chooses the dongle, which is exactly what must not happen here: the radio
+  // already exists and the camera is on it. So the choice is made here and the
+  // dongle scanner is handed the link rather than left to find one.
+  std::unique_ptr<octo::Scanner> scanner;
+  if (listening_on_dongle) {
+    scanner = octo::make_hci_scanner_on(radio.get(), bridge.advert_sink(),
                                         bridge.camera_sink(),
                                         bridge.state_sink());
+  } else {
+    scanner = octo::make_ble_scanner(bridge.advert_sink(),
+                                     bridge.camera_sink(),
+                                     bridge.state_sink());
+  }
   if (!scanner || !scanner->start(&err)) {
     std::fprintf(stderr, "octomancer-sync: cannot start the radio: %s\n",
                  err.empty() ? "unsupported on this host" : err.c_str());

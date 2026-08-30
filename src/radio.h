@@ -33,6 +33,11 @@ enum class RadioKind {
   // where there is no host radio at all. See choose_dongle() for why.
   kAuto,
   kCoreBluetooth,
+  // Drive a dongle's radio directly over HCI from this process. Transitional:
+  // in the finished system a dongle runs its own sync daemon and octomancerd
+  // speaks the box protocol to it, rather than any Mac process reaching
+  // through it. Still the only way to exercise the dongle's camera path until
+  // there is firmware.
   kDongle,
   // No radio at all: a bench of boxes and a camera that are not there, built
   // from OCTOMANCER_FAKE. Never selected by `auto` -- it has to be asked for,
@@ -105,17 +110,32 @@ bool dongle_selected();
 //   port_present  some cu.usbmodem*/ttyACM* exists
 //
 // The interesting case is kAuto with both a host radio and a port, and the
-// answer is *no*. `auto` used to mean "a dongle if one is plugged in", which
-// reads as helpful and is not: nothing about a serial port says it is a
-// radio. A Zephyr board, a debug probe, a printer and a dongle are the same
-// four characters in /dev, so plugging in any of them silently moved every
-// program in this project onto a port that answers nothing -- which is
-// exactly what happened on 2026-08-30, and cost a morning's bench.
+// answer is *no* -- because a dongle is not a radio this process should be
+// choosing between. It is a second radio in the *system*, running a sync
+// daemon of its own, and the only program with any business knowing it exists
+// is octomancerd. See "Two radios, and which program knows" in
+// doc/box-notes.md.
 //
-// So `auto` now prefers the radio that is known to be one, and a dongle on a
-// Mac has to be asked for. That is a real cost -- `--radio dongle` where
-// nothing was needed before -- and it buys the property that mattered:
-// plugging a USB device into a Mac never takes the Bluetooth away.
+// That distinction is worth being exact about, because the first version of
+// this rule reached the same answer by the wrong route. It argued that a
+// serial port might be a printer -- true, and beside the point. If `auto` had
+// been reliably able to tell a dongle from a debug probe it would still be
+// wrong to take it: the Mac's sync daemon uses the Mac's radio, and the
+// dongle's uses the dongle's, and neither knows about the other. Reasoning
+// from "we cannot be sure it is a dongle" invites somebody to add a USB
+// vendor-id check later and reintroduce the whole problem while believing
+// they have fixed it.
+//
+// `auto` used to mean "a dongle if one is plugged in". That collapsed the two
+// radios into one and handed it to whichever program asked first, so plugging
+// a dongle into a USB port moved octomancerd off CoreBluetooth on its next
+// restart and took the port exclusively -- which is what happened on
+// 2026-08-30, and cost a morning's bench.
+//
+// A dongle can still be driven directly with --radio dongle, and that mode is
+// not going away: it is how the dongle's camera path is exercised before there
+// is firmware to run a sync daemon on it. It is a transitional arrangement
+// rather than the shape of the system.
 bool choose_dongle(RadioKind kind, bool named, bool host_radio,
                    bool port_present);
 

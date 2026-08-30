@@ -895,13 +895,25 @@ actually transmitted, and act as a peripheral on somebody else's terms. That
 last one is why it exists — see `doc/zoom-bta1-notes.md` for a week spent
 losing to `CBPeripheralManager`.
 
-The choice is made at run time and defaults to whichever radio is present:
+The choice is made at run time, and a program running on this Mac uses this
+Mac's radio:
 
 ```
-octomancerd                        # dongle if one is plugged in, else CoreBluetooth
-octomancerd --radio corebluetooth  # or insist
+octomancerd                        # CoreBluetooth, whatever is in the USB ports
+octomancerd --radio dongle         # drive a dongle's radio directly instead
 octomancer-sync --dongle /dev/cu.usbmodem1101
 ```
+
+A dongle plugged into a USB port is **a second radio**, not a better choice of
+first one. It runs a sync daemon of its own, and reaching it is octomancerd's
+job — over a serial port when it is plugged in here, over the air when it is
+not. Nothing else in the system knows a dongle exists. So `auto` never takes
+one, however plainly it is there, and `--radio dongle` is for driving a dongle
+by hand while there is no firmware to run a sync daemon on it.
+
+`auto` used to mean "a dongle if one is plugged in". That collapsed the two
+radios into one and handed it to whichever program started first; the morning
+it cost is in `doc/box-notes.md` under "Two radios, and which program knows".
 
 `OCTOMANCER_RADIO`, `OCTOMANCER_DONGLE` and `OCTOMANCER_HCI_TRACE` do the same
 from the environment, which is what the launchd agents need.

@@ -44,16 +44,28 @@ std::string describe_radio() {
     return "dongle (none found)";
   }
 #ifdef OCTO_HAVE_COREBLUETOOTH
-  // Naming the port that is being passed over, when there is one. Silence here
-  // is what made the 2026-08-30 outage take a morning to find: the daemon had
-  // quietly changed radios and every line it printed afterwards was the same
-  // as before. Saying "there is a dongle and I am not using it" costs one
-  // clause and answers the question somebody is about to ask.
+  // Naming the second radio, when there is one. Silence here is what made the
+  // 2026-08-30 outage take a morning to find: the daemon had quietly changed
+  // radios and every line it printed afterwards was the same as before.
+  //
+  // The wording is program-neutral, and has been got wrong twice. First it
+  // said "pass --radio dongle to use it", which recommends collapsing the two
+  // radios back into one. Then it said the dongle was "octomancerd's to
+  // reach", which reads absurdly when the program printing it *is*
+  // octomancerd -- this function is shared by every binary here and cannot
+  // refer to any of them.
+  //
+  // So it states the fact and leaves the reader to it: there is a second
+  // radio, it is not being driven from here, and there is a flag if driving it
+  // from here is what you actually meant. The flag is mentioned as a
+  // parenthesis rather than as advice, because it is scaffolding -- see
+  // "Two radios, and which program knows" in doc/box-notes.md.
   if (opts.kind == RadioKind::kAuto) {
     std::vector<std::string> ports = hci::list_candidate_ports();
     if (!ports.empty()) {
-      return "CoreBluetooth (ignoring the port at " + ports.front() +
-             "; pass --radio dongle to use it)";
+      return "CoreBluetooth; a dongle at " + ports.front() +
+             " is a second radio and is left alone (--radio dongle drives it"
+             " directly)";
     }
   }
   return "CoreBluetooth";

@@ -125,10 +125,11 @@ bool choose_dongle(RadioKind kind, bool named, bool host_radio,
   // Naming a port is asking for it, whatever `kind` says: there is no reason
   // to give a path to a program and mean something else by it.
   if (named) return true;
-  // kAuto with a radio of our own: use it. A port might be a dongle and might
-  // be a breadboard, and there is no way to tell without opening it -- which
-  // this function must not do, being called during argument parsing and on
-  // every factory call.
+  // kAuto with a radio of our own: use it, and leave the port alone. Not
+  // because the port might be a breadboard -- see radio.h -- but because a
+  // dongle is a second radio with its own sync daemon on it, and reaching
+  // through it from here would be one program driving two radios while
+  // another program drove neither.
   if (host_radio) return false;
   return port_present;
 }

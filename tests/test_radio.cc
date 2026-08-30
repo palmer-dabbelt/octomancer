@@ -1,9 +1,25 @@
 // Which radio a program uses, and how it is allowed to change.
 //
-// This file exists because of a bench outage on 2026-08-30. `--radio auto`
-// meant "a dongle if one is plugged in", so a Zephyr board left in a USB port
-// from an unrelated experiment moved octomancerd off CoreBluetooth and onto a
-// serial port that answered nothing. The daemon came up, took the port
+// The property being pinned is a statement about the system's shape, not a
+// defensive one: *a dongle is a second radio, with its own sync daemon on it,
+// and the Mac's programs use the Mac's radio.* The two are independent. The
+// sync daemon running here does not know whether a dongle is plugged in, or
+// whether one is reachable over the air; only octomancerd knows a dongle
+// exists, and it reaches the sync daemon on it over the box protocol rather
+// than reaching through it to a radio. doc/box-notes.md has the layering.
+//
+// It is worth stating that way round, because the first version of this file
+// argued the same conclusion from the wrong premise -- that a serial port
+// might be a printer, so `auto` cannot safely assume a dongle. True, and
+// beside the point: even a port that announced itself as a dongle in
+// unambiguous letters would still not be this process's radio to take. The
+// weaker argument invites somebody to add a USB vendor-id check and
+// reintroduce the whole problem believing they have fixed it.
+//
+// The rule got written because collapsing the two radios into one caused a
+// bench outage on 2026-08-30. `--radio auto` meant "a dongle if one is plugged
+// in", so a board left in a USB port from an unrelated experiment moved
+// octomancerd off CoreBluetooth on its next restart, took the port
 // exclusively, reported `"radio":"unknown","devices":0,"adverts":0`, and said
 // nothing about having changed its mind. Five timecode boxes went from being
 // heard 871,832 times to not existing.
@@ -12,10 +28,6 @@
 // only reason it can be tested at all: the old one walked /dev, so the
 // interesting case -- a host radio and a port, both present -- could not be
 // arranged on a machine that did not happen to be in that state.
-//
-// What is being pinned here is a safety property rather than a preference:
-// *plugging a USB device into a Mac never takes the Bluetooth away.* Every
-// other case is a detail; that one is the bug.
 #include "harness.h"
 #include "radio.h"
 
@@ -31,8 +43,8 @@ constexpr bool kNamed = true, kUnnamed = false;
 constexpr bool kHostRadio = true, kNoHostRadio = false;
 constexpr bool kPort = true, kNoPort = false;
 
-// The regression, stated as plainly as it can be. A Mac with its own radio and
-// something in a USB port keeps its own radio.
+// The shape of the system, stated as plainly as it can be. A Mac with its own
+// radio uses it, and a dongle in a USB port is somebody else's radio.
 void test_auto_keeps_the_host_radio_when_a_port_appears() {
   CHECK_EQ(choose_dongle(RadioKind::kAuto, kUnnamed, kHostRadio, kPort), false);
 }
@@ -64,8 +76,14 @@ void test_auto_with_nothing_at_all_selects_nothing() {
 // Asking for the dongle gets the dongle, including on a Mac, and including
 // when no port is currently visible: the failure a person wants in that case
 // is "the dongle you asked for is not there", not a silent fallback onto a
-// different radio. This is the escape hatch the new rule leaves, so it matters
-// that it is unconditional.
+// different radio.
+//
+// This mode is how the dongle's camera path gets exercised before there is
+// firmware to run a sync daemon on the dongle itself, so it is transitional
+// rather than wrong -- but it is a Mac process reaching through a dongle to a
+// radio, which is not the shape the system is heading for. It matters that it
+// is unconditional: a transitional mode that sometimes silently did something
+// else would be worse than not having it.
 void test_asking_for_the_dongle_always_gets_it() {
   CHECK_EQ(choose_dongle(RadioKind::kDongle, kUnnamed, kHostRadio, kPort),
            true);
@@ -96,9 +114,13 @@ void test_corebluetooth_refuses_the_dongle() {
 }
 
 // A property rather than a case: under `auto`, with a host radio present, the
-// answer does not depend on what is in /dev. This is the outage restated as
-// something that cannot come back by any route -- a later change that adds a
-// third reason to prefer a port has to fail here.
+// answer does not depend on what is in /dev at all.
+//
+// This is the independence the layering rests on, expressed as something that
+// cannot be eroded by degrees. A later change that makes the answer depend on
+// the port again -- however good the reason, and "we can now tell a real
+// dongle from a breadboard" is the good reason to watch for -- has to fail
+// here.
 void test_a_port_cannot_influence_auto_on_a_host_with_a_radio() {
   for (int named = 0; named <= 1; ++named) {
     const bool with_port =

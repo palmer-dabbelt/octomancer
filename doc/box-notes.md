@@ -141,6 +141,53 @@ none of them holding a radio, a camera or a lock. A command-line program that
 runs for forty milliseconds and an app that runs all afternoon are the same
 kind of client.
 
+### Two radios, and which program knows
+
+Plug a dongle into this Mac and there are now **two radios in the system**, not
+one radio with two possible owners. That distinction decides how the whole
+thing is wired, so it is worth stating on its own:
+
+* **The Mac's sync daemon uses the Mac's radio.** It does not know a dongle
+  exists. It does not know whether one is plugged into a USB port next to it,
+  or sitting across the room reachable over the air, or absent entirely. It
+  hears the boxes it can hear and drives the cameras it is paired with, and
+  that is the whole of its world.
+* **The dongle runs a sync daemon of its own**, doing exactly the same job with
+  exactly the same source, over its own radio.
+* **Only octomancerd knows there are two.** It holds a connection to each --
+  a unix socket to the local one, USB CDC or BLE GATT to the dongle's -- and
+  merges what they report.
+
+The two sync daemons are independent and neither is aware of the other. That is
+what makes the arrangement scale to a third radio without any of them changing,
+and it is why "which radio heard this" is a property of a *link* rather than of
+a device (see "The unit is a link, not a device" below).
+
+**So `--radio auto` never selects a dongle on a host that has a radio of its
+own**, and the reason is this section rather than any doubt about what is in
+the USB port. A Mac process reaching through a dongle to a radio would be one
+program driving two radios while another drove none -- the two collapsed back
+into one, with the layering gone and only a flag to show for it.
+
+This was learned the expensive way. `auto` used to mean "a dongle if one is
+plugged in", so a board left in a port from an unrelated experiment moved
+octomancerd off CoreBluetooth on its next restart and took the port
+exclusively. Five timecode boxes went from being heard 871,832 times to not
+existing, and nothing the daemon printed afterwards mentioned that it had
+changed radios. The rule is `octo::choose_dongle` in `src/radiopick.cc` and it
+is tested in `tests/test_radio.cc`, where the property pinned is that a port
+cannot influence the answer *at all* on a host with its own radio.
+
+`--radio dongle` still drives one directly, and that is not going away: it is
+how the dongle's camera path is exercised while there is no firmware to run a
+sync daemon on the dongle itself. It is scaffolding, not the shape of the
+system, and the code says so where somebody might mistake one for the other.
+
+What is **not** built yet is the other half: octomancerd does not connect to a
+dongle over CDC, because nothing outside the tests speaks the box protocol at
+all. Today a dongle in a port is simply named and left alone. See
+`doc/KNOWN_ISSUES.md`.
+
 ### What the sync daemon says, and what it can be told
 
 The point of the split is that layer 3 keeps almost nothing, so the broadcast

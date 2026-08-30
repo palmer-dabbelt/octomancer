@@ -458,6 +458,41 @@ something other than the daemon that serves it, and whoever writes the control
 daemon has something to connect to on their first afternoon. What is still
 true is the entry above: nothing a *person* runs speaks it.
 
+### 4b. A dongle on USB is a second radio nothing reaches
+
+`doc/box-notes.md`'s "Two radios, and which program knows" says a dongle
+plugged into a USB port runs a sync daemon of its own, and that octomancerd
+connects to it over USB CDC exactly as it connects to the local one over a unix
+socket. Neither end of that exists.
+
+The dongle has no firmware, so there is no sync daemon on it to talk to; and
+octomancerd has no CDC transport and no client for the box protocol anyway
+(entry 4 above). So today a dongle in a port is *named* and otherwise ignored —
+`describe_radio()` says "a dongle at /dev/cu.usbmodem… is a second radio and is
+left alone", which is exactly true and is also the whole of what happens.
+
+Be exact about what is and is not missing here, because it is easy to
+overstate. Declining to auto-select the dongle is *finished* and correct: the
+Mac's sync daemon uses the Mac's radio whatever else is plugged in, and that
+holds whether or not the dongle is ever reachable. What is absent is the second
+radio being used at all.
+
+Three separable pieces, in the order they unblock each other:
+
+1. **A CDC transport for the box protocol.** `src/boxsock.h` already says the
+   three transports differ "in framing and in how much fits in one write, and
+   in nothing else", so this is a sibling of `LineServer` over a serial port
+   rather than a new protocol.
+2. **A client for it in octomancerd**, which is entry 2's reversal.
+3. **Firmware**, the long pole, blocked by neither of the above.
+
+Piece 1 can be built and tested against `octomancer-sync --daemon` on this Mac
+through a socat pair, with no dongle involved at all.
+
+**What would settle it:** `octomancer status` listing the dongle as a row of
+its own, with devices behind it reading `NAME (via DONGLE)` — which is what
+`doc/box-notes.md` already says the output looks like.
+
 ### 5. The state broadcast is a poll, and the wrong shape
 
 The model has the sync daemon saying what it knows, unasked, once a second:

@@ -150,13 +150,24 @@ serial port with H:4 packets on it, which is what `hcilink.cc` is expecting.
 
 ## Using it
 
-Nothing needs to be configured when there is exactly one dongle plugged in:
+A dongle has to be asked for. Plugging one in changes nothing about what any
+already-running program uses, which is deliberate — see "Two radios, and which
+program knows" in `doc/box-notes.md`: a dongle is a second radio with its own
+sync daemon, and a Mac process reaching through it would be collapsing the two
+back into one.
 
 ```
-octomancerd                       # picks the dongle if one is there
-octomancerd --radio corebluetooth # or force the Mac's own radio
-octomancerd --dongle /dev/cu.usbmodem1101
+octomancerd                       # this Mac's radio, whatever is plugged in
+octomancerd --radio dongle        # drive the dongle's radio from here instead
+octomancerd --dongle /dev/cu.usbmodem1101   # naming a port is asking for it
 ```
+
+Everything below is about that second form: a Mac process driving a dongle's
+radio over HCI. It is how the dongle is exercised while there is no firmware to
+run a sync daemon on it, and it is scaffolding rather than the finished shape.
+In the finished shape nothing here runs on the Mac at all — the dongle runs the
+same `octomancer-sync` source as its own firmware, and octomancerd speaks the
+box protocol to it.
 
 | Setting | Flag | Environment |
 |---|---|---|

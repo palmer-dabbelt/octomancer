@@ -99,7 +99,10 @@ void usage(FILE* out) {
       "  --min-drift-span SEC  shortest history worth fitting drift to\n"
       "                        (default 900)\n"
       "\n"
-      "  --radio KIND        auto (default), corebluetooth, or dongle\n"
+      "  --radio KIND        auto (default: this host's own radio),\n"
+      "                      corebluetooth, dongle, or fake. A dongle in a USB\n"
+      "                      port is a second radio, not a better first one;\n"
+      "                      auto never takes one. See doc/box-notes.md.\n"
       "  --dongle PORT       the dongle's serial port\n"
       "  --hci-trace         log every HCI packet\n"
       "  --version, --help\n",

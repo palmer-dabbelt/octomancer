@@ -609,3 +609,46 @@ What this does not cover: an image that hangs without ever faulting *and*
 without ever resetting. The guard counts boots, so something has to end the
 boot for it to see anything. A hang before the watchdog starts is still a
 button.
+
+## Be reachable first
+
+The single most useful thing learned from all of the above, and it is an
+ordering rule rather than a fix.
+
+A box with no console can only explain itself to a host that has managed to
+open its port. `CONFIG_CDC_ACM_SERIAL_INITIALIZE_AT_BOOT` brings USB up from a
+`SYS_INIT` at `APPLICATION` level, before `main()` runs -- so the box is
+*capable* of being a serial port well before it does anything interesting. An
+image that then faults while bringing the radio up never finishes enumerating,
+cannot say that is what it was doing, and from the far end is indistinguishable
+from a dead cable.
+
+So `main()` now becomes a port and starts the loop, and everything that might
+not survive -- the radio, the scanner, the sync cycle, the watchdog, even the
+floating-point self-check -- is deferred by two seconds onto that loop. A
+couple of seconds of being nothing but a serial port is the difference between
+a box that fails and a box that fails *and says so*.
+
+Safe mode is the second half. The boot guard already counts consecutive boots
+that did not last; when that count is above one, the deferred work is skipped
+entirely. So the sequence a broken image produces is:
+
+1. first attempt: normal start, dies doing whatever it dies doing
+2. second attempt: safe mode -- a port, a greeting, and the fault record from
+   the first attempt, with none of the code that failed having run
+3. after four: the bootloader, reflashable over the cable
+
+That is three chances to learn something, where before there was a dongle
+that was simply absent from the bus.
+
+### What the bootloader window is worth knowing
+
+A dongle oscillating between its bootloader and a failing app cannot be caught
+by retrying `--flash` in a loop. Measured here: the bootloader is present for
+roughly three seconds at a time, `nrfutil` takes longer than that just to
+start, and the transfer is another ten or twenty. Every attempt failed with
+`FileNotFoundError` on a port that existed when the loop checked and was gone
+by the time the tool opened it.
+
+The button holds DFU open indefinitely, which is what it is for. There is no
+host-side trick that substitutes for it.

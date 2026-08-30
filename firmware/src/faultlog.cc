@@ -139,8 +139,13 @@ FaultRecord take_last_fault() {
   // count deliberately survives: it is what makes a crash loop visible.
   g_retained.magic = 0;
 
-  k_timer_start(&g_settle_timer, K_SECONDS(kSettledSeconds), K_NO_WAIT);
   return out;
+}
+
+uint32_t boot_attempts() { return g_retained.boot_attempts; }
+
+void arm_settle_timer() {
+  k_timer_start(&g_settle_timer, K_SECONDS(kSettledSeconds), K_NO_WAIT);
 }
 
 void mark_run_settled() {

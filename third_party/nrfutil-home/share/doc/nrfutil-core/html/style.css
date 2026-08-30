@@ -1,0 +1,112 @@
+:root {
+    --nordic-blue: #00a9ce;
+    --nordic-blue-slate: #0033a0;
+
+    --nordic-green: #d0df00;
+    --nordic-yellow: #ffcd00;
+    --nordic-red: #ff585d;
+
+    --nordic-dark-grey: #333f48;
+
+    --light-nordic-blue: #d9f3f9;
+    --dark-nordic-blue: #193b55;
+
+    /* Role based */
+    --link-text: var(--nordic-blue-slate);
+    --main-text: #222;
+
+    --background: white;
+    --code-background: var(--light-nordic-blue);
+}
+
+@media (prefers-color-scheme: dark) {
+    :root {
+        --link-text: var(--nordic-blue);
+        --main-text: #c9d1d9;
+
+        --background: #0d1117;
+        --code-background: var(--dark-nordic-blue);
+    }
+}
+
+html {
+    background-color: var(--background);
+    color: var(--main-text);
+    line-height: 1.5rem;
+
+    /* Taken from modern-normalize.css */
+    font-family:
+        system-ui,
+        -apple-system, /* Firefox supports this but not yet `system-ui` */
+        'Segoe UI',
+        Roboto,
+        Helvetica,
+        Arial,
+        sans-serif,
+        'Apple Color Emoji',
+        'Segoe UI Emoji'; /* 2 */
+}
+
+body {
+    padding: 0.5rem;
+}
+
+@media (min-width: 600px) {
+    body {
+        display: flex;
+        justify-content: center;
+    }
+}
+
+main {
+    flex: 0 1 800px;
+}
+
+h2 {
+    border-bottom: 2px solid var(--nordic-blue);
+    margin-top: 3rem;
+    padding-bottom: 5px;
+}
+
+h3 {
+    border-bottom: 2px solid var(--nordic-blue);
+    margin-top: 3rem;
+    padding-bottom: 5px;
+}
+
+h2 + h3 {
+    margin-top: 1rem;
+}
+
+pre code {
+    display: block;
+}
+
+code {
+    background-color: var(--code-background);
+    padding: 0.2rem 0.4rem;
+    border-radius: 4px;
+}
+
+a {
+    color: var(--link-text);
+}
+
+.btn {
+    height: 100px;
+    font-size: 1.2rem;
+
+    padding: 12px 30px;
+
+    background-color: var(--nordic-blue);
+    border: none;
+    border-radius: 4px;
+
+    color: white;
+    cursor: pointer;
+    text-align: center;
+}
+
+p {
+    text-align: left;
+}

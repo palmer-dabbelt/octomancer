@@ -55,6 +55,17 @@ struct FaultRecord {
 // Clears the record, so it is reported once and not on every reconnection.
 FaultRecord take_last_fault();
 
+// How many boots in a row have failed to get anywhere, including this one.
+// One on a healthy start. Two or more means the last attempt did not last, and
+// is the signal to come up in safe mode -- see firmware/src/main.cc.
+uint32_t boot_attempts();
+
+// Start the timer that declares this run a success. Called by main() only for a
+// run that actually tried to do the job: a safe-mode run staying up for a
+// minute proves nothing about the code that was skipped, and letting it clear
+// the count would hide a box that cannot run normally at all.
+void arm_settle_timer();
+
 // One line for a person, in the shape src/boxmsg.h's `say` carries. Empty when
 // there is nothing to report, so the caller can send it or not without asking.
 std::string describe_fault(const FaultRecord& fault);

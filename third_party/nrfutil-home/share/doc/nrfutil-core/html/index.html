@@ -1,0 +1,59 @@
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml" lang="" xml:lang="">
+<head>
+  <meta charset="utf-8" />
+  <meta name="generator" content="pandoc" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=yes" />
+  <title>nrfutil-core documentation</title>
+  <style type="text/css">
+      code{white-space: pre-wrap;}
+      span.smallcaps{font-variant: small-caps;}
+      span.underline{text-decoration: underline;}
+      div.column{display: inline-block; vertical-align: top; width: 50%;}
+  </style>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+<main>
+<header id="title-block-header">
+<h1 class="title">nrfutil-core documentation</h1>
+</header>
+<nav id="TOC">
+<ul>
+<li><a href="#nrf-util-quick-guide">nRF Util quick guide</a><ul>
+<li><a href="#syntax">Syntax</a></li>
+<li><a href="#available-commands">Available commands</a><ul>
+<li><a href="#installing-nrf-util-commands">Installing nRF Util commands</a></li>
+<li><a href="#running-nrf-util-commands">Running nRF Util commands</a></li>
+<li><a href="#upgrading-nrf-util-commands">Upgrading nRF Util commands</a></li>
+</ul></li>
+<li><a href="#versioning">Versioning</a></li>
+<li><a href="#getting-help">Getting help</a></li>
+</ul></li>
+</ul>
+</nav>
+<h1 id="nrf-util-quick-guide">nRF Util quick guide</h1>
+<p>nRF Util is the unified command line utility for Nordic products. nRF Util’s <code>core</code> module provides the framework and integration for all commands supported in the utility.</p>
+<p>See <a href="https://docs.nordicsemi.com/bundle/nrfutil/page/README.html">TechDocs</a> for complete documentation of nRF Util.</p>
+<h2 id="syntax">Syntax</h2>
+<!-- insert command list core: * -->
+<p>To see the complete list of subcommands and available options, run <code>nrfutil --help</code>.</p>
+<h2 id="available-commands">Available commands</h2>
+<p>nRF Util’s functionality is provided through installable and upgradeable commands that are served on a central package registry on the Internet.</p>
+<p>You can list the available commands by using <code>nrfutil search</code>. Alternatively, read <a href="https://docs.nordicsemi.com/bundle/nrfutil/page/guides/getting_started.html">Basic commands and help</a>.</p>
+<h3 id="installing-nrf-util-commands">Installing nRF Util commands</h3>
+<p>To install one of nRF Util’s commands, run <code>nrfutil install &lt;name_of_command&gt;</code>. For example, to install the <code>device</code> command, run the following command:</p>
+<pre><code>nrfutil install device</code></pre>
+<h3 id="running-nrf-util-commands">Running nRF Util commands</h3>
+<p>To run a command you have installed, run <code>nrfutil &lt;name_of_command&gt;</code>, which provides its own set of command line options and features. For example, <code>nrfutil device</code>.</p>
+<h3 id="upgrading-nrf-util-commands">Upgrading nRF Util commands</h3>
+<p>To upgrade commands and keep them up to date, run <code>nrfutil upgrade</code>.</p>
+<p>To list commands that have updates available, use <code>nrfutil list --outdated</code>.</p>
+<h2 id="versioning">Versioning</h2>
+<p>nRF Util and all installable commands follow <a href="https://semver.org">semantic versioning</a>. The API is defined by the visible command line flags and the JSON output obtained with the <code>--json</code> flag.</p>
+<h2 id="getting-help">Getting help</h2>
+<p>Use <code>-h</code> to show the short version of the help text, and <code>--help</code> to show the long version, with more detailed description of each argument, if available.</p>
+<p>In addition to information available in <code>--help/-h</code>, all installed commands have comprehensive documentation available with the built-in <code>help</code> command. For example, <code>nrfutil device help</code> would show the documentation for the <code>device</code> command. See also <code>(...) help --help</code> for more viewing options.</p>
+</main>
+</body>
+</html>

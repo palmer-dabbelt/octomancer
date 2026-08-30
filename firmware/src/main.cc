@@ -86,6 +86,12 @@ constexpr double kWatchdogTimeout = 12.0;
 // may take to answer. The patience is well under the watchdog's own timeout so
 // that a stuck wire is reported as a stuck wire rather than arriving at the
 // same moment as the reset.
+// How long the box spends being nothing but a serial port before it tries
+// anything that might not survive. Long enough for USB enumeration to finish
+// and for a host that is already watching to open the port; short enough that
+// nobody waiting on a dongle notices.
+constexpr double kQuietStart = 2.0;
+
 constexpr double kWireProbePeriod = 3.0;
 constexpr double kWirePatience = 4.0;
 
@@ -148,6 +154,27 @@ int main() {
   const std::string fault_line = octo::describe_fault(octo::take_last_fault());
   if (!fault_line.empty()) boot_notes.push_back(fault_line);
 
+  // Safe mode: come up as a port and nothing else, when the last attempt did
+  // not last.
+  //
+  // This is the answer to the problem that made the first evenings expensive.
+  // A box that dies during startup cannot be asked anything -- it is not up
+  // long enough to be asked -- so the only evidence is its absence, and every
+  // theory about it costs somebody a trip to the desk with a paperclip. USB
+  // comes up before main() does, though, which means a box that skips
+  // everything risky can be a perfectly good port with a story to tell.
+  //
+  // So the second attempt in a row does exactly that: no radio, no scanner, no
+  // cycle, no watchdog. Whatever killed the last run is not run again, and the
+  // fault record from it is sitting in the greeting.
+  const bool safe_mode = octo::boot_attempts() > 1;
+  if (safe_mode) {
+    boot_notes.push_back(
+        "safe mode: the radio and the sync cycle are switched off because the"
+        " last start did not last. Nothing here has run the code that failed."
+        " Reflash, or power-cycle to try a normal start.");
+  }
+
   // Whether this build can print the numbers the protocol is made of. The
   // failure it catches is silent from both ends: every number in every message
   // comes out empty and nothing reports an error. Saying so is the difference
@@ -184,30 +211,105 @@ int main() {
     return 1;
   }
 
-  // The controller, brought up here rather than in the scanner because the
-  // camera client will want the same one. A radio switched on twice is a radio
-  // nobody owns.
-  const int rc = bt_enable(nullptr);
-  if (rc != 0) {
-    daemon.set_radio_state("unsupported");
-  }
+  // Say something to whoever is attached right now, and keep it for whoever
+  // attaches later. Both, because the interesting failures happen before a
+  // person has got round to plugging the cable in.
+  auto say_now = [&peer](const std::string& text) {
+    octo::Message msg;
+    msg.verb = "say";
+    msg.set("text", text);
+    peer.send(octo::encode(msg));
+  };
 
+  // Two checks, because there are two things that can stop separately. The
+  // loop going round is the obvious one. The other is the USB side, which
+  // Zephyr's CDC ACM runs on a workqueue rather than in an interrupt, and
+  // which can therefore wedge while the loop is perfectly healthy -- a dongle
+  // that still enumerates, still blinks, and will not open.
+  octo::WatchdogPolicy guard;
+  octo::ProbeLiveness wire(kWireProbePeriod, kWirePatience);
+  // The loop's own check is a constant. That is not a tautology: it runs from
+  // a loop timer, so the check being *called at all* is the evidence, and a
+  // loop that has stopped stops feeding whatever it returns.
+  guard.watch("loop", []() { return true; });
+  guard.watch("wire", [&wire, &peer, &loop]() {
+    bool poke = false;
+    const bool ok = wire.poll(loop->now(), peer.wire_ticks(), &poke);
+    if (poke) peer.probe_wire();
+    return ok;
+  });
+
+  // ---------------------------------------------------------------------
+  // Everything past this point is deferred, and the ordering is the point.
+  //
+  // Be reachable first. A box with no console can only explain itself to a
+  // host that has managed to open its port, so the one thing worth doing
+  // before anything else is becoming a port -- and then, only once the loop is
+  // running and a host could be talking to it, doing the work that might not
+  // survive. Radio, scanner, cycle, watchdog and even the self-check are all
+  // work that might not survive.
+  //
+  // Done in the obvious order this cost two evenings: an image that faults
+  // while bringing the radio up never enumerates properly, so it cannot say
+  // that is what it was doing, and from the far end it is indistinguishable
+  // from a dead cable. A couple of seconds of being nothing but a serial port
+  // is the difference between a box that fails and a box that fails *and says
+  // so*.
+  // ---------------------------------------------------------------------
   std::unique_ptr<octo::Scanner> scanner;
-  if (rc == 0) {
-    scanner = octo::make_zephyr_scanner(
-        loop.get(), &clock,
-        [&daemon](const octo::Advert& a) { daemon.observe_advert(a); },
-        [&daemon](const octo::Sighting& s) { daemon.observe_camera(s); },
-        [&daemon](const std::string& state) { daemon.set_radio_state(state); });
-    if (!scanner->start(&err)) {
-      // start() has already reported the state through the handler above, so
-      // the roster says "poweredOff" rather than staying "unknown" -- which is
-      // the distinction octomancerd needs to tell a broken radio from one that
-      // has not answered yet.
-    }
-  }
 
-  daemon.start();
+  loop->after(kQuietStart, [&]() {
+    // The self-check first, because it is the cheapest and its failure mode is
+    // the most confusing: every number in every message silently empty.
+    if (!octo::can_format_doubles()) {
+      boot_notes.push_back(
+          "this build cannot format floating point -- every number in this"
+          " protocol will be empty (CONFIG_PICOLIBC_IO_FLOAT)");
+      say_now(boot_notes.back());
+    }
+
+    if (safe_mode) {
+      daemon.set_radio_state("off");
+      return;
+    }
+
+    // The controller, brought up here rather than in the scanner because the
+    // camera client will want the same one. A radio switched on twice is a
+    // radio nobody owns.
+    const int rc = bt_enable(nullptr);
+    if (rc != 0) {
+      daemon.set_radio_state("unsupported");
+      say_now("the radio would not start");
+    } else {
+      std::string radio_err;
+      scanner = octo::make_zephyr_scanner(
+          loop.get(), &clock,
+          [&daemon](const octo::Advert& a) { daemon.observe_advert(a); },
+          [&daemon](const octo::Sighting& s) { daemon.observe_camera(s); },
+          [&daemon](const std::string& state) { daemon.set_radio_state(state); });
+      if (!scanner->start(&radio_err)) {
+        // start() has already reported the state through the handler above, so
+        // the roster says "poweredOff" rather than staying "unknown" -- which
+        // is the distinction octomancerd needs to tell a broken radio from one
+        // that has not answered yet.
+      }
+    }
+
+    daemon.start();
+    // Only a run that actually tried the job may declare itself a success. A
+    // safe-mode run staying up proves nothing about the code it skipped, and
+    // letting it clear the count would hide a box that cannot start normally.
+    octo::arm_settle_timer();
+
+    std::string wdt_err;
+    if (!octo::start_watchdog(loop.get(), &guard, kWatchdogTimeout, &wdt_err)) {
+      // Not fatal. A dongle with no watchdog still does its job; it just
+      // cannot get itself out of a wedge, which is the state it was in before
+      // there was one at all. Said out loud rather than silently accepted.
+      boot_notes.push_back("no watchdog: " + wdt_err);
+      say_now(boot_notes.back());
+    }
+  });
 
   if (g_led.port != nullptr) {
     gpio_pin_configure_dt(&g_led, GPIO_OUTPUT_INACTIVE);
@@ -223,40 +325,6 @@ int main() {
       const bool lit = peer.attached() ? phase != 0 : phase < 2;
       gpio_pin_set_dt(&g_led, lit ? 1 : 0);
     });
-  }
-
-  // The watchdog, last of all. It cannot be stopped or reconfigured once
-  // started -- firmware/src/hwwatchdog.h -- so nothing before this point is
-  // watched, which is the right trade: a box that never finishes booting is
-  // not a box a reset would help.
-  //
-  // Two checks, because there are two things that can stop separately. The
-  // loop going round is the obvious one. The other is the USB side, which
-  // Zephyr's CDC ACM runs on a workqueue rather than in an interrupt, and
-  // which can therefore wedge while the loop is perfectly healthy -- a dongle
-  // that still enumerates, still blinks, and will not open. That is what the
-  // first evening this firmware ran actually looked like, and no single
-  // heartbeat would have caught it.
-  octo::WatchdogPolicy guard;
-  octo::ProbeLiveness wire(kWireProbePeriod, kWirePatience);
-
-  // The loop's own check is a constant. That is not a tautology: this runs
-  // from a loop timer, so the check being *called at all* is the evidence, and
-  // a loop that has stopped stops feeding whatever this returns.
-  guard.watch("loop", []() { return true; });
-  guard.watch("wire", [&wire, &peer, &loop]() {
-    bool poke = false;
-    const bool ok = wire.poll(loop->now(), peer.wire_ticks(), &poke);
-    if (poke) peer.probe_wire();
-    return ok;
-  });
-
-  std::string wdt_err;
-  if (!octo::start_watchdog(loop.get(), &guard, kWatchdogTimeout, &wdt_err)) {
-    // Not fatal. A dongle with no watchdog still does its job; it just cannot
-    // get itself out of a wedge, which is the state it was in before there was
-    // one at all. Said out loud rather than silently accepted.
-    boot_notes.push_back("no watchdog: " + wdt_err);
   }
 
   loop->run();

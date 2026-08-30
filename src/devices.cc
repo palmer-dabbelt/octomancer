@@ -166,6 +166,7 @@ const char* warn_level_name(WarnLevel w) {
 DeviceView build_device_view(const DeviceSources& from) {
   DeviceView v;
   v.canonical_source = "nothing";
+  if (from.bench != nullptr) v.radio = from.bench->radio;
   const double now = from.now_wall > 0.0 ? from.now_wall : wall_now();
 
   // --- the canonical time --------------------------------------------
@@ -386,6 +387,40 @@ DeviceView build_device_view(const DeviceSources& from) {
 
 // --------------------------------------------------------------- rendering
 
+// Why an empty device list is empty, when the radio can answer that. Returns
+// "" when the radio is fine or when nothing is known about it -- an empty
+// table with a working radio really does mean nothing is on the air, and
+// saying anything there would be noise on every quiet bench.
+//
+// "unknown" is the one worth spelling out at length. It is not a radio
+// failure; it is CoreBluetooth never having called back at all, which on macOS
+// is what a denied Bluetooth permission looks like. There is no error, no
+// prompt and no state -- and an ad-hoc signed binary loses its grant every
+// time it is rebuilt, so this is an ordinary consequence of `make install`.
+std::string radio_complaint(const std::string& radio) {
+  if (radio.empty() || radio == "poweredOn") return "";
+  if (radio == "poweredOff") {
+    return "Bluetooth is switched off on this Mac.";
+  }
+  if (radio == "unauthorized") {
+    return "the daemon is not allowed to use Bluetooth -- approve it in"
+           " System Settings > Privacy & Security > Bluetooth";
+  }
+  if (radio == "unsupported") {
+    return "this Mac reports no Bluetooth Low Energy radio.";
+  }
+  if (radio == "resetting") {
+    return "the Bluetooth radio is resetting; this usually clears itself.";
+  }
+  if (radio == "unknown") {
+    return "the radio has never reported a state, which on macOS is what a"
+           " refused Bluetooth permission looks like -- there is no prompt and"
+           " no error. Approve the daemon in System Settings > Privacy &"
+           " Security > Bluetooth. A rebuilt binary loses the approval it had.";
+  }
+  return "the radio reports \"" + radio + "\".";
+}
+
 std::string render_devices(const DeviceView& v, bool verbose, bool color) {
   const Style st = style_for(color);
   std::string out;
@@ -435,6 +470,12 @@ std::string render_devices(const DeviceView& v, bool verbose, bool color) {
 
   if (v.rows.empty()) {
     out += fmt("%sno devices%s\n", st.dim, st.off);
+    // ...and, when the radio is the reason, which reason. Without this the
+    // output is identical whether the room is empty, Bluetooth is switched
+    // off, or macOS is refusing the daemon the radio -- three problems with
+    // three different answers, none of them "check the batteries".
+    const std::string why = radio_complaint(v.radio);
+    if (!why.empty()) out += fmt("%s%s%s\n", st.dim, why.c_str(), st.off);
     return out;
   }
 

@@ -616,6 +616,61 @@ void test_both_daemons_missing_is_an_empty_view() {
   CHECK(contains(text, "no devices"));
 }
 
+// An empty list explains itself when the radio can explain it.
+//
+// This is the 2026-08-30 outage written down. A bench of five timecode boxes
+// read "no devices" and nothing else for a morning, while the snapshot the
+// renderer was holding said `radio: unknown` the whole time. The bug was two
+// bugs -- a dongle wrongly auto-selected, then a Bluetooth grant lost to a
+// rebuild -- and the output was byte-identical for both, and for an empty
+// room. That is the property being fixed: an empty table is the moment the
+// question gets asked, so it is where the answer has to be.
+void test_an_empty_list_says_why_the_radio_is_not_helping() {
+  struct Case {
+    const char* radio;
+    const char* expect;  // "" means: say nothing beyond "no devices"
+  } cases[] = {
+      // The state that actually occurred, and the one worth the most words:
+      // no callback ever arrived, which is what a refused permission looks
+      // like on macOS. Nothing else in the system distinguishes it.
+      {"unknown", "Bluetooth"},
+      {"unauthorized", "Privacy & Security"},
+      {"poweredOff", "switched off"},
+      {"unsupported", "no Bluetooth Low Energy"},
+      {"resetting", "resetting"},
+      // A working radio and an empty room is not a fault, and saying anything
+      // here would be noise on every quiet bench.
+      {"poweredOn", ""},
+      // No daemon answered. That already has its own line further up, and
+      // repeating it as a radio complaint would be a second explanation for
+      // one fact.
+      {"", ""},
+  };
+  for (const Case& c : cases) {
+    Snapshot snap;
+    snap.radio = c.radio;
+    DeviceSources from;
+    // A bench with a radio state and no devices in it -- which is exactly the
+    // shape octomancerd serves when it cannot hear anything.
+    if (*c.radio != '\0') from.bench = &snap;
+    from.now_wall = kNow;
+    const DeviceView v = octo::build_device_view(from);
+    CHECK(v.rows.empty());
+    CHECK_STR(v.radio, c.radio);
+
+    const std::string text = strip_escapes(octo::render_devices(v, false, false));
+    CHECK(contains(text, "no devices"));
+    if (*c.expect != '\0') {
+      CHECK(contains(text, c.expect));
+    } else {
+      // Nothing beyond the two words. Checked by length rather than by
+      // guessing at phrases the renderer might use.
+      CHECK(text.find("Bluetooth") == std::string::npos);
+      CHECK(text.find("radio") == std::string::npos);
+    }
+  }
+}
+
 // -------------------------------------------------------------- rendering
 
 DeviceView busy_view() {
@@ -963,6 +1018,7 @@ int main() {
   test_missing_octomancerd_borrows_the_other_bench();
   test_missing_octomancer_sync_still_lists_what_was_heard();
   test_both_daemons_missing_is_an_empty_view();
+  test_an_empty_list_says_why_the_radio_is_not_helping();
   test_colour_only_adds_escapes();
   test_verbose_adds_the_detail_and_stays_narrow();
   test_link_state_names();

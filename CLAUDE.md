@@ -31,6 +31,19 @@ worktree -- so if you find yourself under `.claude/worktrees/`, leave with the
 
 ## Traps that have already cost hours
 
+**`make install` revokes the daemons' Bluetooth permission.** The binaries are
+ad-hoc, linker-signed, so their cdhash changes on every rebuild and macOS
+stops recognising them as the thing the Bluetooth grant was given to. Under
+launchd there is nobody to re-prompt, so CoreBluetooth simply never calls back:
+no error, no prompt, no state. `octomancer status` says the radio has never
+reported a state, and the daemons print "Bluetooth did not report a state" to
+their `.err` logs -- but every other symptom looks exactly like an empty room.
+
+Re-approving is the user's job, in System Settings > Privacy & Security >
+Bluetooth, and cannot be done from here. So: **after `make install`, expect the
+bench to go quiet, and say so** rather than debugging the radio. Verified on
+2026-08-30, when it cost a morning stacked on top of an unrelated radio bug.
+
 **Every GitHub clone fails here, whatever URL you use.** The global git config
 rewrites GitHub to SSH:
 

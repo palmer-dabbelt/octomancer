@@ -20,12 +20,17 @@ bool truthy(const char* v) {
 // Deliberately does not open the port: this is asked during argument parsing
 // and on every factory call, and opening one to answer it would reset the
 // controller out from under a running scan.
+//
+// list_candidate_ports() is only reached when the answer actually turns on it,
+// which on a Mac is never -- so the common path no longer walks /dev at all.
 bool dongle_selected() {
   const RadioOptions& opts = radio_options();
-  if (opts.kind == RadioKind::kDongle) return true;
+  const bool named = !opts.device.empty();
+  if (opts.kind == RadioKind::kDongle || named) return true;
   if (opts.kind != RadioKind::kAuto) return false;
-  if (!opts.device.empty()) return true;  // named: take the caller's word
-  return !hci::list_candidate_ports().empty();
+  if (have_host_radio()) return false;
+  return choose_dongle(opts.kind, named, false,
+                       !hci::list_candidate_ports().empty());
 }
 
 bool dongle_requested() {
@@ -102,6 +107,18 @@ std::string describe_radio() {
     return "dongle (none found)";
   }
 #ifdef OCTO_HAVE_COREBLUETOOTH
+  // Naming the port that is being passed over, when there is one. Silence here
+  // is what made the 2026-08-30 outage take a morning to find: the daemon had
+  // quietly changed radios and every line it printed afterwards was the same
+  // as before. Saying "there is a dongle and I am not using it" costs one
+  // clause and answers the question somebody is about to ask.
+  if (opts.kind == RadioKind::kAuto) {
+    std::vector<std::string> ports = hci::list_candidate_ports();
+    if (!ports.empty()) {
+      return "CoreBluetooth (ignoring the port at " + ports.front() +
+             "; pass --radio dongle to use it)";
+    }
+  }
   return "CoreBluetooth";
 #else
   return "no radio: this host has no CoreBluetooth and no dongle";

@@ -176,6 +176,18 @@ struct DeviceView {
   WarnLevel worst_warning = WarnLevel::kNone;
   int warned_out_of_sync = 0;
   int warned_unsure = 0;
+
+  // What the listening daemon's radio last said about itself, verbatim:
+  // "poweredOn", "poweredOff", "unauthorized", "unsupported", "resetting", or
+  // "unknown" for a radio that has never reported at all. Empty when no
+  // daemon answered, which is a different thing and already has its own line.
+  //
+  // Carried this far only so that an empty device list can say why it is
+  // empty. On 2026-08-30 a bench of five boxes read "no devices" for a
+  // morning: the radio was denied and the state was sitting in the snapshot
+  // the whole time, unlooked-at. An empty table is the one moment somebody is
+  // certain to be asking the question this answers.
+  std::string radio;
 };
 
 // Whatever the caller managed to collect. Every pointer may be null: a daemon

@@ -28,9 +28,9 @@ class SharedLink;
 }  // namespace hci
 
 enum class RadioKind {
-  // Use the dongle if one is plugged in, otherwise CoreBluetooth. A dongle
-  // that is present but broken is an error rather than a silent fallback:
-  // somebody who plugged it in meant to use it.
+  // Whatever this host has, preferring the one that is definitely a radio.
+  // On a Mac that is CoreBluetooth; a dongle under `auto` is only reached
+  // where there is no host radio at all. See choose_dongle() for why.
   kAuto,
   kCoreBluetooth,
   kDongle,
@@ -80,20 +80,45 @@ const char* radio_kind_name(RadioKind kind);
 // wrong radio.
 bool radio_options_from_env(std::string* err);
 
-// True when the factories will use the dongle: either it was asked for, or it
-// was left to chance and one is plugged in. Exposed because the two factories
-// live in separate translation units -- see the note in radio.cc -- and both
-// have to make the same decision.
+// True when the factories will use the dongle. Exposed because the two
+// factories live in separate translation units -- see the note in radio.cc --
+// and both have to make the same decision.
 bool dongle_selected();
+
+// The rule dongle_selected() applies, with the two things it has to go and
+// look up passed in instead. Pure, so it can be tested; see tests/test_radio.
+//
+//   kind          what --radio / OCTOMANCER_RADIO said
+//   named         a specific port was given (--dongle, OCTOMANCER_DONGLE)
+//   host_radio    this build has a radio of its own -- CoreBluetooth
+//   port_present  some cu.usbmodem*/ttyACM* exists
+//
+// The interesting case is kAuto with both a host radio and a port, and the
+// answer is *no*. `auto` used to mean "a dongle if one is plugged in", which
+// reads as helpful and is not: nothing about a serial port says it is a
+// radio. A Zephyr board, a debug probe, a printer and a dongle are the same
+// four characters in /dev, so plugging in any of them silently moved every
+// program in this project onto a port that answers nothing -- which is
+// exactly what happened on 2026-08-30, and cost a morning's bench.
+//
+// So `auto` now prefers the radio that is known to be one, and a dongle on a
+// Mac has to be asked for. That is a real cost -- `--radio dongle` where
+// nothing was needed before -- and it buys the property that mattered:
+// plugging a USB device into a Mac never takes the Bluetooth away.
+bool choose_dongle(RadioKind kind, bool named, bool host_radio,
+                   bool port_present);
+
+// Whether this build has a radio that needs nothing plugged in. Compiled in
+// rather than asked at run time: it is a question about the binary.
+bool have_host_radio();
 
 // Whether the dongle was *asked for*, rather than merely found.
 //
-// The difference matters wherever a fallback exists. `--radio auto` means
-// "pick something that works", and it answers dongle_selected() true the
-// moment a dongle is plugged in -- which is right for a scanner, because the
-// dongle can scan, and wrong for anything the dongle cannot do. Asking the
-// stronger question is how a program tells "the user insisted on the dongle"
-// from "there happens to be one in a USB port".
+// Since the rule above, these two agree on any host that has a radio of its
+// own, and differ only where there is none -- a Linux box with a dongle and
+// nothing else selects it without being asked. Both are kept because they are
+// different questions and the answer stops coinciding the moment a second
+// host radio backend exists.
 bool dongle_requested();
 
 // What the factories would use right now, for the logs and for `--version`:

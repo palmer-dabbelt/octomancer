@@ -399,6 +399,14 @@ int main(int argc, char** argv) {
         }
       });
 
+  // Said before the scanner is started rather than after, so it is on the
+  // console even when starting fails -- "cannot start the radio" is a much
+  // better message when the line above it says which radio was meant.
+  if (!opt.quiet) {
+    std::fprintf(stderr, "octomancerd: radio: %s\n",
+                 octo::describe_radio().c_str());
+  }
+
   auto scanner = octo::make_ble_scanner(
       bridge.advert_sink(), bridge.camera_sink(), bridge.state_sink());
   if (!scanner || !scanner->start(&err)) {
@@ -444,10 +452,13 @@ int main(int argc, char** argv) {
   {
     char buf[512];
     std::snprintf(buf, sizeof buf,
-                  "\"socket\":\"%s\",\"alert_threshold_s\":%.1f,"
+                  "\"socket\":\"%s\",\"radio\":\"%s\","
+                  "\"alert_threshold_s\":%.1f,"
                   "\"alert_clear_s\":%.1f,\"window_s\":%.0f",
-                  json_escape(server.path()).c_str(), opt.policy.alert_enter,
-                  opt.policy.alert_exit, opt.policy.window);
+                  json_escape(server.path()).c_str(),
+                  json_escape(octo::describe_radio()).c_str(),
+                  opt.policy.alert_enter, opt.policy.alert_exit,
+                  opt.policy.window);
     log.record("start", buf);
   }
 

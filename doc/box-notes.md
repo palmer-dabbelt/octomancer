@@ -564,9 +564,9 @@ invites exactly the cross-radio comparison the section below refuses to make.
 `SPREAD` is the figure that survives, because a spread is a difference and
 whatever origin a radio invented cancels out of it.
 
-The two tables are laid out column for column, because they are read together
-and most of the pairs mean the same kind of thing: RADIO/DEVICE is what it is
-called, LINK/VIA is where it came from, AGE is AGE, SPREAD/OFFSET are both a
+The three tables are laid out column for column, because they are read together
+and most of the pairs mean the same kind of thing: the first column is what it
+is called, LINK/VIA is where it came from, AGE is AGE, SPREAD/OFFSET are both a
 distance in milliseconds.
 
 **There is no LINK column on the device table.** Whether a device is being
@@ -606,6 +606,26 @@ being zero at exactly the moment it matters: when a page has stopped being
 refreshed and every row on it is older than it looks. It replaces a line that
 used to say octomancerd was running, which said less -- a daemon can be running
 and still have stopped saying anything new.
+
+**The page is three tables: `CAMERA`, `RADIO`, `TIMECODE`.** It used to be a
+`RADIO` section over one `DEVICE` section holding cameras and boxes together,
+sorted so the boxes came first. That reads as one list with a seam in it. The
+two kinds share a shape but not a meaning -- a timecode box is a clock somebody
+trusts, a camera is a thing being corrected towards it -- so the `OFFSET`
+column, identical in both, is answering two different questions. Splitting them
+says so, and each heading names what is under it rather than one heading naming
+neither.
+
+Cameras go on top because they are what the program is for. A bench that agrees
+with itself is a means; a camera that is out of sync is the failure the whole
+thing exists to prevent, and it should not be below the fold.
+
+A section with nothing in it is not printed. A heading over an empty table
+reads as a render that failed rather than as a bench with no cameras on it.
+
+One knock-on: the verbose column that showed a device's current timecode is now
+called `READING`. It was `TIMECODE`, which was unambiguous when no section was,
+and is not any more.
 
 **Radios can be renamed, and a rename must not move a join.** `dongle` is what
 the firmware calls itself, not a name anybody chose, and a cart with two of

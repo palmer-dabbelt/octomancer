@@ -121,6 +121,19 @@ std::string row_for(const std::string& out, const std::string& name) {
                                              : end - (start + 1));
 }
 
+// The line a section starts with, found by its heading rather than by its
+// position -- there are three sections now and their order is a decision that
+// may change again.
+std::string head_line(const std::string& out, const std::string& title) {
+  size_t at = out.compare(0, title.size(), title) == 0
+                  ? 0
+                  : out.find("\n" + title);
+  if (at == std::string::npos) return std::string();
+  if (at != 0) ++at;
+  const size_t end = out.find('\n', at);
+  return out.substr(at, end == std::string::npos ? end : end - at);
+}
+
 // A row is written as a run of <escape><text><reset> fields, so splitting on
 // the reset hands them back in column order: 0 name, 1 age, 2 offset, 3 link,
 // 4 signal, and the verbose ones after that.
@@ -294,10 +307,10 @@ void test_colour_says_which_numbers_are_memories() {
   for (int verbose = 0; verbose < 2; ++verbose) {
     const std::string out = octo::render_devices(v, verbose != 0, true);
 
-    // Cyan, and specifically not the dim used for a stale figure.
-    const size_t head = out.find("DEVICE");
-    CHECK(head >= 5);
-    if (head >= 5) CHECK(out.compare(head - 5, 5, "\033[36m") == 0);
+    // Cyan, and specifically not the dim used for a stale figure. Written as
+    // the escape immediately before the heading, because "TIMECODE" is also a
+    // column in the RADIO section and a bare search finds that one first.
+    CHECK(contains(out, "\033[36mTIMECODE"));
 
     const std::vector<std::string> heard = columns_of(row_for(out, "Tentacle_A"));
     const std::vector<std::string> quiet = columns_of(row_for(out, "Tentacle_B"));
@@ -326,7 +339,9 @@ void test_the_brief_view_is_the_table_and_nothing_else() {
 
   const DeviceView v = view_of(snap, nullptr);
   const std::string text = strip_escapes(octo::render_devices(v, false, false));
-  CHECK(text.compare(0, 6, "DEVICE") == 0);
+  // The boxes' table, and it is the first thing on the page: this fixture has
+  // no cameras, so the section that would sit above it is not printed.
+  CHECK(text.compare(0, 8, "TIMECODE") == 0);
   CHECK(!contains(text, "canonical"));
   CHECK(!contains(text, "vs this Mac"));
 
@@ -337,16 +352,17 @@ void test_the_brief_view_is_the_table_and_nothing_else() {
 
   // And with it, the RADIO section is back and the table is still under it.
   const std::string loud = strip_escapes(octo::render_devices(v, true, false));
-  CHECK(loud.compare(0, 6, "DEVICE") != 0);
+  CHECK(loud.compare(0, 8, "TIMECODE") != 0);
   CHECK(contains(loud, "RADIO"));
-  CHECK(contains(loud, "DEVICE"));
+  // By the heading line, not by `contains`: "TIMECODE" is also a column in the
+  // RADIO section, so a substring test would pass with the table missing.
+  CHECK(!head_line(loud, "TIMECODE").empty());
 
   // The brief table is the first columns of the verbose one, character for
   // character. Pinned because the two are one format string with a suffix, and
   // the moment they stop being that they become two tables to learn.
-  const std::string brief_head = text.substr(0, text.find('\n'));
-  const size_t at = loud.find("DEVICE");
-  const std::string loud_head = loud.substr(at, loud.find('\n', at) - at);
+  const std::string brief_head = head_line(text, "TIMECODE");
+  const std::string loud_head = head_line(loud, "TIMECODE");
   CHECK(brief_head.size() < loud_head.size());
   CHECK(loud_head.compare(0, brief_head.size(), brief_head) == 0);
 }
@@ -1350,7 +1366,7 @@ void test_the_table_is_unchanged_without_a_second_radio() {
   // section listing a single radio is exactly the preamble that stops a
   // status page being read.
   CHECK(!contains(out, "RADIO"));
-  CHECK(contains(out, "DEVICE"));
+  CHECK(!head_line(out, "TIMECODE").empty());
 }
 
 void test_the_table_says_which_radio_heard_each_row() {
@@ -1529,6 +1545,73 @@ void test_a_radio_with_no_label_shows_its_name() {
   const DeviceView v = view_of(two_radios(39600.0), &conf);
   const std::string out = octo::render_devices(v, false, false);
   CHECK(contains(out, "dongle"));
+}
+
+// Three tables, in a decided order. Cameras first because they are what the
+// program is for -- a bench that agrees with itself is a means, a camera out of
+// sync is the failure the whole thing exists to prevent -- then the radios, and
+// then the boxes.
+void test_the_page_is_three_sections_with_cameras_first() {
+  CamConf conf = conf_with("split", "camera cam-1 writes=on name=A:1EAE18A7\n");
+  Snapshot snap;
+  snap.device.push_back(box("A", "Tentacle_A", true, 0.000));
+  snap.device.push_back(box("B", "Tentacle_B", true, 0.004));
+
+  Status status;
+  CameraStatus c = camera("cam-1", "A:1EAE18A7");
+  c.present = true;
+  c.has_last_seen = true;
+  c.last_seen_wall = kNow - 1.0;
+  status.cameras.push_back(c);
+
+  DeviceSources from;
+  from.bench = &snap;
+  from.cameras = &status;
+  from.conf = &conf;
+  from.now_wall = kNow;
+  const std::string out =
+      strip_escapes(octo::render_devices(octo::build_device_view(from), false,
+                                         false, true));
+
+  const size_t cam = out.find("\nCAMERA");
+  const size_t radio = out.find("\nRADIO");
+  const size_t box_head = out.find("\nTIMECODE ");
+  // Found at all, and each as a heading rather than as a word inside a row.
+  CHECK(out.compare(0, 6, "CAMERA") == 0 || cam != std::string::npos);
+  CHECK(radio != std::string::npos);
+  CHECK(box_head != std::string::npos);
+  CHECK(radio < box_head);
+  if (cam != std::string::npos) CHECK(cam < radio);
+
+  // A blank line between them. Three tables stacked flush read as one table
+  // that keeps restating its headings, which is the thing this split is for.
+  CHECK(contains(out, "\n\nRADIO"));
+  CHECK(contains(out, "\n\nTIMECODE "));
+
+  // And the devices went to the right ones.
+  CHECK(out.find("A:1EAE18A7") < radio);
+  CHECK(out.find("Tentacle_A") > box_head);
+}
+
+// A heading over nothing is worse than a missing section: it reads as a table
+// that failed to render rather than as a bench with no cameras on it.
+void test_a_section_with_nothing_in_it_is_not_printed() {
+  CamConf conf = plain_conf();
+  Snapshot snap;
+  snap.device.push_back(box("A", "Tentacle_A", true, 0.000));
+
+  DeviceSources from;
+  from.bench = &snap;
+  from.conf = &conf;
+  from.now_wall = kNow;
+  const std::string out =
+      strip_escapes(octo::render_devices(octo::build_device_view(from), false,
+                                         false, true));
+  // By the heading line: "CAMERAS" is a column in the RADIO section, so a
+  // substring test would pass whether or not the section was printed.
+  CHECK(head_line(out, "CAMERA").empty());
+  CHECK(!head_line(out, "RADIO").empty());
+  CHECK(!head_line(out, "TIMECODE").empty());
 }
 
 // A box the dongle has never been told the name of is listed by its hardware
@@ -1934,6 +2017,8 @@ int main() {
   test_a_radio_that_never_answered_has_no_age();
   test_a_renamed_radio_is_renamed_everywhere();
   test_a_radio_with_no_label_shows_its_name();
+  test_the_page_is_three_sections_with_cameras_first();
+  test_a_section_with_nothing_in_it_is_not_printed();
   test_unnamed_boxes_keep_the_end_of_their_address();
   test_a_radio_that_has_heard_nothing_still_says_it_is_there();
   test_a_radio_with_no_clock_quotes_no_absolute_time();

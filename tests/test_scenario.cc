@@ -186,7 +186,7 @@ void test_the_standard_bench_renders() {
   CHECK(!s.view().rows.empty());
   CHECK(s.view().has_canonical);
   const std::string page = s.table();
-  CHECK(contains(page, "DEVICE"));
+  CHECK(contains(page, "\nTIMECODE "));
   CHECK(contains(page, "OFFSET"));
 
   // Verbose adds columns and must not lose any rows.

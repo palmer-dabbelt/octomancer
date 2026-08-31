@@ -826,9 +826,31 @@ std::string render_devices(const DeviceView& v, bool verbose, bool color,
   // difference, so whatever origin a radio invented cancels out of it exactly,
   // and it is directly comparable between two radios that agree on nothing
   // else.
+  // Three tables rather than one, and a blank line between whichever of them
+  // have anything in them.
+  //
+  // The old page had a RADIO section over a DEVICE section that held cameras
+  // and timecode boxes together, sorted so the boxes came first. That reads as
+  // one list with a seam in it: the two kinds share a shape but not a meaning
+  // -- a box is a clock somebody trusts, a camera is a thing being corrected
+  // towards it, and the numbers in the OFFSET column are answers to different
+  // questions. Splitting them says so, and gives each a heading that names
+  // what is in it rather than one heading that names neither.
+  //
+  // Cameras first, because they are what the program is for. A bench that
+  // agrees with itself is a means; a camera that is out of sync is the failure
+  // the whole thing exists to prevent, and it should not be below the fold.
+  bool first_section = true;
+  auto gap = [&out, &first_section]() {
+    if (!first_section) out += "\n";
+    first_section = false;
+  };
+
   // Never a heading over nothing: build_device_view always supplies this
   // machine's radio, but a view assembled by hand need not have.
+  auto emit_radios = [&]() {
   if (!v.radios.empty() && (always_radios || verbose || v.radios.size() > 1)) {
+  gap();
   // Fourteen, the same width the DEVICE column gets, because a hostname is
   // about as long as a device name and this one held "Palmers-Mini" cut to
   // "Palmers-Mi" -- which reads as a machine nobody has heard of rather than
@@ -853,18 +875,8 @@ std::string render_devices(const DeviceView& v, bool verbose, bool color,
                live, rv.live_boxes, st.off,
                live, rv.live_cameras, st.off);
   }
-  out += "\n";
   }
-
-  if (v.rows.empty()) {
-    // The reason, if the radio is it, is already in the header above. Without
-    // it the output is identical whether the room is empty, Bluetooth is
-    // switched off, or macOS is refusing the daemon the radio -- three
-    // problems with three different answers, none of them "check the
-    // batteries".
-    out += fmt("%sno devices%s\n", st.dim, st.off);
-    return out;
-  }
+  };
 
   // Every escape sits outside a width specifier, never inside one. Padding a
   // string that already contains an escape pads the escape too, which lines up
@@ -879,16 +891,35 @@ std::string render_devices(const DeviceView& v, bool verbose, bool color,
   // is what it is called, LINK/VIA is where it comes from, AGE is AGE, and
   // SPREAD/OFFSET are both a distance in milliseconds. Lining them up costs
   // nothing and turns two tables into one shape.
-  out += fmt("%s%-18s%s", st.head, "DEVICE", st.off);
-  if (show_via) out += fmt("%s %-14s%s", st.head, "VIA", st.off);
-  out += fmt("%s %6s %10s %8s%s", st.head, "AGE", "OFFSET", "RSSI", st.off);
-  if (verbose) {
-    out += fmt("%s %-15s %10s %9s %s%s", st.head, "TIMECODE", "MEDIAN", "DRIFT",
-               "RATE", st.off);
-  }
-  out += "\n";
+  // The heading over the first column names what the table holds, and the rest
+  // of it is the same in both -- so the two sections line up with each other
+  // and with RADIO above, and a reader learns one shape.
+  //
+  // "READING" rather than "TIMECODE" for the verbose column. It was TIMECODE
+  // when the table had no section headings; now that one of the sections is
+  // called TIMECODE, a column of the same name inside it would be asking the
+  // reader to work out which of the two any given use meant. The column holds
+  // what the device currently says the time is, so that is what it is called.
+  auto emit_head = [&](const char* title) {
+    out += fmt("%s%-18s%s", st.head, title, st.off);
+    if (show_via) out += fmt("%s %-14s%s", st.head, "VIA", st.off);
+    out += fmt("%s %6s %10s %8s%s", st.head, "AGE", "OFFSET", "RSSI", st.off);
+    if (verbose) {
+      out += fmt("%s %-15s %10s %9s %s%s", st.head, "READING", "MEDIAN",
+                 "DRIFT", "RATE", st.off);
+    }
+    out += "\n";
+  };
 
+  auto emit_kind = [&](DeviceKind kind, const char* title) {
+  bool any_of_kind = false;
   for (const DeviceRow& r : v.rows) {
+    if (r.kind != kind) continue;
+    if (!any_of_kind) {
+      gap();
+      emit_head(title);
+    }
+    any_of_kind = true;
     // A warning outranks the alert colour and the dimming, because it is the
     // one thing on this row somebody explicitly asked to be shown.
     const char* name_colour =
@@ -1005,6 +1036,22 @@ std::string render_devices(const DeviceView& v, bool verbose, bool color,
                  r.resolution.empty() ? st.dim : live, rate.c_str(), st.off);
     }
     out += "\n";
+  }
+  };
+
+  emit_kind(DeviceKind::kCamera, "CAMERA");
+  emit_radios();
+  emit_kind(DeviceKind::kTentacle, "TIMECODE");
+
+  if (v.rows.empty()) {
+    // The reason, if the radio is it, is already in the header above. Without
+    // it the output is identical whether the room is empty, Bluetooth is
+    // switched off, or macOS is refusing the daemon the radio -- three
+    // problems with three different answers, none of them "check the
+    // batteries".
+    gap();
+    out += fmt("%sno devices%s\n", st.dim, st.off);
+    return out;
   }
 
   // Notes go under the table rather than in it. "timecode does not follow the

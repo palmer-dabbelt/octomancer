@@ -143,7 +143,8 @@ void test_the_page_carries_the_version_the_radios_and_the_table() {
   // every offset below is measured against is worth one line.
   CHECK(contains(page, "RADIO"));
   CHECK(contains(page, "this Mac"));
-  CHECK(contains(page, "DEVICE"));
+  // By the heading line: "TIMECODE" is a column in the RADIO section too.
+  CHECK(contains(page, "\nTIMECODE "));
   CHECK(contains(page, "box-0"));
   CHECK(contains(page, "box-1"));
 }

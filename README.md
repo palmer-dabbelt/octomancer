@@ -358,14 +358,21 @@ cameras. What somebody standing at the bench wants is one list, with numbers
 that mean the same thing on every line:
 
 ```
-DEVICE            AGE     OFFSET LINK         RSSI
-BMPCC              1s     +1.3ms on the air    -51
-F55                2s     -0.8ms on the air    -76
-FS5                4s     +0.8ms on the air    -81
-Krysta             1s     -0.8ms on the air    -55
-FS7             3m02s         -- off the air   -84
-A:1EAE18A7     56m32s         -- off the air    --
+CAMERA                AGE     OFFSET     RSSI
+A:1EAE18A7         56m32s         --       --
+
+TIMECODE              AGE     OFFSET     RSSI
+BMPCC                  1s     +1.3ms      -51
+F55                    2s     -0.8ms      -76
+FS5                    4s     +0.8ms      -81
+Krysta                 1s     -0.8ms      -55
+FS7                 3m02s         --      -84
 ```
+
+Cameras are at the top because they are what the program is for. A bench that
+agrees with itself is a means; a camera that is out of sync is the failure the
+whole thing exists to prevent, and it should not be below the fold. The two
+tables are laid out column for column so they read as one shape.
 
 `RSSI` is there because "why is this one not being heard" comes up constantly
 and the answer is usually in that column. The bench in this room reads about
@@ -445,7 +452,7 @@ would have people power-cycling a body mid-write. Nobody has yet watched that
 column with a camera in the room, which is the only way to find out whether
 `held` means what it says; `doc/KNOWN_ISSUES.md` says what that would take.
 
-A device somebody has asked to be warned about carries a marker in the `DEVICE`
+A device somebody has asked to be warned about carries a marker in the name
 column — `!` when it is out of sync with the bench, `?` when it has been quiet
 too long to say — and the names are repeated under the table with what each mark
 means, because "one device out of sync" only sends somebody looking. The marker
@@ -503,19 +510,31 @@ does not interrupt the sync; `--no-wait` queues it and returns immediately.
 once a second until you press `q`.
 
 ```
-octomancer 0.1.0         09:17:06
-  octomancerd      answering, up 12h48m
-  octomancer-sync  answering, up 12h48m
+octomancer TUI (v0.1.0) 2026-08-31 09:17:06
 
-DEVICE            AGE     OFFSET LINK         RSSI
-BMPCC              0s     +8.8ms on the air    -52
-F55                1s     -1.2ms on the air    -80
-Krysta             1s     +0.0ms on the air    -72
-FS5             2m25s         -- off the air    -80
-FS7             2h47m         -- off the air    -83
+CAMERA                AGE     OFFSET     RSSI
+A:1EAE18A7             2s     +8.8ms      -75
+
+RADIO              LINK              AGE     SPREAD TIMECODE CAMERAS
+Palmers-Mini       local              0s     18.4ms        4       1
+Raytac USB-C       USB                2s     12.1ms        3       0
+
+TIMECODE              AGE     OFFSET     RSSI
+BMPCC                  0s     +8.8ms      -52
+F55                    1s     -1.2ms      -80
+Krysta                 1s     +0.0ms      -72
+FS5                 2m25s         --      -80
+FS7                 2h47m         --      -83
 
 q to quit
 ```
+
+The `RADIO` section is always there on this page, where `octomancer status`
+only prints it when there is more than one radio to distinguish. A page that
+stays up is worth one line naming the axis every `OFFSET` below it is measured
+against. `octomancer name --radio <which> "<what>"` is how `dongle` became
+`Raytac USB-C`; the firmware's own name is not a name anybody chose, and a cart
+with two of them needs to tell them apart.
 
 The reason to have it is that a bench moves. A box drifts, a camera goes quiet,
 a sync lands — and `octomancer status` answers about the instant it was run and

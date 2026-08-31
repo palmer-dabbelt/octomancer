@@ -42,6 +42,17 @@ Recognise it by: `"radio":"unknown"` with zero adverts in the JSONL,
 2026-08-30 -- octomancerd saying so on its own console ten seconds in, plus
 `octomancer status` saying so whenever the device list is empty.
 
+**You cannot reproduce this by hand, and trying will mislead you.** A process
+started from a terminal inherits the *terminal's* Bluetooth grant, so a daemon
+that dies instantly under launchd runs perfectly when you launch it yourself
+with identical arguments. That reads like a launchd environment bug and is not
+one. It cost an evening on 2026-08-30: `octomancer-sync` was restarting every
+ten seconds with exit 1 and writing nothing to its `--console` file, because
+the failure happens before that file is opened. **The message is in
+`~/Library/Logs/octomancer/octomancer-sync.err`**, which launchd fills from
+`StandardErrorPath`, and it says exactly what is wrong. Read the `.err` file
+first, not the `.out` file.
+
 Only Palmer can fix it, in System Settings > Privacy & Security > Bluetooth.
 **So: after `make install`, check `octomancer status`. If the radio never
 reports, say so and ask him to re-approve -- do not go looking for a bug in the

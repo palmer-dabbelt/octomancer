@@ -417,7 +417,7 @@ void test_a_held_camera_reads_as_held() {
   c.connected = true;
   c.present = false;
   c.has_last_seen = true;
-  c.last_seen_wall = kNow - 45.0;  // stale, and deliberately ignored
+  c.last_seen_wall = kNow - 4.0;
   status.cameras.push_back(c);
 
   DeviceSources from;
@@ -430,14 +430,70 @@ void test_a_held_camera_reads_as_held() {
   CHECK(row != nullptr);
   CHECK(row->kind == DeviceKind::kCamera);
   CHECK(row->link == LinkState::kHeld);
-  // Held means we are hearing it continuously, whatever the last
-  // advertisement says.
   CHECK(row->has_age);
-  CHECK_NEAR(row->age_s, 0.0, 1e-9);
+  CHECK_NEAR(row->age_s, 4.0, 1e-9);
 
   const std::string text = octo::render_devices(v, false, false);
-  CHECK(contains(text, "held"));
   CHECK(!contains(text, "off the air"));
+}
+
+// The AGE column answers one question, and on a held camera it used to answer
+// a different one: it printed the word "held", which is a link state, in the
+// place a reader looks to find out how long ago we last heard from something.
+// Worse, it was not even the state it claimed -- holding a link is not writing
+// to a camera, and a cycle that has finished or backed off keeps the link up
+// and keeps receiving timecode over it. The number was always available.
+void test_a_held_camera_shows_an_age_rather_than_the_word_held() {
+  Snapshot snap;
+  snap.device.push_back(box("A", "Tentacle_A", true, 0.5));
+
+  Status status;
+  CameraStatus c = camera("cam-1", "A:1EAE18A7");
+  c.connected = true;
+  c.present = false;
+  c.has_last_seen = true;
+  c.last_seen_wall = kNow - 7.0;
+  status.cameras.push_back(c);
+
+  DeviceSources from;
+  from.bench = &snap;
+  from.cameras = &status;
+  from.now_wall = kNow;
+  const std::string text =
+      octo::render_devices(octo::build_device_view(from), false, false);
+
+  const std::string row = row_for(text, "A:1EAE18A7");
+  CHECK(!row.empty());
+  CHECK(contains(row, "7s"));
+  CHECK(!contains(row, "held"));
+}
+
+// octomancer-sync moves last_seen forward for the timecode a held link
+// delivers, so the ordinary rule already gives a held camera a fresh age. A
+// sync too old to send a timestamp at all still gets one, because a blank in
+// that column on a camera we are connected to reads as a camera that has gone.
+void test_a_held_camera_without_a_timestamp_still_gets_an_age() {
+  Snapshot snap;
+  snap.device.push_back(box("A", "Tentacle_A", true, 0.5));
+
+  Status status;
+  CameraStatus c = camera("cam-1", "A:1EAE18A7");
+  c.connected = true;
+  c.present = false;
+  c.has_last_seen = false;
+  status.cameras.push_back(c);
+
+  DeviceSources from;
+  from.bench = &snap;
+  from.cameras = &status;
+  from.now_wall = kNow;
+  const DeviceView v = octo::build_device_view(from);
+
+  const DeviceRow* row = find_row(v, "A:1EAE18A7");
+  CHECK(row != nullptr);
+  if (row == nullptr) return;
+  CHECK(row->has_age);
+  CHECK_NEAR(row->age_s, 0.0, 1e-9);
 }
 
 void test_a_quiet_camera_reads_as_off_the_air_with_an_age() {
@@ -1722,6 +1778,8 @@ int main() {
   test_offsets_are_against_canonical_not_this_mac();
   test_no_live_boxes_means_no_offsets_at_all();
   test_a_held_camera_reads_as_held();
+  test_a_held_camera_shows_an_age_rather_than_the_word_held();
+  test_a_held_camera_without_a_timestamp_still_gets_an_age();
   test_a_quiet_camera_reads_as_off_the_air_with_an_age();
   test_camera_age_prefers_last_seen_over_the_snapshot();
   test_camera_error_is_shown_only_against_a_bench();

@@ -120,7 +120,11 @@ void test_a_held_camera_is_not_reported_as_missing() {
   if (r == nullptr) return;
   CHECK(r->link == LinkState::kHeld);
   CHECK(r->warn_level == WarnLevel::kNone);
-  CHECK(contains(s.table(), "held"));
+  // Not by printing the word "held" in the AGE column -- that column is for
+  // ages, and it carries one here. What the table must not say is that the
+  // camera has gone, which is the mistake this test exists to catch.
+  CHECK(r->has_age);
+  CHECK(!contains(s.table(), "off the air"));
 }
 
 // A box nobody has enabled votes on nothing and appears nowhere but the

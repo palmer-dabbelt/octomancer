@@ -161,8 +161,9 @@ WarnLevel warn_level_for(const DeviceRow& r) {
   if (!r.warn) return WarnLevel::kNone;
   // A held link is a camera we are talking to continuously, so it is being
   // heard by definition and the last advertisement means nothing. The row
-  // already carries age zero for that reason; this guards it a second time so
-  // the rule reads correctly on its own.
+  // already carries a fresh age for that reason -- octomancer-sync counts the
+  // timecode arriving over the link as contact -- but this guards it a second
+  // time so the rule reads correctly on its own.
   if (r.link != LinkState::kHeld && (!r.has_age || r.age_s > kWarnSilence)) {
     return WarnLevel::kUnsure;
   }
@@ -466,16 +467,19 @@ DeviceView build_device_view(const DeviceSources& from) {
       r.link = c.connected  ? LinkState::kHeld
                : c.present  ? LinkState::kOnTheAir
                             : LinkState::kOffTheAir;
-      // A held link is a camera we are talking to continuously, so the last
-      // advertisement is irrelevant -- it stopped advertising *because* we are
-      // connected. Ageing it from that advertisement would show a camera in
-      // active use drifting towards "not heard for a minute".
-      if (r.link == LinkState::kHeld) {
-        r.has_age = true;
-        r.age_s = 0.0;
-      } else if (c.has_last_seen) {
+      // A held link is a camera we are talking to continuously, so its last
+      // *advertisement* is irrelevant -- it stopped advertising because we
+      // connected. But octomancer-sync already knows that: it moves last_seen
+      // forward for every timecode frame the held link delivers, which is
+      // several a second, so the ordinary rule gives a fresher number than a
+      // hard zero would and gives it for the right reason. The zero below is
+      // only a floor for a sync too old to report a timestamp at all.
+      if (c.has_last_seen) {
         r.has_age = true;
         r.age_s = std::max(0.0, now - c.last_seen_wall);
+      } else if (r.link == LinkState::kHeld) {
+        r.has_age = true;
+        r.age_s = 0.0;
       } else if (from.bench != nullptr && from.bench->camera.reported &&
                  from.bench->camera.seen &&
                  (from.bench->camera.id == c.id || c.id.empty())) {
@@ -892,12 +896,20 @@ std::string render_devices(const DeviceView& v, bool verbose, bool color,
     // from a camera we happen to have heard from this instant. Those want
     // opposite reactions: one is working, and the other is about to be
     // power-cycled by somebody who read the table.
-    const std::string age = r.link == LinkState::kHeld ? std::string("held")
-                            : r.has_age ? format_age(r.age_s)
-                                        : std::string("--");
-    const char* age_colour = r.link == LinkState::kHeld ? st.green
-                             : r.has_age && link_is_live(r.link) ? ""
-                                                                 : st.dim;
+    // A camera on a held link gets a number like everything else on the page.
+    //
+    // The column used to say "held" for it, and green, which was a link state
+    // wearing an age's clothes: it answered "are we writing to this camera"
+    // in the one place a reader goes to find out how long ago we last heard
+    // from something. Holding a link is not the same as writing to one -- a
+    // cycle that has finished, or backed off, still leaves the link up and
+    // still receives timecode from the camera several times a second -- so the
+    // word was answering a question nobody asked with a fact that was not even
+    // true. The number is: it is the same measurement every other row carries.
+    const std::string age =
+        r.has_age ? format_age(r.age_s) : std::string("--");
+    const char* age_colour =
+        r.has_age && link_is_live(r.link) ? "" : st.dim;
     const std::string off =
         r.has_offset ? offset_text(r.offset_s) : std::string("--");
 

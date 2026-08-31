@@ -607,6 +607,20 @@ refreshed and every row on it is older than it looks. It replaces a line that
 used to say octomancerd was running, which said less -- a daemon can be running
 and still have stopped saying anything new.
 
+**The `AGE` column never says "held".** It used to, for a camera on a held
+link, and in green: a link state sitting in the one place a reader goes to find
+out how long ago something was last heard from. It was not even the state it
+claimed. Holding a link is not the same as writing to a camera -- a sync cycle
+that has finished, or has backed off after one, leaves the link up and goes on
+receiving timecode over it several times a second -- so the word answered a
+question nobody had asked, with a fact that was not true, in a cell that had a
+real number available all along. `octomancer-sync` counts every timecode frame
+arriving over a held link as contact and moves `last_seen` forward for it, so
+the ordinary age rule gives a held camera a fresher figure than the hard zero
+the special case used to force, and gives it for the right reason. The zero
+survives only as a floor for a sync too old to send a timestamp at all, because
+a blank there on a camera we are connected to reads as one that has gone.
+
 **Grey means one thing, so the `VIA` cell has to obey it.** Dim on this page is
 not decoration -- it says a row is a memory rather than a reading, and it is
 applied to a whole row at once so that half a line does not read as current

@@ -251,7 +251,13 @@ DeviceView build_device_view(const DeviceSources& from) {
   // itself, and if it does not then the median is not a time at all.
   RadioView here = radio_view(from, std::string());
   here.local = true;
-  here.name = "this Mac";
+  // Named, not described. "this Mac" is what a page says when it has only one
+  // radio and no need to distinguish it; beside a dongle, the useful thing is
+  // which machine -- and the VIA column below repeats it on every local row,
+  // where a phrase would be four words of furniture.
+  here.name = (from.bench != nullptr && !from.bench->host.empty())
+                  ? from.bench->host
+                  : std::string("this Mac");
   here.way = "local";
   // A local radio is read, not asked, so it has no answer to be waiting for.
   // The thing that goes wrong with it is not silence but refusal, and that is
@@ -567,6 +573,22 @@ DeviceView build_device_view(const DeviceSources& from) {
       v.worst_warning = r.warn_level;
     }
   }
+
+  // What each radio currently has, counted off the finished rows so that the
+  // section and the table can never disagree about how many there are. Live
+  // only: a device on the page and off the air is not something a radio is
+  // hearing, and counting it would make a room look fuller than it is.
+  for (RadioView& rv : v.radios) {
+    for (const DeviceRow& r : v.rows) {
+      const bool mine = rv.local ? r.radio.empty() : r.radio == rv.name;
+      if (!mine || !link_is_live(r.link)) continue;
+      if (r.kind == DeviceKind::kCamera) {
+        ++rv.live_cameras;
+      } else {
+        ++rv.live_boxes;
+      }
+    }
+  }
   return v;
 }
 
@@ -639,6 +661,15 @@ std::string render_devices(const DeviceView& v, bool verbose, bool color,
   for (const DeviceRow& r : v.rows) {
     if (!r.radio.empty()) { show_via = true; break; }
   }
+  // What a row with no radio of its own is labelled with. Blank used to be the
+  // answer -- absence meaning "this machine" everywhere else -- but the column
+  // only exists when there is more than one radio, and in that situation an
+  // empty cell is the one thing on the page that has to be inferred. Every row
+  // says where it came from, or the column is not there at all.
+  std::string local_name = "this Mac";
+  for (const RadioView& rv : v.radios) {
+    if (rv.local) { local_name = rv.name; break; }
+  }
 
   // What is wrong with *this Mac's* radio, when we are hearing nothing on it.
   //
@@ -696,49 +727,38 @@ std::string render_devices(const DeviceView& v, bool verbose, bool color,
   // the dongle", and a sentence buried above a table is not where somebody
   // looks for that.
   //
-  // SKEW is the radio's own clock against the mesh time it has worked out --
-  // a fact about the radio, which is why it is here and not on every row. It
-  // is the useful number for this Mac (a laptop that has not seen an NTP
-  // server all week says so here) and a meaningless one for a dongle running
-  // on the clock it started at boot, which is why that case prints "free"
-  // rather than the large exact number it could print. Comparing two radios'
-  // skews is the cross-radio comparison this design refuses to make; SPREAD
-  // is the column that *is* comparable between them, because a spread is a
-  // difference and the unknown origin cancels.
+  // No column for a radio's own clock, deliberately. Each radio has a view of
+  // the mesh time and syncs against that; the host clock is never used for
+  // anything, so its distance from the mesh is a number with no consequence --
+  // and on a dongle running from its boot counter it is not even a duration
+  // anybody could act on. SPREAD is the figure that survives: it is a
+  // difference, so whatever origin a radio invented cancels out of it exactly,
+  // and it is directly comparable between two radios that agree on nothing
+  // else.
   // Never a heading over nothing: build_device_view always supplies this
   // machine's radio, but a view assembled by hand need not have.
   if (!v.radios.empty() && (always_radios || verbose || v.radios.size() > 1)) {
-  out += fmt("%s%-10s %-10s %6s %10s %9s %5s%s\n", st.head, "RADIO", "LINK",
-             "AGE", "SKEW", "SPREAD", "BOXES", st.off);
+  out += fmt("%s%-10s %-10s %6s %9s %8s %7s%s\n", st.head, "RADIO", "LINK",
+             "AGE", "SPREAD", "TIMECODE", "CAMERAS", st.off);
   for (const RadioView& rv : v.radios) {
     const char* live = rv.answering ? "" : st.dim;
     const std::string age =
         rv.has_age ? format_age(rv.age_s) : std::string("--");
-    // "free" rather than a number, deliberately. See above.
-    const std::string skew =
-        !rv.clock_is_real  ? std::string("free")
-        : rv.has_canonical ? offset_text(rv.canonical_offset_s)
-                           : std::string("--");
     const std::string spread = rv.has_canonical
                                    ? offset_text(rv.canonical_spread_s)
                                    : std::string("--");
     const char* spread_colour =
         rv.has_canonical && rv.canonical_spread_s > kWarnOffset ? st.yellow
                                                                 : live;
-    out += fmt("%s%-10s%s %s%-10s%s %s%6s%s %s%10s%s %s%9s%s %s%5d%s\n",
+    out += fmt("%s%-10s%s %s%-10s%s %s%6s%s %s%9s%s %s%8d%s %s%7d%s\n",
                live, fit_label(rv.name, 10, false).c_str(), st.off,
                live, link_way_label(rv.way), st.off,
                live, age.c_str(), st.off,
-               live, skew.c_str(), st.off,
                spread_colour, spread.c_str(), st.off,
-               live, rv.contributing, st.off);
+               live, rv.live_boxes, st.off,
+               live, rv.live_cameras, st.off);
   }
-  // Said once, where the duplicate rows below are otherwise alarming: a bench
-  // that appears to have doubled overnight is a thing somebody investigates.
-  if (v.radios.size() > 1) {
-    out += fmt("%sboxes heard by more than one radio are listed once per"
-               " radio%s\n\n", st.dim, st.off);
-  }
+  out += "\n";
   }
 
   if (v.rows.empty()) {
@@ -819,11 +839,12 @@ std::string render_devices(const DeviceView& v, bool verbose, bool color,
     const std::string rssi = r.has_rssi ? fmt("%d", r.rssi) : "--";
     out += fmt("%s%-14.14s%s", name_colour, label.c_str(), st.off);
     if (show_via) {
-      // Blank rather than "this Mac" for our own rows. The column is there to
-      // mark the ones that came from somewhere else; labelling the majority
-      // would bury that under repetition.
+      // Every row says which radio heard it, our own included. The column
+      // only exists when there is more than one radio, and in that situation a
+      // blank cell is the one thing on the page a reader has to infer.
       out += fmt("%s %-10.10s%s", st.dim,
-                 r.radio.empty() ? "" : r.radio.c_str(), st.off);
+                 r.radio.empty() ? local_name.c_str() : r.radio.c_str(),
+                 st.off);
     }
     out += fmt(" %s%6s%s %s%10s%s %s%-11s%s %s%5s%s",
                r.has_age && *live == '\0' ? "" : st.dim, age.c_str(), st.off,

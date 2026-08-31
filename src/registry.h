@@ -204,6 +204,14 @@ struct RadioLink {
 struct Snapshot {
   double wall = 0.0;
   double uptime = 0.0;
+  // What this machine is called, for naming its radio on a page that lists
+  // more than one. Short form -- everything before the first dot -- because it
+  // goes in a column beside "dongle" rather than in a log line.
+  //
+  // It travels rather than being read locally, because the daemon that owns
+  // the radio is the only thing that knows whose radio it is. Empty from a
+  // daemon too old to send it, and a reader falls back to "this Mac".
+  std::string host;
   std::string radio = "unknown";
   uint64_t adverts_total = 0;
   uint64_t undecodable_total = 0;

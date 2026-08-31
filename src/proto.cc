@@ -73,6 +73,7 @@ std::string render_text(const Snapshot& s) {
   out += "snapshot";
   put(&out, "wall", s.wall, 3);
   put(&out, "uptime", s.uptime, 1);
+  put(&out, "host", s.host);
   put(&out, "radio", s.radio);
   put(&out, "adverts", static_cast<long long>(s.adverts_total));
   put(&out, "undecodable", static_cast<long long>(s.undecodable_total));
@@ -168,6 +169,7 @@ std::string render_json(const Snapshot& s) {
   out += "\"protocol\":" + std::to_string(kProtocolVersion);
   out += ",\"wall\":" + json_number(s.wall, 3);
   out += ",\"uptime\":" + json_number(s.uptime, 1);
+  out += ",\"host\":" + json_string(s.host);
   out += ",\"radio\":" + json_string(s.radio);
   out += ",\"adverts\":" + std::to_string(s.adverts_total);
   out += ",\"undecodable\":" + std::to_string(s.undecodable_total);
@@ -318,6 +320,7 @@ bool parse_text(const std::string& text, Snapshot* out, std::string* err) {
         if (!split_kv(token, &key, &value)) continue;
         if (key == "wall") out->wall = to_double(value);
         else if (key == "uptime") out->uptime = to_double(value);
+        else if (key == "host") out->host = value;
         else if (key == "radio") out->radio = value;
         else if (key == "adverts") out->adverts_total = to_int(value);
         else if (key == "undecodable") out->undecodable_total = to_int(value);

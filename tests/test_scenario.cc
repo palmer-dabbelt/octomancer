@@ -58,13 +58,10 @@ void test_a_bench_that_agrees_reads_as_milliseconds_apart() {
   const std::string page = s.table();
   CHECK(contains(page, "F55"));
   CHECK(contains(page, "on the air"));
-  // Not on any device row. The RADIO section quotes this Mac's distance from
-  // the bench deliberately -- that is a fact about the Mac, and the one place
-  // it belongs -- so the check is against the table underneath rather than
-  // against the whole page.
-  const size_t table_at = page.find("DEVICE");
-  CHECK(table_at != std::string::npos);
-  CHECK(!contains(page.substr(table_at), "-3.5"));
+  // Nowhere on the page, not merely nowhere in the table. There is no column
+  // anywhere for a host clock's distance from the mesh: nothing syncs against
+  // the host clock, so the number has no consequence.
+  CHECK(!contains(page, "-3.5"));
 }
 
 // A camera in the file that is switched off. Both sources of camera rows are

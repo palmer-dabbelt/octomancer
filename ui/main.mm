@@ -958,9 +958,17 @@ struct ScanHit {
     const octo::DeviceView view = [self deviceView];
     for (const octo::DeviceRow& r : view.rows) {
       if (r.kind != octo::DeviceKind::kTentacle) continue;
-      NSString* where =
-          r.radio.empty() ? @"" : [NSString stringWithFormat:@" (%@)",
-                                                             ns(r.radio)];
+      NSString* where = @"";
+      if (view.radios.size() > 1) {
+        std::string whose = r.radio;
+        if (whose.empty()) {
+          whose = "this Mac";
+          for (const octo::RadioView& rv : view.radios) {
+            if (rv.local) { whose = rv.name; break; }
+          }
+        }
+        where = [NSString stringWithFormat:@" (%@)", ns(whose)];
+      }
       NSString* line =
           [NSString stringWithFormat:@"%@%@%@  %@", r.alerting ? @"⚠ " : @"",
                                      ns(r.name), where,
@@ -2406,6 +2414,11 @@ const CGFloat kWindowWidth = 460.0;
     _canonicalLine.textColor = [NSColor systemOrangeColor];
   }
 
+  std::string local_radio = "this Mac";
+  for (const octo::RadioView& rv : view.radios) {
+    if (rv.local) { local_radio = rv.name; break; }
+  }
+
   NSMutableArray<NSString*>* keys = [NSMutableArray array];
   for (const octo::DeviceRow& r : view.rows) {
     [keys addObject:ns((r.kind == octo::DeviceKind::kCamera ? "c:" : "t:") +
@@ -2443,15 +2456,20 @@ const CGFloat kWindowWidth = 460.0;
       mark = @" ?";
       named = [NSColor systemYellowColor];
     }
-    // Which radio heard it, when it was not this one. The terminal spends a
-    // column on this; here there is room to say it in words, and without it a
-    // bench in earshot of a dongle lists "BMPCC" twice with nothing to tell
-    // the two apart -- which reads as the page repeating itself rather than
-    // as two radios agreeing.
-    NSString* via =
-        r.radio.empty()
-            ? @""
-            : [NSString stringWithFormat:@" (via %@)", ns(r.radio)];
+    // Which radio heard it. The terminal spends a column on this; here there
+    // is room to say it in words, and without it a bench in earshot of a
+    // dongle lists "BMPCC" twice with nothing to tell the two apart -- which
+    // reads as the page repeating itself rather than as two radios agreeing.
+    //
+    // Only when there is more than one radio, and then on every row including
+    // ours: a blank where the others carry a name is the one thing on the page
+    // a reader would have to infer.
+    NSString* via = @"";
+    if (view.radios.size() > 1) {
+      via = [NSString stringWithFormat:@" (via %@)",
+                                       ns(r.radio.empty() ? local_radio
+                                                          : r.radio)];
+    }
     cells[0].stringValue =
         [[ns(r.name) stringByAppendingString:via] stringByAppendingString:mark];
     cells[0].textColor = named;

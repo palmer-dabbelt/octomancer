@@ -329,6 +329,21 @@ const double kRadioSilentAfter = 10.0;
 // listening to a radio -- but it must not be silent either, or a roster
 // quietly stops surviving restarts and nobody finds out until they are looking
 // for a box that has gone missing.
+// What to call this machine's radio on a page that lists more than one.
+//
+// Short form: everything before the first dot, because macOS hands out
+// "studio-imac.local" and the column it goes in is ten characters wide next to
+// "dongle". Empty if the system will not say, and the reader falls back to
+// "this Mac" rather than showing a blank where a name belongs.
+std::string short_hostname() {
+  char buf[256];
+  if (::gethostname(buf, sizeof buf) != 0) return std::string();
+  buf[sizeof buf - 1] = '\0';
+  std::string name(buf);
+  const size_t dot = name.find('.');
+  return dot == std::string::npos ? name : name.substr(0, dot);
+}
+
 void save_devices(const octo::Registry& registry, const octo::NameBook& names,
                   const std::string& path, bool quiet) {
   static bool complained = false;
@@ -977,8 +992,14 @@ int main(int argc, char** argv) {
     names.put(d.id, entry);
   }
 
-  auto assemble = [&registry, &box, &names]() {
+  // Asked once. It cannot change while the process runs, and a page that
+  // redraws every second should not be making a system call to find out what
+  // this machine is called.
+  const std::string host = short_hostname();
+
+  auto assemble = [&registry, &box, &names, &host]() {
     octo::Snapshot snap = registry.snapshot();
+    snap.host = host;
     if (box) {
       const double now = octo::mono_now();
       const std::vector<octo::DeviceSnapshot> rows = box->view().devices(now);

@@ -536,6 +536,40 @@ The suffix is doing more than labelling, which the next section is about: it is
 half the name of the thing being measured, not a note about where the row came
 from.
 
+**Built, 2026-08-31, and it came out as a table rather than as prose.** The
+first attempt wrote the second radio up in sentences above the device
+table -- "also hearing via dongle -- 3 timecode boxes, spread +26.2ms" -- and
+that reads as an aside about an unusual case rather than as an inventory. The
+shape that works is a `RADIO` section: one row per radio, with how it is
+reached (`local`, `USB`, `Bluetooth`), how long since it last answered, the
+spread across its boxes, and how many timecode boxes and cameras it currently
+hears. A radio gets a row whether or not it contributed a device, because a
+dongle that is attached and has heard nothing is a different thing from no
+dongle, and both are otherwise an absence.
+
+The suffix landed as a `VIA` column, and it names **every** row including this
+machine's -- by hostname, not by "this Mac". The column only exists when there
+is more than one radio, and in that situation an empty cell is the one thing on
+the page that has to be inferred. The hostname travels in the snapshot rather
+than being read locally: the daemon that owns the radio is the only thing that
+knows whose radio it is.
+
+**There is no column for a radio's own clock, and that was a deliberate
+removal.** The first version had a `SKEW` column showing each radio's distance
+from the mesh time it had worked out. It is a real measurement and it is
+useless: nothing syncs against the host clock, so its distance from the mesh
+has no consequence for anything -- and on a dongle counting from the instant it
+was plugged in, it is a large exact number about an imaginary origin, which
+invites exactly the cross-radio comparison the section below refuses to make.
+`SPREAD` is the figure that survives, because a spread is a difference and
+whatever origin a radio invented cancels out of it.
+
+The one-shot `octomancer status` shows the section only when there is more than
+one radio, or on `--verbose`. A three-line block listing a single radio is the
+kind of preamble that stops a status page being read. The TUI shows it always:
+a page that persists has the opposite economics, and there the axis every
+offset below is measured against is worth a permanent line.
+
 This is what settles the identity question in "Six decisions" below from a
 recommendation into a requirement. A name for each sync daemon is not internal
 bookkeeping to be added when convenient -- it is on the screen, so it has to be

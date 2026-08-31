@@ -96,6 +96,20 @@ Both rules are then present, the https→ssh one still fires, and the clone dies
 with the same `publickey` error as before. Verified again on 2026-08-29: the
 override fails, `GIT_CONFIG_GLOBAL=/dev/null` succeeds.
 
+**The Zephyr SDK is already here, in `third_party/`.** Not in `$HOME`, not in
+`/opt`, and `west` is not on `$PATH` -- so the obvious checks all say it is
+missing and the obvious conclusion is that the firmware cannot be built. It
+can:
+
+```
+./tools/flash-dongle.sh --build      # into third_party/build-fw
+```
+
+`~/zephyrproject` exists and contains only a `.venv` and an empty `.west`,
+which makes the wrong answer look confirmed rather than merely unfound. Check
+`third_party/` before believing the firmware is unbuildable, and before asking
+to install anything.
+
 **Do not install large toolchains without asking first.** A Zephyr SDK, an
 embedded cross-compiler, anything measured in gigabytes: ask, even when it is
 plainly needed for the task at hand. Write the code that can be written

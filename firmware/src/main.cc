@@ -347,40 +347,45 @@ int main() {
     }
   });
 
+  // Ask the room what it is called, while anything in it is unnamed.
+  //
+  // A Tentacle keeps its clock in the advertisement and its name in the scan
+  // response, so a passive radio -- which is what this was, always -- knows
+  // the time exactly and cannot name a single box. Every device this dongle
+  // reported was listed by its hardware address for that reason.
+  //
+  // Checked on a slow timer rather than per advertisement: the decision is
+  // damped anyway (src/naming.h) and building a snapshot is the expensive
+  // part of asking.
+  //
+  // Outside the LED block, which is where this was written by accident. A
+  // board with no LED in its devicetree would have skipped the naming timer
+  // along with the flashing and reported every box by its hardware address
+  // forever, for want of an indicator nobody was looking at.
+  octo::Loop* const lp = loop.get();
+  loop->every(5.0, [&registry, &scanner, lp, &clock]() {
+    if (!scanner) return;
+    const octo::Snapshot snap = registry.snapshot(lp->now(), clock.wall());
+    int unnamed = 0;
+    for (const octo::DeviceSnapshot& d : snap.device) {
+      if (d.live && octo::is_placeholder_name(d.name)) ++unnamed;
+    }
+    static bool active = false;
+    static double changed_at = 0.0;
+    const bool want =
+        octo::want_active_scan(active, unnamed, lp->now() - changed_at);
+    if (want == active) return;
+    active = want;
+    changed_at = lp->now();
+    scanner->set_active(active);
+  });
+
   if (g_led.port != nullptr) {
     gpio_pin_configure_dt(&g_led, GPIO_OUTPUT_INACTIVE);
     // Idle is an even flash; attached is lit with a short wink in it. Two
     // states that look different across the room, which is the whole job: the
     // questions a person standing over the dongle has are "is it running" and
     // "did the Mac find it", and there is no console to answer either.
-    // Ask the room what it is called, while anything in it is unnamed.
-    //
-    // A Tentacle keeps its clock in the advertisement and its name in the scan
-    // response, so a passive radio -- which is what this was, always -- knows
-    // the time exactly and cannot name a single box. Every device this dongle
-    // reported was listed by its hardware address for that reason.
-    //
-    // Checked on a slow timer rather than per advertisement: the decision is
-    // damped anyway (src/naming.h) and building a snapshot is the expensive
-    // part of asking.
-    octo::Loop* const lp = loop.get();
-    loop->every(5.0, [&registry, &scanner, lp, &clock]() {
-      if (!scanner) return;
-      const octo::Snapshot snap = registry.snapshot(lp->now(), clock.wall());
-      int unnamed = 0;
-      for (const octo::DeviceSnapshot& d : snap.device) {
-        if (d.live && octo::is_placeholder_name(d.name)) ++unnamed;
-      }
-      static bool active = false;
-      static double changed_at = 0.0;
-      const bool want =
-          octo::want_active_scan(active, unnamed, lp->now() - changed_at);
-      if (want == active) return;
-      active = want;
-      changed_at = lp->now();
-      scanner->set_active(active);
-    });
-
     loop->every(0.25, [&peer]() {
       static int tick = 0;
       ++tick;

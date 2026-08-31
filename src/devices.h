@@ -189,6 +189,14 @@ struct RadioView {
   double canonical_offset_s = 0.0;
   double canonical_spread_s = 0.0;
   int contributing = 0;
+  // What this radio is hearing right now, split by kind. Live only: a device
+  // that has gone quiet is still on the page, but it is not something this
+  // radio currently has, and counting it would make a room look fuller than it
+  // is. Cameras are only ever this machine's -- a dongle reports timecode
+  // boxes and nothing else -- so a dongle's camera count is zero rather than
+  // unknown.
+  int live_boxes = 0;
+  int live_cameras = 0;
 };
 
 struct DeviceView {

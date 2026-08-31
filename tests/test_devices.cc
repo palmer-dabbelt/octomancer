@@ -254,7 +254,7 @@ void test_a_silent_box_is_listed_but_left_out_of_the_arithmetic() {
   // sentence above it, but they are still both there.
   CHECK(contains(loud, "RADIO"));
   CHECK(contains(loud, "this Mac"));
-  CHECK(contains(loud, "SKEW"));
+  CHECK(contains(loud, "TIMECODE"));
   CHECK(contains(loud, "1 timecode box off the air"));
 }
 
@@ -1274,9 +1274,9 @@ void test_the_table_says_which_radio_heard_each_row() {
   // hearing this through the dongle" is the question it exists to answer.
   CHECK(contains(out, "RADIO"));
   CHECK(contains(out, "this Mac"));
-  // Said out loud, because a bench that appears to have doubled overnight is
-  // something a person would otherwise go and investigate.
-  CHECK(contains(out, "listed once per radio"));
+  // Every row says which radio heard it, our own included -- when the column
+  // is there at all, a blank cell is the one thing a reader has to infer.
+  CHECK(!contains(row_for(out, "Tentacle_A "), "  --"));
 
   // Our own rows carry no label -- the column marks what came from elsewhere,
   // and writing "this Mac" on the majority would bury that under repetition.
@@ -1333,7 +1333,7 @@ void test_a_radio_that_has_heard_nothing_still_says_it_is_there() {
 // an imaginary time. Comparing it with this Mac's is the cross-radio
 // comparison the design refuses to make -- see doc/box-notes.md -- so the
 // column says "free" rather than eleven hours.
-void test_a_radio_with_no_clock_says_free_rather_than_a_number() {
+void test_a_radio_with_no_clock_quotes_no_absolute_time() {
   CamConf conf = plain_conf();
   Snapshot snap = two_radios(39600.0);
   octo::RadioLink link;
@@ -1347,8 +1347,12 @@ void test_a_radio_with_no_clock_says_free_rather_than_a_number() {
   const DeviceView v = view_of(snap, &conf);
   const std::string out = strip_escapes(octo::render_devices(v, false, false));
 
-  CHECK(contains(out, "free"));
-  // The displacement is real and exact, and it is nowhere on the page.
+  // The displacement is real and exact, and it is nowhere on the page. There
+  // is no column for a radio's own clock at all: the host clock is never used
+  // to sync anything, so its distance from the mesh has no consequence, and on
+  // a dongle counting from boot it is not even a duration anybody could act
+  // on.
+  CHECK(!contains(out, "SKEW"));
   CHECK(!contains(out, "39599"));
   CHECK(!contains(out, "+39600"));
   // How it is reached, which is the question "am I actually using the dongle"
@@ -1401,6 +1405,63 @@ void test_a_radio_that_is_not_answering_keeps_its_row() {
   // No rows of its own, so no VIA column -- the section is what says it is
   // there, and the table is only about devices.
   CHECK(!contains(out, "VIA"));
+}
+
+// Which machine, not "this Mac". Beside a dongle the useful thing is the name
+// of the host, and it goes in the VIA column on every local row -- so the
+// daemon that owns the radio has to say what it is called, because nothing
+// else knows whose radio it is.
+void test_the_local_radio_is_named_after_its_host() {
+  CamConf conf = plain_conf();
+  Snapshot snap = two_radios(39600.0);
+  snap.host = "studio";
+
+  const DeviceView v = view_of(snap, &conf);
+  CHECK(v.radios[0].local);
+  CHECK_STR(v.radios[0].name, "studio");
+
+  const std::string out = strip_escapes(octo::render_devices(v, false, false));
+  CHECK(contains(out, "studio"));
+  CHECK(!contains(out, "this Mac"));
+  // On the rows too, not only in the section. The column exists precisely
+  // because there is more than one radio, and a blank cell in it would be the
+  // one thing on the page a reader has to infer.
+  CHECK(contains(row_for(out, "Tentacle_A "), "studio"));
+}
+
+// A daemon too old to say what host it is on. The fallback is a phrase rather
+// than a blank, because the column has to say something and "" would read as a
+// row nobody heard.
+void test_a_host_that_did_not_say_falls_back_to_a_phrase() {
+  CamConf conf = plain_conf();
+  const DeviceView v = view_of(two_radios(39600.0), &conf);
+  CHECK_STR(v.radios[0].name, "this Mac");
+}
+
+// Two counts rather than one, because "3 devices" over a table holding two
+// timecode boxes and a camera is a number somebody has to go and check.
+void test_each_radio_counts_boxes_and_cameras_separately() {
+  CamConf conf = conf_with("with-camera", "camera cam-1 writes=on name=Cam\n");
+  Snapshot snap = two_radios(39600.0);
+  snap.camera.reported = true;
+  snap.camera.seen = true;
+  snap.camera.present = true;
+  snap.camera.id = "cam-1";
+  snap.camera.name = "Cam";
+
+  const DeviceView v = view_of(snap, &conf);
+  CHECK_EQ(static_cast<int>(v.radios.size()), 2);
+  CHECK_EQ(v.radios[0].live_boxes, 3);
+  CHECK_EQ(v.radios[0].live_cameras, 1);
+  // A dongle reports timecode boxes and nothing else, so its camera count is
+  // a real zero rather than an unknown.
+  CHECK_EQ(v.radios[1].live_boxes, 3);
+  CHECK_EQ(v.radios[1].live_cameras, 0);
+
+  const std::string out = strip_escapes(octo::render_devices(v, false, false));
+  CHECK(contains(out, "TIMECODE"));
+  CHECK(contains(out, "CAMERAS"));
+  CHECK(!contains(out, "BOXES"));
 }
 
 void test_the_second_radio_survives_colour_unchanged() {
@@ -1507,9 +1568,12 @@ int main() {
   test_the_table_says_which_radio_heard_each_row();
   test_unnamed_boxes_keep_the_end_of_their_address();
   test_a_radio_that_has_heard_nothing_still_says_it_is_there();
-  test_a_radio_with_no_clock_says_free_rather_than_a_number();
+  test_a_radio_with_no_clock_quotes_no_absolute_time();
   test_a_radio_reached_over_the_air_says_so();
   test_a_radio_that_is_not_answering_keeps_its_row();
+  test_the_local_radio_is_named_after_its_host();
+  test_a_host_that_did_not_say_falls_back_to_a_phrase();
+  test_each_radio_counts_boxes_and_cameras_separately();
   test_the_second_radio_survives_colour_unchanged();
   test_a_refused_radio_says_so_even_when_a_dongle_fills_the_table();
   test_a_working_radio_is_not_complained_about();

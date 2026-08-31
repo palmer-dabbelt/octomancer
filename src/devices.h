@@ -164,7 +164,27 @@ struct DeviceRow {
 // is 14 ms ahead of its bench", and if they disagree about that, something is
 // genuinely wrong -- which is the whole reason for listening twice.
 struct RadioView {
+  // What the rows are tagged with, except for the local radio, which is
+  // tagged with nothing and named here for the reader.
   std::string name;
+  // Whether this is the radio in this machine. The local one is always
+  // present and always first, so that the section reads as a list of radios
+  // rather than a list of exceptions.
+  bool local = false;
+  // How the radio is reached: "local", "usb", "bluetooth", or "none" for one
+  // that is known about and not currently answering.
+  std::string way = "local";
+  bool answering = true;
+  // Since this radio's last complete answer. Meaningless for the local radio,
+  // which does not answer -- it is simply read.
+  bool has_age = false;
+  double age_s = 0.0;
+  // Whether this radio's clock means anything beyond its own arithmetic. A
+  // dongle nobody has told the time measures everything against the instant
+  // it was plugged in, so its canonical offset is a real number about an
+  // imaginary origin: exact, and not a time. Quoting it as a skew would be
+  // the cross-radio comparison this whole design refuses to make.
+  bool clock_is_real = true;
   bool has_canonical = false;
   double canonical_offset_s = 0.0;
   double canonical_spread_s = 0.0;
@@ -177,9 +197,10 @@ struct DeviceView {
   // the daemons gave, which is stable across polls.
   std::vector<DeviceRow> rows;
 
-  // Radios other than this machine's that contributed rows, in the order
-  // their first row appeared. This machine's own radio is not in here: it is
-  // the one the header is about.
+  // Every radio in play, this machine's first and any others in the order
+  // their first row appeared. Never empty: this machine always has a radio,
+  // even when it is switched off or refused, and a section that omitted it
+  // would be answering "which radios are there" with "the unusual ones".
   std::vector<RadioView> radios;
 
   bool has_canonical = false;
@@ -236,7 +257,15 @@ DeviceView build_device_view(const DeviceSources& from);
 // The terminal rendering, in the manner of render.cc's box table. `color=false`
 // produces exactly the same bytes minus the escape sequences, which is what
 // makes it testable.
-std::string render_devices(const DeviceView& v, bool verbose, bool color);
+//
+// `always_radios` forces the RADIO section on. Without it the section appears
+// only when there is more than one radio, or when somebody asked for detail --
+// because a one-shot `octomancer status` on a Mac with one radio should be the
+// table and nothing else, and a three-line table listing one radio is exactly
+// the preamble that stops a status page being read. A page that persists has
+// the opposite economics, so src/tui.h asks for it unconditionally.
+std::string render_devices(const DeviceView& v, bool verbose, bool color,
+                           bool always_radios = false);
 
 }  // namespace octo
 

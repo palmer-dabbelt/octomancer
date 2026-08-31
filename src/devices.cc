@@ -95,6 +95,16 @@ bool box_votes_for(const CamConf* conf, const DeviceSnapshot& d,
 RadioView radio_view(const DeviceSources& from, const std::string& radio) {
   RadioView rv;
   rv.name = radio;
+  if (!radio.empty()) {
+    // The defaults on the struct describe the local radio, which is the one
+    // that needs no describing. Anything else starts as unreachable and
+    // clockless until the snapshot says otherwise -- so a daemon too old to
+    // send a `radio` line prints "--" and "free" rather than confidently
+    // claiming a dongle is local and its boot clock is a time of day.
+    rv.way = "none";
+    rv.answering = false;
+    rv.clock_is_real = false;
+  }
   std::vector<double> votes;
   if (from.bench != nullptr) {
     for (const DeviceSnapshot& d : from.bench->device) {
@@ -178,6 +188,17 @@ std::string fit_label(const std::string& label, size_t width, bool from_end) {
          label.substr(label.size() - (keep - head));
 }
 
+// How a radio is reached, as a person reads it. The wire spellings are
+// lower-case words chosen for a protocol; these are chosen for a column.
+const char* link_way_label(const std::string& way) {
+  if (way == "local") return "local";
+  if (way == "usb") return "USB";
+  if (way == "bluetooth") return "Bluetooth";
+  // A radio we know about and are not currently reaching. Not "none", which
+  // reads as a property of the radio rather than of our end of the cable.
+  return "--";
+}
+
 // The marker a warned row carries in the DEVICE column. One character either
 // way, and the same character with colour off: the tests compare the coloured
 // output against the plain one byte for byte, and somebody piping this into a
@@ -228,7 +249,16 @@ DeviceView build_device_view(const DeviceSources& from) {
   // from BenchStatus for the reason the header gives. Spread is their full
   // min-to-max range: it is the number that says whether the bench agrees with
   // itself, and if it does not then the median is not a time at all.
-  const RadioView here = radio_view(from, std::string());
+  RadioView here = radio_view(from, std::string());
+  here.local = true;
+  here.name = "this Mac";
+  here.way = "local";
+  // A local radio is read, not asked, so it has no answer to be waiting for.
+  // The thing that goes wrong with it is not silence but refusal, and that is
+  // already said in full by DeviceView::radio.
+  here.answering = from.bench != nullptr;
+  here.clock_is_real =
+      from.bench == nullptr ? true : from.bench->wall_is_real;
   if (here.has_canonical) {
     v.has_canonical = true;
     v.contributing = here.contributing;
@@ -246,17 +276,48 @@ DeviceView build_device_view(const DeviceSources& from) {
     v.canonical_source = "octomancer-sync";
   }
 
-  // Every other radio that contributed a row, each with a canonical time of
-  // its own. First-appearance order rather than sorted, so a dongle does not
-  // move around the page when a box it can hear goes quiet.
+  // This machine's radio is always the first entry, whatever it has managed
+  // to hear. A list of radios that omits the one doing the listening reads as
+  // a list of exceptions rather than as an inventory.
+  v.radios.push_back(here);
+
+  // Then every other radio, each with a canonical time of its own.
+  // First-appearance order rather than sorted, so a dongle does not move
+  // around the page when a box it can hear goes quiet.
+  //
+  // Taken from both the rows and the snapshot's own list of links, because
+  // those answer different questions: a dongle that is attached and has heard
+  // nothing contributes no rows at all, and dropping it here would render it
+  // identically to no dongle. Rows first, so a radio that is doing something
+  // keeps its place at the top.
   if (from.bench != nullptr) {
-    for (const DeviceSnapshot& d : from.bench->device) {
-      if (d.radio.empty()) continue;
-      bool known = false;
+    auto known = [&v](const std::string& name) {
       for (const RadioView& rv : v.radios) {
-        if (rv.name == d.radio) { known = true; break; }
+        if (!rv.local && rv.name == name) return true;
       }
-      if (!known) v.radios.push_back(radio_view(from, d.radio));
+      return false;
+    };
+    for (const DeviceSnapshot& d : from.bench->device) {
+      if (d.radio.empty() || known(d.radio)) continue;
+      v.radios.push_back(radio_view(from, d.radio));
+    }
+    for (const RadioLink& l : from.bench->radio_link) {
+      if (l.name.empty() || known(l.name)) continue;
+      v.radios.push_back(radio_view(from, l.name));
+    }
+    // How each one is reached, which is a fact about the link rather than
+    // about anything it heard, so it arrives separately from the rows.
+    for (RadioView& rv : v.radios) {
+      if (rv.local) continue;
+      for (const RadioLink& l : from.bench->radio_link) {
+        if (l.name != rv.name) continue;
+        rv.way = l.way;
+        rv.answering = l.answering;
+        rv.has_age = l.answering;
+        rv.age_s = l.age;
+        rv.clock_is_real = l.clock_is_real;
+        break;
+      }
     }
   }
 
@@ -274,7 +335,7 @@ DeviceView build_device_view(const DeviceSources& from) {
       if (!d.radio.empty()) {
         row_has_canonical = false;
         for (const RadioView& rv : v.radios) {
-          if (rv.name != d.radio) continue;
+          if (rv.local || rv.name != d.radio) continue;
           row_has_canonical = rv.has_canonical;
           row_canonical = rv.canonical_offset_s;
           break;
@@ -551,7 +612,8 @@ std::string radio_complaint(const std::string& radio) {
   return "the radio reports \"" + radio + "\".";
 }
 
-std::string render_devices(const DeviceView& v, bool verbose, bool color) {
+std::string render_devices(const DeviceView& v, bool verbose, bool color,
+                           bool always_radios) {
   const Style st = style_for(color);
   std::string out;
 
@@ -569,7 +631,14 @@ std::string render_devices(const DeviceView& v, bool verbose, bool color) {
   // Only when a second radio has contributed rows. The ordinary table is the
   // one almost everybody sees, and it should not grow a column of blanks for
   // the sake of a case that is not theirs.
-  const bool show_via = !v.radios.empty();
+  // On the rows, not on the radio list. A dongle that is attached and has
+  // heard nothing belongs in the RADIO section -- that is what says it is
+  // there -- but it must not add a column of blanks to a table where every
+  // row came from this machine.
+  bool show_via = false;
+  for (const DeviceRow& r : v.rows) {
+    if (!r.radio.empty()) { show_via = true; break; }
+  }
 
   // What is wrong with *this Mac's* radio, when we are hearing nothing on it.
   //
@@ -599,14 +668,6 @@ std::string render_devices(const DeviceView& v, bool verbose, bool color) {
   if (!v.has_canonical) {
     head += fmt("%sno canonical time -- no enabled timecode box is live, so"
                 " there is nothing to measure against%s\n", st.dim, st.off);
-  } else if (verbose) {
-    const char* spread_colour = v.canonical_spread_s > 0.100 ? st.yellow : "";
-    head += fmt("canonical time  %s vs this Mac,  spread %s%s%s across %d"
-                " timecode box%s on the air\n",
-                offset_text(v.canonical_offset_s).c_str(), spread_colour,
-                offset_text(v.canonical_spread_s).c_str(),
-                spread_colour[0] == '\0' ? "" : st.off, v.contributing,
-                v.contributing == 1 ? "" : "es");
   }
   if (verbose) {
     head += fmt("%scanonical source: %s%s\n", st.dim,
@@ -619,27 +680,6 @@ std::string render_devices(const DeviceView& v, bool verbose, bool color) {
                 " on the canonical time and not in the spread%s\n",
                 st.dim, v.silent, v.silent == 1 ? "" : "es", st.off);
   }
-  for (const RadioView& rv : v.radios) {
-    // Said plainly, because the duplicate rows below are otherwise alarming:
-    // a bench that appears to have doubled overnight is a thing somebody
-    // investigates.
-    if (rv.has_canonical) {
-      head += fmt("%salso hearing via %s -- %d timecode box%s, spread %s;"
-                  " boxes heard by both radios are listed twice%s\n",
-                  st.dim, rv.name.c_str(), rv.contributing,
-                  rv.contributing == 1 ? "" : "es",
-                  offset_text(rv.canonical_spread_s).c_str(), st.off);
-    } else {
-      head += fmt("%salso listening via %s, which has not heard a timecode"
-                  " box yet%s\n", st.dim, rv.name.c_str(), st.off);
-    }
-    if (verbose) {
-      head += fmt("%s  its offsets are against its own bench, not ours: the"
-                  " two radios cannot agree on an identifier for a box, so"
-                  " nothing here can prove two rows are the same one%s\n",
-                  st.dim, st.off);
-    }
-  }
   if (v.hidden > 0) {
     // Kept out of --verbose for the same reason as the missing canonical time:
     // rows are absent from the table and nothing else on the page says why.
@@ -647,6 +687,59 @@ std::string render_devices(const DeviceView& v, bool verbose, bool color) {
                 st.dim, v.hidden, v.hidden == 1 ? "" : "s", st.off);
   }
   if (!head.empty()) out += head + "\n";
+
+  // --- the radios ------------------------------------------------------
+  //
+  // Which radios there are, how each is reached, and what each makes of the
+  // room. This replaced four lines of prose that said the same thing badly:
+  // the question it exists to answer is "am I actually hearing this through
+  // the dongle", and a sentence buried above a table is not where somebody
+  // looks for that.
+  //
+  // SKEW is the radio's own clock against the mesh time it has worked out --
+  // a fact about the radio, which is why it is here and not on every row. It
+  // is the useful number for this Mac (a laptop that has not seen an NTP
+  // server all week says so here) and a meaningless one for a dongle running
+  // on the clock it started at boot, which is why that case prints "free"
+  // rather than the large exact number it could print. Comparing two radios'
+  // skews is the cross-radio comparison this design refuses to make; SPREAD
+  // is the column that *is* comparable between them, because a spread is a
+  // difference and the unknown origin cancels.
+  // Never a heading over nothing: build_device_view always supplies this
+  // machine's radio, but a view assembled by hand need not have.
+  if (!v.radios.empty() && (always_radios || verbose || v.radios.size() > 1)) {
+  out += fmt("%s%-10s %-10s %6s %10s %9s %5s%s\n", st.head, "RADIO", "LINK",
+             "AGE", "SKEW", "SPREAD", "BOXES", st.off);
+  for (const RadioView& rv : v.radios) {
+    const char* live = rv.answering ? "" : st.dim;
+    const std::string age =
+        rv.has_age ? format_age(rv.age_s) : std::string("--");
+    // "free" rather than a number, deliberately. See above.
+    const std::string skew =
+        !rv.clock_is_real  ? std::string("free")
+        : rv.has_canonical ? offset_text(rv.canonical_offset_s)
+                           : std::string("--");
+    const std::string spread = rv.has_canonical
+                                   ? offset_text(rv.canonical_spread_s)
+                                   : std::string("--");
+    const char* spread_colour =
+        rv.has_canonical && rv.canonical_spread_s > kWarnOffset ? st.yellow
+                                                                : live;
+    out += fmt("%s%-10s%s %s%-10s%s %s%6s%s %s%10s%s %s%9s%s %s%5d%s\n",
+               live, fit_label(rv.name, 10, false).c_str(), st.off,
+               live, link_way_label(rv.way), st.off,
+               live, age.c_str(), st.off,
+               live, skew.c_str(), st.off,
+               spread_colour, spread.c_str(), st.off,
+               live, rv.contributing, st.off);
+  }
+  // Said once, where the duplicate rows below are otherwise alarming: a bench
+  // that appears to have doubled overnight is a thing somebody investigates.
+  if (v.radios.size() > 1) {
+    out += fmt("%sboxes heard by more than one radio are listed once per"
+               " radio%s\n\n", st.dim, st.off);
+  }
+  }
 
   if (v.rows.empty()) {
     // The reason, if the radio is it, is already in the header above. Without

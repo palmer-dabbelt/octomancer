@@ -111,6 +111,19 @@ std::string render_text(const Snapshot& s) {
     out += "\n";
   }
 
+  // One line per radio that is not this machine's. Before the devices,
+  // because a reader meeting `radio=dongle` on a device line should already
+  // have been told what a dongle is.
+  for (const RadioLink& r : s.radio_link) {
+    out += "radio";
+    put(&out, "name", r.name);
+    put(&out, "way", r.way);
+    put(&out, "answering", static_cast<long long>(r.answering ? 1 : 0));
+    put(&out, "age", r.age, 2);
+    put(&out, "clock_real", static_cast<long long>(r.clock_is_real ? 1 : 0));
+    out += "\n";
+  }
+
   for (const DeviceSnapshot& d : s.device) {
     out += "device";
     put(&out, "id", d.id);
@@ -166,6 +179,22 @@ std::string render_json(const Snapshot& s) {
   // handed a total that quietly includes it.
   out += ",\"remote_devices\":" + std::to_string(s.remote_devices);
   out += ",\"remote_live\":" + std::to_string(s.remote_live);
+  out += ",\"radio_link\":[";
+  {
+    bool first_link = true;
+    for (const RadioLink& r : s.radio_link) {
+      if (!first_link) out += ",";
+      first_link = false;
+      out += "{\"name\":" + json_string(r.name);
+      out += ",\"way\":" + json_string(r.way);
+      out += ",\"answering\":" + std::string(r.answering ? "true" : "false");
+      out += ",\"age\":" + json_number(r.age, 2);
+      out += ",\"clock_real\":" +
+             std::string(r.clock_is_real ? "true" : "false");
+      out += "}";
+    }
+  }
+  out += "]";
   out += ",\"alerting\":" + std::to_string(s.alerting);
   out += ",\"alert_threshold\":" + json_number(s.alert_threshold, 1);
   if (s.has_bench) {
@@ -328,6 +357,22 @@ bool parse_text(const std::string& text, Snapshot* out, std::string* err) {
         else if (key == "adverts") out->camera.adverts = to_int(value);
         else if (key == "up_wall") out->camera.up_wall = to_double(value);
       }
+      continue;
+    }
+
+    if (verb == "radio") {
+      RadioLink r;
+      std::string token, key, value;
+      while (fields >> token) {
+        if (!split_kv(token, &key, &value)) continue;
+        if (key == "name") r.name = value;
+        else if (key == "way") r.way = value;
+        else if (key == "answering") r.answering = to_int(value) != 0;
+        else if (key == "age") r.age = to_double(value);
+        else if (key == "clock_real") r.clock_is_real = to_int(value) != 0;
+      }
+      // A line with no name says nothing and would render as a blank row.
+      if (!r.name.empty()) out->radio_link.push_back(std::move(r));
       continue;
     }
 

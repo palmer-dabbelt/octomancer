@@ -171,6 +171,36 @@ struct CameraSnapshot {
   double up_wall = 0.0;     // when the current session began
 };
 
+// How a radio other than this machine's is being reached, and what it last
+// said.
+//
+// The rows a second radio contributes already say which radio heard them, but
+// that is not enough to read them: a dongle on a cable and a dongle in a phone
+// charger behave differently when they go quiet, and a dongle nobody has told
+// the time quotes every offset against a constant it invented at boot. All
+// three facts are about the radio rather than about any device it heard, so
+// they travel once rather than on every row.
+struct RadioLink {
+  // What the rows are tagged with. Empty is this machine's own radio, which
+  // never appears here -- it has no link to describe.
+  std::string name;
+  // "usb", "bluetooth", or "none" for a radio we are not currently reaching.
+  // Deliberately the wire spelling rather than an enum: src/dongle.h owns the
+  // enum, and a snapshot that depended on it would drag the dongle into every
+  // reader of a registry.
+  std::string way = "none";
+  // Since the last complete answer from this radio, not since it last heard a
+  // box. A dongle that has stopped answering and a room that has gone quiet
+  // want opposite reactions, and ageing one as the other is how they get
+  // confused.
+  double age = 0.0;
+  bool answering = false;
+  // Whether this radio's offsets can be compared to real time. False on a
+  // dongle running on the clock it started at boot, which is the ordinary
+  // standalone case rather than a fault -- see Snapshot::wall_is_real.
+  bool clock_is_real = false;
+};
+
 struct Snapshot {
   double wall = 0.0;
   double uptime = 0.0;
@@ -208,6 +238,11 @@ struct Snapshot {
   // timecode boxes, and would count every box in earshot of both twice.
   int remote_devices = 0;
   int remote_live = 0;
+
+  // One entry per radio that is not this machine's, whether or not it
+  // currently has rows in `device`. A dongle that is attached and has heard
+  // nothing is a different thing from no dongle at all, and only this says so.
+  std::vector<RadioLink> radio_link;
   int alerting = 0;
   bool has_bench = false;
   double bench_offset = 0.0;  // median across live boxes

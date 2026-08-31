@@ -112,6 +112,53 @@ void test_text_round_trip() {
   CHECK_STR(b.note, "static/info packet");
 }
 
+// How a second radio is reached travels once, beside the rows rather than on
+// them: it is a fact about the link, and repeating it on every row would be
+// both noise and an invitation to disagree with itself.
+void test_radio_links_round_trip() {
+  Snapshot in = sample_snapshot();
+  RadioLink usb;
+  usb.name = "dongle";
+  usb.way = "usb";
+  usb.answering = true;
+  usb.age = 1.25;
+  usb.clock_is_real = false;
+  in.radio_link.push_back(usb);
+  RadioLink air;
+  air.name = "spare";
+  air.way = "bluetooth";
+  air.answering = false;
+  in.radio_link.push_back(air);
+
+  Snapshot out;
+  std::string err;
+  CHECK(parse_text(render_text(in), &out, &err));
+  CHECK_EQ(static_cast<long long>(out.radio_link.size()), 2LL);
+  CHECK_STR(out.radio_link[0].name, "dongle");
+  CHECK_STR(out.radio_link[0].way, "usb");
+  CHECK(out.radio_link[0].answering);
+  CHECK_NEAR(out.radio_link[0].age, 1.25, 1e-2);
+  // The one that must survive intact: a dongle whose clock is its own boot
+  // counter, so that nothing downstream quotes it as a time of day.
+  CHECK(!out.radio_link[0].clock_is_real);
+  CHECK_STR(out.radio_link[1].way, "bluetooth");
+  CHECK(!out.radio_link[1].answering);
+
+  const std::string json = render_json(in);
+  CHECK(json.find("\"radio_link\"") != std::string::npos);
+  CHECK(json.find("\"way\":\"usb\"") != std::string::npos);
+  CHECK(json.find("\"clock_real\":false") != std::string::npos);
+}
+
+// A snapshot from a daemon with no dongle says so by saying nothing, and a
+// reader must not invent a radio out of that.
+void test_no_radio_line_means_no_second_radio() {
+  Snapshot out;
+  std::string err;
+  CHECK(parse_text(render_text(sample_snapshot()), &out, &err));
+  CHECK(out.radio_link.empty());
+}
+
 void test_rejects_junk() {
   Snapshot out;
   std::string err;
@@ -245,6 +292,8 @@ void test_hostile_camera_name() {
 int main() {
   test_escaping_round_trip();
   test_text_round_trip();
+  test_radio_links_round_trip();
+  test_no_radio_line_means_no_second_radio();
   test_rejects_junk();
   test_ignores_unknown_keys();
   test_json_is_wellformed_enough();

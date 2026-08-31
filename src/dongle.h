@@ -201,6 +201,17 @@ class DongleView {
   // this is what tells them apart.
   uint64_t answers() const { return answers_; }
 
+  // How long since the last complete answer, and whether there has been one.
+  //
+  // This ages the *radio*, not the boxes it heard. Every row it hands over
+  // carries its own age, and those keep counting while the dongle is silent --
+  // so a dongle that has stopped answering shows a page of rows that all look
+  // freshly heard. This is the number that says otherwise.
+  bool ever_answered() const { return current_mono_ != 0.0; }
+  double answer_age(double now_mono) const {
+    return ever_answered() ? now_mono - current_mono_ : 0.0;
+  }
+
  private:
   std::string radio_;
   bool attached_ = false;

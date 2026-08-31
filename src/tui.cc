@@ -38,17 +38,23 @@ std::string fmt(const char* f, ...) {
   return buf;
 }
 
-// A wall clock as a person reads one. This is the only thing on the page that
-// is guaranteed to change every second, which is the point of it: a frozen
-// program and a quiet bench look identical otherwise, and one of those is
-// worth knowing about.
+// A wall clock as a person reads one, with the day in front of it. This is
+// the only thing on the page that is guaranteed to change every second, which
+// is the point of it: a frozen program and a quiet bench look identical
+// otherwise, and one of those is worth knowing about.
+//
+// The date earns its place separately. A camera's timecode is written by
+// setting its date (see src/syncd.h), and a dongle forgets the date on every
+// power cycle -- so "what day does this machine think it is" is a question
+// with real consequences here, and one nobody thinks to ask until it is
+// already wrong.
 std::string clock_of(double wall) {
-  if (wall <= 0.0) return "--:--:--";
+  if (wall <= 0.0) return "--------- --:--:--";
   const time_t secs = static_cast<time_t>(wall);
   struct tm tm_local;
   localtime_r(&secs, &tm_local);
-  char buf[16];
-  std::strftime(buf, sizeof buf, "%H:%M:%S", &tm_local);
+  char buf[32];
+  std::strftime(buf, sizeof buf, "%Y-%m-%d %H:%M:%S", &tm_local);
   return buf;
 }
 
@@ -67,20 +73,25 @@ std::string render_tui(const TuiFrame& f, bool color) {
   const Style st = style_for(color);
   std::string out;
 
-  // The version and the clock, then a line per daemon. `octomancer status`
-  // hides all of this unless something is wrong, because four lines of
-  // preamble in front of a table somebody ran a command for is how a status
-  // page stops being read. Here the argument runs the other way: the page
-  // persists, nothing scrolls past it, and the lines cost a reader nothing
-  // after the first glance. What they buy is that the two facts most likely
-  // to explain a table with half the room missing are already on screen when
-  // it happens, rather than a command away.
-  out += fmt("%s%-24s%s %s%s%s\n", st.bold,
-             ("octomancer " + f.version).c_str(), st.off, st.dim,
-             clock_of(f.now_wall).c_str(), st.off);
+  // One line: what this is, which version, and what time it thinks it is.
+  //
+  // It used to be this line plus one per daemon, always. The argument for the
+  // daemon lines was that a persistent page costs a reader nothing after the
+  // first glance -- which is true of one line and stops being true of four,
+  // because four lines of preamble is how the thing underneath them stops
+  // being read. What is actually worth a permanent line is the clock, because
+  // it is the only proof the page is still alive.
+  //
+  // So the daemons speak only when there is something wrong. The state that
+  // used to be shown continuously -- "up 39s" -- was never read; the state
+  // worth interrupting for is "not answering", and that still gets a line of
+  // its own, in the colour of the trouble.
+  out += fmt("%soctomancer TUI (v%s)%s %s%s%s\n", st.bold, f.version.c_str(),
+             st.off, st.dim, clock_of(f.now_wall).c_str(), st.off);
   for (const TuiDaemon& d : f.daemons) {
     const AgentSituation sit =
         agent_situation(d.state, d.answering, f.now_wall);
+    if (sit.mood == AgentMood::kFine) continue;
     out += fmt("  %-16s %s%s%s\n", agent_program(d.agent),
                mood_colour(st, sit.mood), sit.said.c_str(), st.off);
   }
@@ -100,7 +111,7 @@ std::string render_tui(const TuiFrame& f, bool color) {
   }
 
   out += "\n";
-  out += render_devices(f.view, false, color);
+  out += render_devices(f.view, false, color, true);
   out += "\n";
 
   // The one verb this page has. Dim, and on its own line at the bottom, where

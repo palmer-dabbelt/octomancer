@@ -70,6 +70,13 @@ TuiFrame frame_with(int devices) {
   for (int i = 0; i < devices; ++i) {
     f.view.rows.push_back(box("box-" + std::to_string(i), 0.001 * i));
   }
+  octo::RadioView here;
+  here.local = true;
+  here.name = "this Mac";
+  here.way = "local";
+  here.has_canonical = devices > 0;
+  here.contributing = devices;
+  f.view.radios.push_back(here);
   f.view.has_canonical = devices > 0;
   f.view.contributing = devices;
   f.view.canonical_source = "octomancerd";
@@ -119,16 +126,23 @@ void test_the_page_says_how_to_leave_it() {
   CHECK_STR(lines.back(), "q to quit");
 }
 
-void test_the_page_carries_the_version_the_daemons_and_the_table() {
+void test_the_page_carries_the_version_the_radios_and_the_table() {
   const std::string page = octo::render_tui(frame_with(2), false);
-  CHECK(contains(page, "octomancer 9.9.9"));
+  CHECK(contains(page, "octomancer TUI (v9.9.9)"));
   CHECK(contains(page, "22:13:20"));
-  // Both daemons named, whether or not anything is wrong with them. On a page
-  // that persists there is no cost to saying it, and the alternative is a
-  // table quietly missing half the room with nothing on screen to say why.
-  CHECK(contains(page, "octomancerd"));
-  CHECK(contains(page, "octomancer-sync"));
-  CHECK(contains(page, "answering"));
+  // The date as well as the time. A camera's timecode is written by setting
+  // its date, so what day this machine thinks it is has consequences, and it
+  // is not a question anybody thinks to ask until it is already wrong.
+  CHECK(contains(page, "2023-11-14"));
+  // Daemons that are fine say nothing. Four lines of preamble is how the
+  // table underneath stops being read, and "up 39s" was never the thing
+  // anybody came to the page for.
+  CHECK(!contains(page, "octomancerd"));
+  CHECK(!contains(page, "octomancer-sync"));
+  // The radios do get a permanent section: on a page that persists, the axis
+  // every offset below is measured against is worth one line.
+  CHECK(contains(page, "RADIO"));
+  CHECK(contains(page, "this Mac"));
   CHECK(contains(page, "DEVICE"));
   CHECK(contains(page, "box-0"));
   CHECK(contains(page, "box-1"));
@@ -276,7 +290,7 @@ int main() {
   tzset();
 
   test_the_page_says_how_to_leave_it();
-  test_the_page_carries_the_version_the_daemons_and_the_table();
+  test_the_page_carries_the_version_the_radios_and_the_table();
   test_a_daemon_that_is_not_answering_says_which_kind_of_wrong();
   test_the_conditions_appear_only_when_they_hold();
   test_colour_only_adds_escapes();

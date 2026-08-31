@@ -250,7 +250,11 @@ void test_a_silent_box_is_listed_but_left_out_of_the_arithmetic() {
 
   const std::string loud = strip_escapes(octo::render_devices(v, true, false));
   CHECK(!contains(loud, "40.5ms"));
-  CHECK(contains(loud, "across 4 timecode boxes on the air"));
+  // The count and the axis now live in the RADIO table rather than in a
+  // sentence above it, but they are still both there.
+  CHECK(contains(loud, "RADIO"));
+  CHECK(contains(loud, "this Mac"));
+  CHECK(contains(loud, "SKEW"));
   CHECK(contains(loud, "1 timecode box off the air"));
 }
 
@@ -317,10 +321,10 @@ void test_the_brief_view_is_the_table_and_nothing_else() {
   CHECK(contains(text, "RSSI"));
   CHECK(contains(text, "-55"));
 
-  // And with it, the header is back and the table is still under it.
+  // And with it, the RADIO section is back and the table is still under it.
   const std::string loud = strip_escapes(octo::render_devices(v, true, false));
   CHECK(loud.compare(0, 6, "DEVICE") != 0);
-  CHECK(contains(loud, "canonical time"));
+  CHECK(contains(loud, "RADIO"));
   CHECK(contains(loud, "DEVICE"));
 
   // The brief table is the first columns of the verbose one, character for
@@ -353,10 +357,13 @@ void test_offsets_are_against_canonical_not_this_mac() {
   const std::string text = octo::render_devices(v, false, false);
   CHECK(contains(text, "-10.0ms"));
   CHECK(contains(text, "+10.0ms"));
-  // This Mac is not mentioned at all in the brief view, and with --verbose
-  // there is exactly one place it appears: the header.
-  CHECK(!contains(text, "vs this Mac"));
-  CHECK(contains(octo::render_devices(v, true, false), "vs this Mac"));
+  // This Mac is not mentioned at all in the brief view of a single-radio
+  // bench, and with --verbose there is exactly one place it appears: its own
+  // row in the RADIO section, where the raw +1000s shows up as a skew.
+  CHECK(!contains(text, "this Mac"));
+  const std::string loud = strip_escapes(octo::render_devices(v, true, false));
+  CHECK(contains(loud, "this Mac"));
+  CHECK(contains(loud, "+1000.0"));
 }
 
 void test_no_live_boxes_means_no_offsets_at_all() {
@@ -1190,16 +1197,22 @@ void test_the_other_radio_is_listed_with_its_own_bench() {
   CamConf conf = plain_conf();
   const DeviceView v = view_of(two_radios(39600.0), &conf);
 
-  CHECK_EQ(static_cast<int>(v.radios.size()), 1);
-  CHECK_STR(v.radios[0].name, "dongle");
-  CHECK(v.radios[0].has_canonical);
-  CHECK_EQ(v.radios[0].contributing, 3);
+  // This machine's radio is always first, and always present. A list of
+  // radios that left out the one doing the listening would read as a list of
+  // exceptions rather than as an inventory.
+  CHECK_EQ(static_cast<int>(v.radios.size()), 2);
+  CHECK(v.radios[0].local);
+  CHECK_STR(v.radios[0].way, "local");
+  CHECK(!v.radios[1].local);
+  CHECK_STR(v.radios[1].name, "dongle");
+  CHECK(v.radios[1].has_canonical);
+  CHECK_EQ(v.radios[1].contributing, 3);
   // Its own median, displacement and all -- which is the honest figure for a
   // radio that does not know what time it is, and is why the rows are quoted
   // against it rather than it being shown as an offset.
-  CHECK_NEAR(v.radios[0].canonical_offset_s, 39600.0 - 0.500, 1e-9);
+  CHECK_NEAR(v.radios[1].canonical_offset_s, 39600.0 - 0.500, 1e-9);
   // ...but it agrees with us exactly about how far apart the boxes are.
-  CHECK_NEAR(v.radios[0].canonical_spread_s, v.canonical_spread_s, 1e-9);
+  CHECK_NEAR(v.radios[1].canonical_spread_s, v.canonical_spread_s, 1e-9);
 }
 
 // A dongle that has only just been plugged in has heard one box, or none. Its
@@ -1218,8 +1231,8 @@ void test_a_radio_with_no_bench_of_its_own_quotes_no_offsets() {
 
   const DeviceView v = view_of(snap, &conf);
   CHECK(v.has_canonical);
-  CHECK_EQ(static_cast<int>(v.radios.size()), 1);
-  CHECK(!v.radios[0].has_canonical);
+  CHECK_EQ(static_cast<int>(v.radios.size()), 2);
+  CHECK(!v.radios[1].has_canonical);
 
   const DeviceRow* theirs = nullptr;
   for (const DeviceRow& r : v.rows) {
@@ -1244,7 +1257,10 @@ void test_the_table_is_unchanged_without_a_second_radio() {
       octo::render_devices(view_of(snap, &conf), false, false);
 
   CHECK(!contains(out, "VIA"));
-  CHECK(!contains(out, "also hearing"));
+  // One radio and no --verbose is the table and nothing else: a three-line
+  // section listing a single radio is exactly the preamble that stops a
+  // status page being read.
+  CHECK(!contains(out, "RADIO"));
   CHECK(contains(out, "DEVICE"));
 }
 
@@ -1254,10 +1270,13 @@ void test_the_table_says_which_radio_heard_each_row() {
   const std::string out = octo::render_devices(v, false, false);
 
   CHECK(contains(out, "VIA"));
+  // A second radio brings the section with it, unasked: "am I actually
+  // hearing this through the dongle" is the question it exists to answer.
+  CHECK(contains(out, "RADIO"));
+  CHECK(contains(out, "this Mac"));
   // Said out loud, because a bench that appears to have doubled overnight is
   // something a person would otherwise go and investigate.
-  CHECK(contains(out, "also hearing via dongle"));
-  CHECK(contains(out, "listed twice"));
+  CHECK(contains(out, "listed once per radio"));
 
   // Our own rows carry no label -- the column marks what came from elsewhere,
   // and writing "this Mac" on the majority would bury that under repetition.
@@ -1302,8 +1321,86 @@ void test_a_radio_that_has_heard_nothing_still_says_it_is_there() {
 
   const std::string out =
       octo::render_devices(view_of(snap, &conf), false, false);
-  CHECK(contains(out, "also listening via dongle"));
-  CHECK(contains(out, "has not heard a timecode box yet"));
+  // It gets a row whether or not it heard anything, and the row says it has
+  // no bench of its own rather than borrowing ours.
+  CHECK(contains(out, "RADIO"));
+  CHECK(contains(out, "dongle"));
+}
+
+// The whole point of the section, and the one number on it that must never be
+// printed: a dongle running on the clock it started at boot measures every
+// offset against an origin it invented, so its "skew" is an exact number about
+// an imaginary time. Comparing it with this Mac's is the cross-radio
+// comparison the design refuses to make -- see doc/box-notes.md -- so the
+// column says "free" rather than eleven hours.
+void test_a_radio_with_no_clock_says_free_rather_than_a_number() {
+  CamConf conf = plain_conf();
+  Snapshot snap = two_radios(39600.0);
+  octo::RadioLink link;
+  link.name = "dongle";
+  link.way = "usb";
+  link.answering = true;
+  link.age = 2.0;
+  link.clock_is_real = false;
+  snap.radio_link.push_back(link);
+
+  const DeviceView v = view_of(snap, &conf);
+  const std::string out = strip_escapes(octo::render_devices(v, false, false));
+
+  CHECK(contains(out, "free"));
+  // The displacement is real and exact, and it is nowhere on the page.
+  CHECK(!contains(out, "39599"));
+  CHECK(!contains(out, "+39600"));
+  // How it is reached, which is the question "am I actually using the dongle"
+  // reduced to one column.
+  CHECK(contains(out, "USB"));
+  // ...and the spread is quoted, because a spread is a difference and the
+  // unknown origin cancels out of it exactly.
+  CHECK(contains(out, "+28.0ms"));
+}
+
+// A dongle in a phone charger. Same rows, different column, and nothing else
+// about the page changes -- which is the whole promise of src/boxmsg.h being
+// one protocol over two pipes.
+void test_a_radio_reached_over_the_air_says_so() {
+  CamConf conf = plain_conf();
+  Snapshot snap = two_radios(39600.0);
+  octo::RadioLink link;
+  link.name = "dongle";
+  link.way = "bluetooth";
+  link.answering = true;
+  link.age = 3.0;
+  snap.radio_link.push_back(link);
+
+  const std::string out =
+      strip_escapes(octo::render_devices(view_of(snap, &conf), false, false));
+  CHECK(contains(out, "Bluetooth"));
+  CHECK(!contains(out, "USB"));
+}
+
+// A dongle octomancerd knows about and is not currently reaching. It keeps its
+// row, because "the dongle is not answering" and "there is no dongle" want
+// opposite reactions and an absent row renders them identically.
+void test_a_radio_that_is_not_answering_keeps_its_row() {
+  CamConf conf = plain_conf();
+  Snapshot snap;
+  snap.device.push_back(box("A", "Tentacle_A", true, -0.500));
+  octo::RadioLink link;
+  link.name = "dongle";
+  link.way = "none";
+  link.answering = false;
+  snap.radio_link.push_back(link);
+
+  const DeviceView v = view_of(snap, &conf);
+  CHECK_EQ(static_cast<int>(v.radios.size()), 2);
+  CHECK_STR(v.radios[1].name, "dongle");
+  CHECK(!v.radios[1].answering);
+
+  const std::string out = strip_escapes(octo::render_devices(v, false, false));
+  CHECK(contains(out, "dongle"));
+  // No rows of its own, so no VIA column -- the section is what says it is
+  // there, and the table is only about devices.
+  CHECK(!contains(out, "VIA"));
 }
 
 void test_the_second_radio_survives_colour_unchanged() {
@@ -1410,6 +1507,9 @@ int main() {
   test_the_table_says_which_radio_heard_each_row();
   test_unnamed_boxes_keep_the_end_of_their_address();
   test_a_radio_that_has_heard_nothing_still_says_it_is_there();
+  test_a_radio_with_no_clock_says_free_rather_than_a_number();
+  test_a_radio_reached_over_the_air_says_so();
+  test_a_radio_that_is_not_answering_keeps_its_row();
   test_the_second_radio_survives_colour_unchanged();
   test_a_refused_radio_says_so_even_when_a_dongle_fills_the_table();
   test_a_working_radio_is_not_complained_about();

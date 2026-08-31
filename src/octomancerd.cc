@@ -973,13 +973,23 @@ int main(int argc, char** argv) {
   auto assemble = [&registry, &box, &names]() {
     octo::Snapshot snap = registry.snapshot();
     if (box) {
-      const std::vector<octo::DeviceSnapshot> rows =
-          box->view().devices(octo::mono_now());
+      const double now = octo::mono_now();
+      const std::vector<octo::DeviceSnapshot> rows = box->view().devices(now);
       for (const octo::DeviceSnapshot& d : rows) {
         ++snap.remote_devices;
         if (d.live) ++snap.remote_live;
         snap.device.push_back(d);
       }
+      // Said whether or not it contributed a row. A dongle that is attached
+      // and has heard nothing is a different thing from no dongle at all, and
+      // the rows alone cannot tell those apart -- both are an absence.
+      octo::RadioLink link;
+      link.name = box->view().radio();
+      link.way = octo::link_way_name(box->carrying());
+      link.answering = box->view().greeted() && box->view().ever_answered();
+      link.age = box->view().answer_age(now);
+      link.clock_is_real = box->view().clock_is_real();
+      snap.radio_link.push_back(link);
     }
     // Applied last, so that it applies to a dongle's rows too -- which is the
     // case that has none of its own, because a passive listener never sends

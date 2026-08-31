@@ -52,6 +52,9 @@ bool DeviceDb::load(const std::string& path, std::string* err) {
       return false;
     }
     d.name = rec.text("name");
+    d.user_name = rec.text("user_name");
+    d.probed_name = rec.text("probed_name");
+    d.probed = rec.number("probed") != 0.0;
     d.first_seen_wall = rec.number("first_seen");
     d.last_seen_wall = rec.number("last_seen");
     d.has_time = rec.flag("has_time");
@@ -83,6 +86,15 @@ bool DeviceDb::save(const std::string& path,
       line << "{\"t\":\"device\"";
       line << ",\"id\":\"" << json_escape(d.id) << "\"";
       line << ",\"name\":\"" << json_escape(d.name) << "\"";
+      // Only when there is something to say. A file full of empty strings is
+      // harder to read by eye, and this one is meant to be read that way.
+      if (!d.user_name.empty()) {
+        line << ",\"user_name\":\"" << json_escape(d.user_name) << "\"";
+      }
+      if (!d.probed_name.empty()) {
+        line << ",\"probed_name\":\"" << json_escape(d.probed_name) << "\"";
+      }
+      if (d.probed) line << ",\"probed\":1";
       line.precision(3);
       line << ",\"first_seen\":" << d.first_seen_wall;
       line << ",\"last_seen\":" << d.last_seen_wall;

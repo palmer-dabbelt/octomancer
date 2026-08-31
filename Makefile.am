@@ -85,6 +85,8 @@ libocto_a_SOURCES = \
 	src/loop_posix.cc \
 	src/loopfake.cc \
 	src/loopfake.h \
+	src/naming.cc \
+	src/naming.h \
 	src/pairing.cc \
 	src/pairing.h \
 	src/proclock.cc \
@@ -315,6 +317,7 @@ check_PROGRAMS = \
 	tests/test_crypto \
 	tests/test_devices \
 	tests/test_dongle \
+	tests/test_naming \
 	tests/test_devicedb \
 	tests/test_hci \
 	tests/test_jsonlog \
@@ -352,6 +355,8 @@ tests_test_proto_LDADD = libocto.a
 tests_test_pairing_SOURCES = tests/test_pairing.cc tests/harness.h
 tests_test_pairing_LDADD = libocto.a
 
+tests_test_naming_SOURCES = tests/test_naming.cc tests/harness.h
+tests_test_naming_LDADD = libocto.a
 tests_test_dongle_SOURCES = tests/test_dongle.cc tests/harness.h
 tests_test_dongle_LDADD = libocto.a
 tests_test_bench_SOURCES = tests/test_bench.cc tests/harness.h

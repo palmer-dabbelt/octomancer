@@ -50,6 +50,7 @@
 /tests/test_devicedb
 /tests/test_devices
 /tests/test_dongle
+/tests/test_naming
 /tests/test_fakebench
 /tests/test_fakecamera
 /tests/test_fakedaemon

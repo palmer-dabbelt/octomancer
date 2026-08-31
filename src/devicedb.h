@@ -45,7 +45,19 @@ namespace octo {
 // from "this box was 3.6 s out when it was last heard, three days ago".
 struct RememberedDevice {
   std::string id;
+  // What the device was last heard calling itself. An observation, and the
+  // weakest of the three claims on a row's label -- see src/naming.h.
   std::string name;
+  // What a person called it, and what a probe found. Kept here rather than in
+  // a file of their own because they belong to the same device and are wanted
+  // at the same moment; and kept at all because a box switched off for a week
+  // should come back with the name somebody gave it.
+  std::string user_name;
+  std::string probed_name;
+  // Whether the device has been asked. Distinct from probed_name being empty:
+  // a device that genuinely has no name has been asked and answered, and
+  // without this it is asked again forever.
+  bool probed = false;
 
   double first_seen_wall = 0.0;
   double last_seen_wall = 0.0;

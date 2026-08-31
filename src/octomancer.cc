@@ -286,6 +286,17 @@ void usage(FILE* out) {
       "                        this leaves nothing behind, so a device still\n"
       "                        in range comes back at its defaults. Say which\n"
       "                        with --box and --camera.\n"
+      "  name [WHAT]           call a device something. With no WHAT, it goes\n"
+      "                        back to whatever it calls itself. A name given\n"
+      "                        here outranks anything the device says, and\n"
+      "                        survives the device being switched off for a\n"
+      "                        week. One device at a time, with --box or\n"
+      "                        --camera.\n"
+      "  refresh               forget what a device said it was called, so it\n"
+      "                        is asked again. For a device that has been\n"
+      "                        renamed at its own end. A name given with\n"
+      "                        `name` is kept -- use `name` with no argument\n"
+      "                        to drop that too.\n"
       "  source [MODE]         report or set the camera's timecode source.\n"
       "                        MODE is `time-of-day` (the timecode follows the\n"
       "                        camera's clock, which is what lets it be\n"
@@ -1121,6 +1132,104 @@ int run_remove_command(const Options& opt, const std::string& argument,
   return failures == 0 ? 0 : 1;
 }
 
+// ------------------------------------------------------------- naming
+//
+// A device's label has three possible authors and only one of them is a
+// person; see src/naming.h for the order they are taken in. These are how the
+// person speaks.
+
+// Which devices a command is about, from --box/--camera, resolved against
+// whatever the daemons can currently see. Shared by `name` and `refresh`,
+// which want exactly the same set.
+std::vector<Target> naming_targets(const Options& opt, const octo::CamConf& conf,
+                                   bool* ok) {
+  std::vector<Target> out;
+  *ok = true;
+  octo::Snapshot snap;
+  std::string err;
+  const bool have_bench = octo::fetch(opt.bench_socket_path, &snap, &err);
+  octo::Status status;
+  std::string reply, serr;
+  const bool have_status =
+      octo::query(opt.socket_path, "status", &reply, &serr, 5.0) &&
+      octo::parse_status(reply, &status, &serr);
+
+  for (const Target& t :
+       resolve_boxes(have_bench ? &snap : nullptr, conf, opt.boxes)) {
+    out.push_back(t);
+  }
+  for (const Target& t :
+       resolve_cameras(have_status ? &status : nullptr, conf, opt.cameras)) {
+    out.push_back(t);
+  }
+  if (out.empty()) {
+    std::fprintf(stderr,
+                 "octomancer: say which device, with --box or --camera\n");
+    *ok = false;
+  }
+  return out;
+}
+
+int run_name_command(const Options& opt, const std::string& argument,
+                     const Paint& p) {
+  octo::CamConf conf;
+  std::string cerr;
+  conf.load(octo::default_camera_config_path(), &cerr);
+
+  bool ok = false;
+  const std::vector<Target> targets = naming_targets(opt, conf, &ok);
+  if (!ok) return 2;
+  if (targets.size() != 1) {
+    std::fprintf(stderr,
+                 "octomancer: name takes one device at a time -- naming %d of"
+                 " them the same thing is not something to do by accident\n",
+                 static_cast<int>(targets.size()));
+    return 2;
+  }
+
+  const std::string id = targets[0].first;
+  std::string reply, err;
+  const std::string ask =
+      argument.empty() ? "name " + id : "name " + id + " " + argument;
+  if (!octo::query(opt.bench_socket_path, ask, &reply, &err, 5.0)) {
+    std::fprintf(stderr, "octomancer: %s\n", err.c_str());
+    return 1;
+  }
+  if (argument.empty()) {
+    std::printf("%s%s%s is back to whatever it calls itself\n", p(kGreen),
+                id.c_str(), p(kReset));
+  } else {
+    std::printf("%s%s%s is now called %s\n", p(kGreen), id.c_str(), p(kReset),
+                argument.c_str());
+  }
+  return 0;
+}
+
+int run_refresh_command(const Options& opt, const Paint& p) {
+  octo::CamConf conf;
+  std::string cerr;
+  conf.load(octo::default_camera_config_path(), &cerr);
+
+  bool ok = false;
+  const std::vector<Target> targets = naming_targets(opt, conf, &ok);
+  if (!ok) return 2;
+
+  int failures = 0;
+  for (const Target& d : targets) {
+    const std::string label = d.second.empty() ? d.first : d.second;
+    std::string reply, err;
+    if (!octo::query(opt.bench_socket_path, "refresh " + d.first, &reply, &err,
+                     5.0)) {
+      std::fprintf(stderr, "octomancer: %s\n", err.c_str());
+      ++failures;
+      continue;
+    }
+    std::printf("%s%s%s forgotten -- it will be asked again what it is"
+                " called\n", p(kGreen), label.c_str(), p(kReset));
+  }
+  return failures == 0 ? 0 : 1;
+}
+
 // ------------------------------------------------------------------ status
 //
 // The one command that talks to both daemons. Neither knows what the other can
@@ -1424,6 +1533,14 @@ int main(int argc, char** argv) {
 
   if (command == "remove" || command == "forget") {
     return run_remove_command(opt, argument, paint);
+  }
+
+  if (command == "name" || command == "rename") {
+    return run_name_command(opt, argument, paint);
+  }
+
+  if (command == "refresh") {
+    return run_refresh_command(opt, paint);
   }
 
   if (command == "reload") {

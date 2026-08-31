@@ -17,6 +17,7 @@
 #include <unistd.h>
 
 #include <atomic>
+#include <set>
 #include <cstdarg>
 #include <map>
 #include <memory>
@@ -34,6 +35,8 @@
 #include "loop.h"
 #include "devicedb.h"
 #include "jsonlog.h"
+#include "escape.h"
+#include "naming.h"
 #include "proto.h"
 #include "proclock.h"
 #include "registry.h"
@@ -326,12 +329,47 @@ const double kRadioSilentAfter = 10.0;
 // listening to a radio -- but it must not be silent either, or a roster
 // quietly stops surviving restarts and nobody finds out until they are looking
 // for a box that has gone missing.
-void save_devices(const octo::Registry& registry, const std::string& path,
-                  bool quiet) {
+void save_devices(const octo::Registry& registry, const octo::NameBook& names,
+                  const std::string& path, bool quiet) {
   static bool complained = false;
   octo::DeviceDb db;
   std::string err;
-  if (db.save(path, registry.remembered(octo::wall_now()), &err)) {
+
+  std::vector<octo::RememberedDevice> rows =
+      registry.remembered(octo::wall_now());
+  // The names go back into the records on the way out. The registry knows
+  // only what a device last called itself; everything else about its label --
+  // what a person chose, what a probe found -- lives in the book.
+  std::set<std::string> written;
+  for (octo::RememberedDevice& d : rows) {
+    const auto it = names.all().find(d.id);
+    if (it == names.all().end()) continue;
+    d.user_name = it->second.user;
+    d.probed_name = it->second.probed;
+    d.probed = it->second.probed_done;
+    written.insert(d.id);
+  }
+  // A device somebody named that this Mac's radio has never heard has no row
+  // in the registry to carry its name out on -- most often one of a dongle's,
+  // which lives in a different namespace entirely. Losing it would mean a
+  // rename silently failing to survive a restart, for exactly the devices
+  // whose owner cared enough to label one.
+  //
+  // These are written with no sighting in them, and the loader knows to put
+  // them in the name book rather than the roster. See the note there.
+  for (const auto& entry : names.all()) {
+    if (written.count(entry.first) != 0) continue;
+    if (entry.second.user.empty()) continue;
+    octo::RememberedDevice d;
+    d.id = entry.first;
+    d.name = entry.second.heard;
+    d.user_name = entry.second.user;
+    d.probed_name = entry.second.probed;
+    d.probed = entry.second.probed_done;
+    rows.push_back(d);
+  }
+
+  if (db.save(path, rows, &err)) {
     complained = false;
     return;
   }
@@ -791,6 +829,16 @@ int main(int argc, char** argv) {
     }
     const double now = octo::wall_now();
     for (const octo::RememberedDevice& d : devices.devices()) {
+      // A record with no sighting in it is a name and nothing else: somebody
+      // labelled a device this Mac's radio has never heard -- most often one
+      // of a dongle's, which lives in a different namespace entirely. It
+      // belongs in the name book, which is loaded separately, and not in the
+      // roster.
+      //
+      // Handing it to the registry made it a device in its own right, dated
+      // from the epoch, so the bench grew a phantom row aged fifty-six years
+      // beside the real one it was the name of.
+      if (d.last_seen_wall <= 0.0) continue;
       registry.remember(d, now);
     }
   }
@@ -908,25 +956,97 @@ int main(int argc, char** argv) {
     box.reset(new BoxPeer(opt.peer_port, opt.ble_use, opt.quiet));
   }
 
-  auto assemble = [&registry, &box]() {
+  // Every name on every row comes from here, whichever radio heard the device
+  // and whether or not it is switched on today. See src/naming.h: the
+  // registry knows what a device last called itself, which is only one of the
+  // three things that can claim to know its name and the weakest of them.
+  octo::NameBook names;
+  for (const octo::RememberedDevice& d : devices.devices()) {
+    octo::DeviceName entry;
+    entry.heard = d.name;
+    entry.user = d.user_name;
+    entry.probed = d.probed_name;
+    entry.probed_done = d.probed;
+    names.put(d.id, entry);
+  }
+
+  auto assemble = [&registry, &box, &names]() {
     octo::Snapshot snap = registry.snapshot();
-    if (!box) return snap;
-    const std::vector<octo::DeviceSnapshot> rows =
-        box->view().devices(octo::mono_now());
-    for (const octo::DeviceSnapshot& d : rows) {
-      ++snap.remote_devices;
-      if (d.live) ++snap.remote_live;
-      snap.device.push_back(d);
+    if (box) {
+      const std::vector<octo::DeviceSnapshot> rows =
+          box->view().devices(octo::mono_now());
+      for (const octo::DeviceSnapshot& d : rows) {
+        ++snap.remote_devices;
+        if (d.live) ++snap.remote_live;
+        snap.device.push_back(d);
+      }
+    }
+    // Applied last, so that it applies to a dongle's rows too -- which is the
+    // case that has none of its own, because a passive listener never sends
+    // the scan request that would fetch one.
+    for (octo::DeviceSnapshot& d : snap.device) {
+      names.heard(d.id, d.name);
+      d.name = names.display(d.id);
     }
     return snap;
   };
 
   octo::Handler base = octo::registry_handler(registry, assemble);
+  const std::string tag =
+      "octomancer " + std::to_string(octo::kProtocolVersion) + "\n";
+
+  // `name <id> <what to call it>` and `refresh <id>`.
+  //
+  // The identifier is taken verbatim up to the first space, and everything
+  // after it is the name -- spaces and all, because "B camera" is what
+  // somebody will type and quoting rules are a thing to get wrong at both
+  // ends. That works because no identifier this program deals in contains a
+  // space: a CoreBluetooth UUID is hex and dashes, a hardware address is hex
+  // and colons.
+  auto name_command = [&](const std::string& command) -> std::string {
+    const size_t sp = command.find(' ', 5);
+    const std::string id =
+        sp == std::string::npos ? command.substr(5) : command.substr(5, sp - 5);
+    if (id.empty()) {
+      return tag + "error name needs a device id\n";
+    }
+    const std::string want =
+        sp == std::string::npos ? std::string() : command.substr(sp + 1);
+    names.rename(id, want);
+    if (!opt.devices_path.empty()) {
+      save_devices(registry, names, opt.devices_path, opt.quiet);
+    }
+    // Written through immediately rather than at the next save timer, for the
+    // same reason `forget` is: it is a decision somebody made, and a decision
+    // that did not survive a restart reads as the program ignoring them.
+    return tag + (want.empty() ? "unnamed " : "named ") + octo::escape(id) +
+           (want.empty() ? std::string() : " " + octo::escape(want)) + "\n";
+  };
+
+  auto refresh_command = [&](const std::string& command) -> std::string {
+    const std::string id = command.substr(8);
+    if (id.empty()) {
+      return tag + "error refresh needs a device id\n";
+    }
+    // "Not here" is success, exactly as it is for `forget`: the caller asked
+    // for what we know about the device to be dropped, and it is.
+    const bool had = names.refresh(id);
+    if (!opt.devices_path.empty()) {
+      save_devices(registry, names, opt.devices_path, opt.quiet);
+    }
+    return tag + "refreshed " + octo::escape(id) +
+           (had ? "" : " (nothing was remembered)") + "\n";
+  };
+
   octo::Server server(
       [&](const std::string& command) {
+        if (command.compare(0, 5, "name ") == 0) return name_command(command);
+        if (command.compare(0, 8, "refresh ") == 0) {
+          return refresh_command(command);
+        }
         const std::string reply = base(command);
         if (!opt.devices_path.empty() && command.compare(0, 7, "forget ") == 0) {
-          save_devices(registry, opt.devices_path, opt.quiet);
+          save_devices(registry, names, opt.devices_path, opt.quiet);
         }
         return reply;
       },
@@ -1055,7 +1175,7 @@ int main(int argc, char** argv) {
     // last-seen half a minute earlier than it was.
     if (!opt.devices_path.empty() && octo::mono_now() >= next_save) {
       next_save = octo::mono_now() + kSaveInterval;
-      save_devices(registry, opt.devices_path, opt.quiet);
+      save_devices(registry, names, opt.devices_path, opt.quiet);
     }
   }
 
@@ -1063,7 +1183,7 @@ int main(int argc, char** argv) {
   // Once more on the way out, so an orderly stop does not lose the last
   // interval. A kill -9 still does, which is what the timer above is for.
   if (!opt.devices_path.empty()) {
-    save_devices(registry, opt.devices_path, opt.quiet);
+    save_devices(registry, names, opt.devices_path, opt.quiet);
   }
   log.record("stop", "");
   server.shutdown();

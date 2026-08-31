@@ -1002,11 +1002,18 @@ int main(int argc, char** argv) {
     snap.host = host;
     if (box) {
       const double now = octo::mono_now();
+      const double wall = octo::wall_now();
       const std::vector<octo::DeviceSnapshot> rows = box->view().devices(now);
       for (const octo::DeviceSnapshot& d : rows) {
         ++snap.remote_devices;
         if (d.live) ++snap.remote_live;
         snap.device.push_back(d);
+        // Turned into a stamp on this machine's clock, because that is the
+        // only clock the far end of this snapshot shares with us. The dongle
+        // measured the age against its own free-running one, and the answer
+        // is as of its last batch -- so this is accurate to the poll interval,
+        // which is the accuracy the number had to begin with.
+        snap.device.back().last_wall = wall - d.age;
       }
       // Said whether or not it contributed a row. A dongle that is attached
       // and has heard nothing is a different thing from no dongle at all, and
@@ -1016,6 +1023,7 @@ int main(int argc, char** argv) {
       link.way = octo::link_way_name(box->carrying());
       link.answering = box->view().greeted() && box->view().ever_answered();
       link.age = box->view().answer_age(now);
+      link.last_wall = link.answering ? wall - link.age : 0.0;
       link.clock_is_real = box->view().clock_is_real();
       snap.radio_link.push_back(link);
     }

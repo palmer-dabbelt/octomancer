@@ -115,6 +115,16 @@ struct DeviceSnapshot {
   int rssi = 0;
   uint64_t adverts = 0;
   uint64_t decoded = 0;
+  // When the last advertisement arrived, and how long ago that was *at the
+  // moment this snapshot was built*.
+  //
+  // Both, because they answer to different clocks. `age` is what the daemon
+  // measured, and it is the honest figure for a device that came off disk. But
+  // a snapshot is a photograph, and anything that holds one and redraws --
+  // which is every interface here -- shows an age frozen at the instant it was
+  // taken. So the timestamp travels too, and a renderer that has one subtracts
+  // it from the current time instead. See build_device_view.
+  double last_wall = 0.0;
   double age = 0.0;          // seconds since the last advertisement
   double first_seen_wall = 0.0;
   bool live = false;         // heard from recently enough to count
@@ -184,6 +194,11 @@ struct RadioLink {
   // What the rows are tagged with. Empty is this machine's own radio, which
   // never appears here -- it has no link to describe.
   std::string name;
+  // When this radio last answered, on this machine's clock. Sent for the same
+  // reason a device's is: an age computed here goes stale the moment the
+  // snapshot stops being fresh, and a dongle that has quietly stopped
+  // answering is exactly the thing a frozen age would hide.
+  double last_wall = 0.0;
   // "usb", "bluetooth", or "none" for a radio we are not currently reaching.
   // Deliberately the wire spelling rather than an enum: src/dongle.h owns the
   // enum, and a snapshot that depended on it would drag the dongle into every

@@ -290,15 +290,18 @@ void test_colour_says_which_numbers_are_memories() {
 
     const std::vector<std::string> heard = columns_of(row_for(out, "Tentacle_A"));
     const std::vector<std::string> quiet = columns_of(row_for(out, "Tentacle_B"));
-    CHECK(heard.size() >= 5);
+    // DEVICE, AGE, OFFSET, RSSI. There is no LINK column: whether a device is
+    // being heard is what the dimming in this very test conveys, and a column
+    // repeating it was a third copy of the same fact.
+    CHECK(heard.size() >= 4);
     CHECK(quiet.size() == heard.size());
-    if (heard.size() < 5 || quiet.size() < 5) continue;
+    if (heard.size() < 4 || quiet.size() < 4) continue;
 
     // The two the eye goes to first, named because they are what this is for.
     CHECK(!dimmed(heard[1]));  // age
-    CHECK(!dimmed(heard[4]));  // signal
+    CHECK(!dimmed(heard[3]));  // signal
     CHECK(dimmed(quiet[1]));
-    CHECK(dimmed(quiet[4]));
+    CHECK(dimmed(quiet[3]));
 
     // And the rest of the row with them, every column of it.
     for (size_t i = 0; i < quiet.size(); ++i) CHECK(dimmed(quiet[i]));
@@ -447,7 +450,13 @@ void test_a_quiet_camera_reads_as_off_the_air_with_an_age() {
   CHECK(row->has_age);
   CHECK_NEAR(row->age_s, 30.0, 1e-6);
   CHECK_STR(octo::link_state_name(row->link), "off the air");
-  CHECK(contains(octo::render_devices(v, false, false), "off the air"));
+  // Not a column any more. The row says it by carrying an age and no offset,
+  // and by being drawn dim all the way across.
+  const std::string plain = octo::render_devices(v, false, false);
+  CHECK(!contains(plain, "off the air"));
+  CHECK(contains(row_for(plain, "A:1EAE18A7"), "30s"));
+  CHECK(dimmed(columns_of(row_for(octo::render_devices(v, false, true),
+                                  "A:1EAE18A7"))[1]));
 }
 
 // The daemon's own timestamp wins, because it is absolute: an age computed by
@@ -571,7 +580,13 @@ void test_a_configured_camera_is_listed_even_when_never_heard() {
 
   const std::string text = octo::render_devices(v, false, false);
   CHECK(contains(text, "A:1EAE18A7"));
-  CHECK(contains(text, "off the air"));
+  // No "?" after the name. Every column that could have held a number is
+  // empty, which says "we do not know" three times already; the mark was a
+  // fourth, on the rows least able to spare two characters of name. The
+  // colour stays -- a camera nobody is syncing is the failure this program
+  // exists to prevent -- and this checks the mark is gone, not the warning.
+  CHECK(!contains(text, "A:1EAE18A7 ?"));
+  CHECK(v.worst_warning == WarnLevel::kUnsure);
 }
 
 // Only octomancer-sync goes looking for cameras. With it not answering,
@@ -720,7 +735,9 @@ void test_missing_octomancer_sync_still_lists_what_was_heard() {
   snap.camera.present = false;
   v = octo::build_device_view(from);
   CHECK(find_row(v, "A:1EAE18A7")->link == LinkState::kUnknown);
-  CHECK(contains(octo::render_devices(v, false, false), "unknown"));
+  // The state is still on the row, and still decides how it is drawn; it just
+  // no longer has a column of its own.
+  CHECK(!contains(octo::render_devices(v, false, false), "unknown"));
 }
 
 void test_both_daemons_missing_is_an_empty_view() {
@@ -1098,9 +1115,14 @@ void test_the_table_marks_and_names_the_warned() {
     const std::string plain = octo::render_devices(v, verbose != 0, false);
     const std::string fancy = octo::render_devices(v, verbose != 0, true);
     CHECK(plain.find('\033') == std::string::npos);
-    // The markers are characters, not colours, so they survive the pipe.
+    // "Out of sync" is a measurement, and its marker is a character rather
+    // than a colour so it survives the pipe.
     CHECK(contains(plain, "Tentacle_D !"));
-    CHECK(contains(plain, "Tentacle_C ?"));
+    // "Unsure" is the absence of one, and it has no marker: the empty age and
+    // offset columns already say it, and the yellow says the rest. This is
+    // the one warning that does not survive being piped somewhere colourless,
+    // which is the price of not spending two characters of every name on it.
+    CHECK(!contains(plain, "Tentacle_C ?"));
     // ...and the line under the table says which is which, by name.
     CHECK(contains(plain, "out of sync with the bench: Tentacle_D"));
     // Red always explains itself: an alarm that does not say what it is about
@@ -1411,6 +1433,60 @@ void test_a_radio_that_is_not_answering_keeps_its_row() {
 // of the host, and it goes in the VIA column on every local row -- so the
 // daemon that owns the radio has to say what it is called, because nothing
 // else knows whose radio it is.
+// A snapshot is a photograph, and every interface here holds one and redraws
+// from it. An age copied straight out of one is frozen at the instant the
+// daemon answered, so a device that has gone quiet keeps rendering as though
+// it were still being heard -- which is the one thing the column exists to
+// rule out. The timestamp travels and the age is worked out at display time.
+void test_age_is_computed_from_the_timestamp_not_the_snapshot() {
+  Snapshot snap;
+  DeviceSnapshot d = box("A", "Tentacle_A", true, 0.0);
+  // What the daemon measured when it built this, and when it actually heard
+  // the box. A reader looking at it a minute later must say a minute.
+  d.age = 1.0;
+  d.last_wall = kNow - 1.0;
+  snap.device.push_back(d);
+
+  DeviceSources from;
+  from.bench = &snap;
+  from.now_wall = kNow + 60.0;
+  const DeviceView v = octo::build_device_view(from);
+  CHECK_NEAR(find_row(v, "Tentacle_A")->age_s, 61.0, 1e-6);
+}
+
+// A daemon too old to send the stamp, and a device restored from disk whose
+// last sighting predates this process. Both have an age and no timestamp, and
+// the age is the honest answer for them.
+void test_age_falls_back_when_there_is_no_timestamp() {
+  Snapshot snap;
+  DeviceSnapshot d = box("A", "Tentacle_A", true, 0.0);
+  d.age = 7.0;
+  d.last_wall = 0.0;
+  snap.device.push_back(d);
+
+  DeviceSources from;
+  from.bench = &snap;
+  from.now_wall = kNow + 60.0;
+  const DeviceView v = octo::build_device_view(from);
+  CHECK_NEAR(find_row(v, "Tentacle_A")->age_s, 7.0, 1e-6);
+}
+
+// A clock stepped backwards, or a roster copied off another machine, can put
+// the last sighting in the future. "Heard in three hours' time" is worse than
+// a slightly stale number.
+void test_a_timestamp_in_the_future_is_not_a_negative_age() {
+  Snapshot snap;
+  DeviceSnapshot d = box("A", "Tentacle_A", true, 0.0);
+  d.last_wall = kNow + 3600.0;
+  snap.device.push_back(d);
+
+  DeviceSources from;
+  from.bench = &snap;
+  from.now_wall = kNow;
+  const DeviceView v = octo::build_device_view(from);
+  CHECK_NEAR(find_row(v, "Tentacle_A")->age_s, 0.0, 1e-9);
+}
+
 void test_the_local_radio_is_named_after_its_host() {
   CamConf conf = plain_conf();
   Snapshot snap = two_radios(39600.0);
@@ -1571,6 +1647,9 @@ int main() {
   test_a_radio_with_no_clock_quotes_no_absolute_time();
   test_a_radio_reached_over_the_air_says_so();
   test_a_radio_that_is_not_answering_keeps_its_row();
+  test_age_is_computed_from_the_timestamp_not_the_snapshot();
+  test_age_falls_back_when_there_is_no_timestamp();
+  test_a_timestamp_in_the_future_is_not_a_negative_age();
   test_the_local_radio_is_named_after_its_host();
   test_a_host_that_did_not_say_falls_back_to_a_phrase();
   test_each_radio_counts_boxes_and_cameras_separately();

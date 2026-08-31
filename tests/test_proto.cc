@@ -122,6 +122,7 @@ void test_radio_links_round_trip() {
   usb.way = "usb";
   usb.answering = true;
   usb.age = 1.25;
+  usb.last_wall = 1788000000.5;
   usb.clock_is_real = false;
   in.radio_link.push_back(usb);
   RadioLink air;
@@ -138,6 +139,7 @@ void test_radio_links_round_trip() {
   CHECK_STR(out.radio_link[0].way, "usb");
   CHECK(out.radio_link[0].answering);
   CHECK_NEAR(out.radio_link[0].age, 1.25, 1e-2);
+  CHECK_NEAR(out.radio_link[0].last_wall, 1788000000.5, 1e-2);
   // The one that must survive intact: a dongle whose clock is its own boot
   // counter, so that nothing downstream quotes it as a time of day.
   CHECK(!out.radio_link[0].clock_is_real);

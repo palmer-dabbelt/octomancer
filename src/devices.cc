@@ -188,6 +188,26 @@ std::string fit_label(const std::string& label, size_t width, bool from_end) {
          label.substr(label.size() - (keep - head));
 }
 
+// How long ago something happened, preferring a timestamp to a duration.
+//
+// A snapshot is a photograph: `age` was true at the instant it was taken, and
+// every interface here holds one and redraws from it, so an age copied
+// straight out is frozen at whatever it was when the daemon answered. A
+// device that has gone quiet then reads as though it were still being heard,
+// which is the one thing the column exists to rule out.
+//
+// So the timestamp wins when there is one, and `age` is the fallback -- for a
+// device restored from disk, whose last sighting predates this process, and
+// for a daemon too old to send the stamp at all.
+double age_from(double last_wall, double reported_age, double now) {
+  if (last_wall <= 0.0 || now <= 0.0) return reported_age;
+  const double age = now - last_wall;
+  // A clock stepped backwards, or a roster copied from another machine, can
+  // put the last sighting in the future. "Heard in three hours' time" is worse
+  // than a slightly stale number.
+  return age < 0.0 ? 0.0 : age;
+}
+
 // How a radio is reached, as a person reads it. The wire spellings are
 // lower-case words chosen for a protocol; these are chosen for a column.
 const char* link_way_label(const std::string& way) {
@@ -206,7 +226,18 @@ const char* link_way_label(const std::string& way) {
 const char* warn_mark(WarnLevel w) {
   switch (w) {
     case WarnLevel::kOutOfSync: return " !";
-    case WarnLevel::kUnsure: return " ?";
+    // No mark for "we do not know". The row already says so in every column
+    // that could have carried a number -- a device nobody is hearing has no
+    // age and no offset -- so the character was a third way of saying the same
+    // thing, on the rows least able to spare two characters of name.
+    //
+    // The colour stays. A camera that is not being synced is the failure this
+    // whole program exists to prevent, and it is worth calling out even when
+    // the reason is only that nobody can see it. The cost is that piping the
+    // output somewhere without colour loses the distinction; "out of sync",
+    // which is a measurement rather than the absence of one, keeps its mark
+    // for exactly that reason.
+    case WarnLevel::kUnsure: break;
     case WarnLevel::kNone: break;
   }
   return "";
@@ -320,7 +351,7 @@ DeviceView build_device_view(const DeviceSources& from) {
         rv.way = l.way;
         rv.answering = l.answering;
         rv.has_age = l.answering;
-        rv.age_s = l.age;
+        rv.age_s = age_from(l.last_wall, l.age, now);
         rv.clock_is_real = l.clock_is_real;
         break;
       }
@@ -357,7 +388,7 @@ DeviceView build_device_view(const DeviceSources& from) {
       // is no third state for a link that does not exist.
       r.link = d.live ? LinkState::kOnTheAir : LinkState::kOffTheAir;
       r.has_age = true;
-      r.age_s = d.age;
+      r.age_s = age_from(d.last_wall, d.age, now);
       // Only while we are hearing it. An old reading minus a current
       // canonical time is not a stale offset, it is a wrong one, and it grows
       // for as long as the box stays quiet. See DeviceRow::has_offset.
@@ -742,7 +773,7 @@ std::string render_devices(const DeviceView& v, bool verbose, bool color,
   // about as long as a device name and this one held "Palmers-Mini" cut to
   // "Palmers-Mi" -- which reads as a machine nobody has heard of rather than
   // as a truncation.
-  out += fmt("%s%-14s %-10s %6s %9s %8s %7s%s\n", st.head, "RADIO", "LINK",
+  out += fmt("%s%-18s %-14s %6s %10s %8s %7s%s\n", st.head, "RADIO", "LINK",
              "AGE", "SPREAD", "TIMECODE", "CAMERAS", st.off);
   for (const RadioView& rv : v.radios) {
     const char* live = rv.answering ? "" : st.dim;
@@ -754,8 +785,8 @@ std::string render_devices(const DeviceView& v, bool verbose, bool color,
     const char* spread_colour =
         rv.has_canonical && rv.canonical_spread_s > kWarnOffset ? st.yellow
                                                                 : live;
-    out += fmt("%s%-14s%s %s%-10s%s %s%6s%s %s%9s%s %s%8d%s %s%7d%s\n",
-               live, fit_label(rv.name, 14, false).c_str(), st.off,
+    out += fmt("%s%-18s%s %s%-14s%s %s%6s%s %s%10s%s %s%8d%s %s%7d%s\n",
+               live, fit_label(rv.name, 18, false).c_str(), st.off,
                live, link_way_label(rv.way), st.off,
                live, age.c_str(), st.off,
                spread_colour, spread.c_str(), st.off,
@@ -783,10 +814,14 @@ std::string render_devices(const DeviceView& v, bool verbose, bool color,
   // the two share a prefix rather than each spelling out its own. Two tables
   // that can drift apart are two tables somebody has to learn separately, and
   // the whole point of one renderer is that there is only ever one to learn.
-  out += fmt("%s%-14s%s", st.head, "DEVICE", st.off);
+  // Column for column with the RADIO section above, because the two are read
+  // together and most of the pairs mean the same kind of thing: RADIO/DEVICE
+  // is what it is called, LINK/VIA is where it comes from, AGE is AGE, and
+  // SPREAD/OFFSET are both a distance in milliseconds. Lining them up costs
+  // nothing and turns two tables into one shape.
+  out += fmt("%s%-18s%s", st.head, "DEVICE", st.off);
   if (show_via) out += fmt("%s %-14s%s", st.head, "VIA", st.off);
-  out += fmt("%s %6s %10s %-11s %5s%s", st.head, "AGE",
-             "OFFSET", "LINK", "RSSI", st.off);
+  out += fmt("%s %6s %10s %8s%s", st.head, "AGE", "OFFSET", "RSSI", st.off);
   if (verbose) {
     out += fmt("%s %-15s %10s %9s %s%s", st.head, "TIMECODE", "MEDIAN", "DRIFT",
                "RATE", st.off);
@@ -809,18 +844,38 @@ std::string render_devices(const DeviceView& v, bool verbose, bool color,
     // two prices.
     // A row showing an identifier rather than a name is the case that needs
     // the middle taken out; see fit_label.
+    // Eighteen, which is what a Bluetooth hardware address needs -- a device
+    // nobody has named is listed by its address, and cutting the middle out of
+    // one when the column could simply have held it was making the common case
+    // pay for the long one. A CoreBluetooth UUID is still far too long and
+    // still gets elided; nothing short of forty characters would hold one.
     const bool is_id = r.name == r.id;
-    std::string label = fit_label(r.name, 14, is_id);
+    std::string label = fit_label(r.name, 18, is_id);
     const char* mark = warn_mark(r.warn_level);
     if (mark[0] != '\0') {
-      label = fit_label(r.name, 12, is_id);
+      label = fit_label(r.name, 16, is_id);
       label += mark;
     }
-    const std::string age =
-        r.has_age ? format_age(r.age_s) : std::string("--");
+    // There is no LINK column any more: whether a device is being heard is
+    // already in the age and in whether the row is drawn dim, and a column
+    // that repeats what the whole row is already saying is a column nobody
+    // reads.
+    //
+    // One state does not survive that reasoning, and it keeps a word here.
+    // "Held" means a camera we are talking to continuously, which stops
+    // advertising *because* we are connected -- so its age is not a
+    // measurement at all, and rendering it as "0s" would be indistinguishable
+    // from a camera we happen to have heard from this instant. Those want
+    // opposite reactions: one is working, and the other is about to be
+    // power-cycled by somebody who read the table.
+    const std::string age = r.link == LinkState::kHeld ? std::string("held")
+                            : r.has_age ? format_age(r.age_s)
+                                        : std::string("--");
+    const char* age_colour = r.link == LinkState::kHeld ? st.green
+                             : r.has_age && link_is_live(r.link) ? ""
+                                                                 : st.dim;
     const std::string off =
         r.has_offset ? offset_text(r.offset_s) : std::string("--");
-    const char* link_colour = link_is_live(r.link) ? st.green : st.dim;
 
     // A row nobody is hearing is drawn dim all the way across, and that is one
     // rule rather than a column-by-column decision. Every number on such a row
@@ -841,7 +896,7 @@ std::string render_devices(const DeviceView& v, bool verbose, bool color,
     // invisible until somebody copies a row out of a terminal, and then it is
     // not.
     const std::string rssi = r.has_rssi ? fmt("%d", r.rssi) : "--";
-    out += fmt("%s%-14.14s%s", name_colour, label.c_str(), st.off);
+    out += fmt("%s%-18.18s%s", name_colour, label.c_str(), st.off);
     if (show_via) {
       // Every row says which radio heard it, our own included. The column
       // only exists when there is more than one radio, and in that situation a
@@ -850,10 +905,9 @@ std::string render_devices(const DeviceView& v, bool verbose, bool color,
                  r.radio.empty() ? local_name.c_str() : r.radio.c_str(),
                  st.off);
     }
-    out += fmt(" %s%6s%s %s%10s%s %s%-11s%s %s%5s%s",
-               r.has_age && *live == '\0' ? "" : st.dim, age.c_str(), st.off,
+    out += fmt(" %s%6s%s %s%10s%s %s%8s%s",
+               age_colour, age.c_str(), st.off,
                r.has_offset ? "" : st.dim, off.c_str(), st.off,
-               link_colour, link_state_name(r.link), st.off,
                r.has_rssi && *live == '\0' ? "" : st.dim, rssi.c_str(),
                st.off);
 

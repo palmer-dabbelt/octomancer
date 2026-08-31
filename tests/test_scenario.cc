@@ -57,7 +57,9 @@ void test_a_bench_that_agrees_reads_as_milliseconds_apart() {
 
   const std::string page = s.table();
   CHECK(contains(page, "F55"));
-  CHECK(contains(page, "on the air"));
+  // "on the air" is no longer a column: a box being heard shows as a small
+  // age and a row that is not dimmed.
+  CHECK(contains(page, "OFFSET"));
   // Nowhere on the page, not merely nowhere in the table. There is no column
   // anywhere for a host clock's distance from the mesh: nothing syncs against
   // the host clock, so the number has no consequence.

@@ -121,6 +121,7 @@ std::string render_text(const Snapshot& s) {
     put(&out, "way", r.way);
     put(&out, "answering", static_cast<long long>(r.answering ? 1 : 0));
     put(&out, "age", r.age, 2);
+    put(&out, "last_wall", r.last_wall, 3);
     put(&out, "clock_real", static_cast<long long>(r.clock_is_real ? 1 : 0));
     out += "\n";
   }
@@ -137,6 +138,7 @@ std::string render_text(const Snapshot& s) {
     put(&out, "adverts", static_cast<long long>(d.adverts));
     put(&out, "decoded", static_cast<long long>(d.decoded));
     put(&out, "age", d.age, 2);
+    put(&out, "last_wall", d.last_wall, 3);
     put(&out, "first_seen", d.first_seen_wall, 3);
     put(&out, "live", static_cast<long long>(d.live ? 1 : 0));
     put(&out, "has_time", static_cast<long long>(d.has_time ? 1 : 0));
@@ -191,6 +193,7 @@ std::string render_json(const Snapshot& s) {
       out += ",\"way\":" + json_string(r.way);
       out += ",\"answering\":" + std::string(r.answering ? "true" : "false");
       out += ",\"age\":" + json_number(r.age, 2);
+      out += ",\"last_wall\":" + json_number(r.last_wall, 3);
       out += ",\"clock_real\":" +
              std::string(r.clock_is_real ? "true" : "false");
       out += "}";
@@ -234,6 +237,7 @@ std::string render_json(const Snapshot& s) {
     out += ",\"adverts\":" + std::to_string(d.adverts);
     out += ",\"decoded\":" + std::to_string(d.decoded);
     out += ",\"age\":" + json_number(d.age, 2);
+    out += ",\"last_wall\":" + json_number(d.last_wall, 3);
     out += ",\"live\":" + std::string(d.live ? "true" : "false");
     if (d.has_time) {
       out += ",\"sod\":" + json_number(d.sod, 6);
@@ -372,6 +376,7 @@ bool parse_text(const std::string& text, Snapshot* out, std::string* err) {
         else if (key == "way") r.way = value;
         else if (key == "answering") r.answering = to_int(value) != 0;
         else if (key == "age") r.age = to_double(value);
+        else if (key == "last_wall") r.last_wall = to_double(value);
         else if (key == "clock_real") r.clock_is_real = to_int(value) != 0;
       }
       // A line with no name says nothing and would render as a blank row.
@@ -391,6 +396,7 @@ bool parse_text(const std::string& text, Snapshot* out, std::string* err) {
         else if (key == "adverts") d.adverts = to_int(value);
         else if (key == "decoded") d.decoded = to_int(value);
         else if (key == "age") d.age = to_double(value);
+        else if (key == "last_wall") d.last_wall = to_double(value);
         else if (key == "first_seen") d.first_seen_wall = to_double(value);
         else if (key == "live") d.live = to_int(value) != 0;
         else if (key == "has_time") d.has_time = to_int(value) != 0;

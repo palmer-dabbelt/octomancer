@@ -286,6 +286,7 @@ Snapshot Registry::snapshot(double mono, double wall) const {
     // another machine -- can put the last sighting in the future. Reporting a
     // negative age would render as a device heard in several hours' time.
     if (out.age < 0.0) out.age = 0.0;
+    out.last_wall = dev.last_seen_wall;
     out.first_seen_wall = dev.first_seen_wall;
     out.live = dev.heard_this_run && out.age <= policy_.stale_after;
     out.alerting = dev.alerting;

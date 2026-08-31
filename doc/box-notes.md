@@ -588,6 +588,25 @@ predates this process, and for a daemon too old to send a stamp.
 `octomancer-sync` already did this for cameras, with a comment giving the same
 reasoning; it was `octomancerd`'s rows that were frozen.
 
+**A spread carries no sign, and neither does its column.** It is a max minus a
+min, so it is never negative, and a leading `+` on a number with no alternative
+is a character that can only ever say one thing. Sitting in a table where the
+`OFFSET` column immediately below it uses the sign to carry the entire
+meaning -- ahead of the bench, or behind it -- it reads as a direction, and a
+reader goes looking for which way the bench is skewed. There is no way. It is a
+width.
+
+**The local radio has an age, and it is almost always zero.** That was the
+argument against showing it: a page drawn from a snapshot it just asked for
+will read `0s` forever. But the dongle's age beside it means "how old is what
+this radio is telling me", and the local row is answering that same question --
+leaving the cell blank makes a reader work out whether a dash means fresh or
+means unknown, which is a worse thing to ask of them than a zero. It stops
+being zero at exactly the moment it matters: when a page has stopped being
+refreshed and every row on it is older than it looks. It replaces a line that
+used to say octomancerd was running, which said less -- a daemon can be running
+and still have stopped saying anything new.
+
 The one-shot `octomancer status` shows the section only when there is more than
 one radio, or on `--verbose`. A three-line block listing a single radio is the
 kind of preamble that stops a status page being read. The TUI shows it always:

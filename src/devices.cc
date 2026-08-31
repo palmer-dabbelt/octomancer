@@ -62,6 +62,20 @@ std::string offset_text(double seconds) {
   return fmt("%+.1fs", seconds);
 }
 
+// The same magnitudes, without a sign.
+//
+// A spread is a max-minus-min, so it cannot be negative, and a leading `+` on
+// a number that has no other option reads as though it were telling you
+// something -- somebody sees `+26.2ms` beside a row's `-17.5ms` and starts
+// looking for the direction the bench is skewed in. There is no direction. It
+// is a width.
+std::string spread_text(double seconds) {
+  const double mag = std::fabs(seconds);
+  if (mag < 1.0) return fmt("%.1fms", mag * 1000.0);
+  if (mag < 60.0) return fmt("%.3fs", mag);
+  return fmt("%.1fs", mag);
+}
+
 bool box_is_enabled(const CamConf* conf, const std::string& id) {
   return conf == nullptr || conf->box_enabled(id);
 }
@@ -290,10 +304,20 @@ DeviceView build_device_view(const DeviceSources& from) {
                   ? from.bench->host
                   : std::string("this Mac");
   here.way = "local";
-  // A local radio is read, not asked, so it has no answer to be waiting for.
-  // The thing that goes wrong with it is not silence but refusal, and that is
-  // already said in full by DeviceView::radio.
   here.answering = from.bench != nullptr;
+  // How stale the answer this row was built from is.
+  //
+  // A local radio is read rather than asked, so this is almost always a second
+  // or less, and that is the point of it rather than an argument against it:
+  // it is the same question the dongle's age answers -- "how old is what this
+  // radio is telling me" -- and having it in the column means the reader
+  // compares two numbers rather than a number and an absence. It also replaces
+  // a line that used to say octomancerd was running, which said less: a daemon
+  // can be running and still have stopped saying anything new.
+  if (from.bench != nullptr && from.bench->wall > 0.0 && now > 0.0) {
+    here.has_age = true;
+    here.age_s = std::max(0.0, now - from.bench->wall);
+  }
   here.clock_is_real =
       from.bench == nullptr ? true : from.bench->wall_is_real;
   if (here.has_canonical) {
@@ -780,7 +804,7 @@ std::string render_devices(const DeviceView& v, bool verbose, bool color,
     const std::string age =
         rv.has_age ? format_age(rv.age_s) : std::string("--");
     const std::string spread = rv.has_canonical
-                                   ? offset_text(rv.canonical_spread_s)
+                                   ? spread_text(rv.canonical_spread_s)
                                    : std::string("--");
     const char* spread_colour =
         rv.has_canonical && rv.canonical_spread_s > kWarnOffset ? st.yellow

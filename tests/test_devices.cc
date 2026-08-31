@@ -13,6 +13,8 @@
 // does not exist is rendered as a dash and never as 0.000s.
 #include <unistd.h>
 
+#include <cmath>
+#include <cstdio>
 #include <fstream>
 #include <string>
 
@@ -87,6 +89,15 @@ bool contains(const std::string& hay, const std::string& needle) {
 // Everything between an ESC and the terminating 'm', removed. What is left has
 // to be exactly what the uncoloured renderer produced, which is the only way a
 // test can pin the layout without pinning the escape sequences too.
+// A magnitude in milliseconds, the way the table writes one. Used to check a
+// spread without hard-coding a number that a change to the fixture would
+// silently stop testing.
+std::string format_ms(double seconds) {
+  char buf[32];
+  std::snprintf(buf, sizeof buf, "%.1fms", std::fabs(seconds) * 1000.0);
+  return buf;
+}
+
 std::string strip_escapes(const std::string& s) {
   std::string out;
   for (size_t i = 0; i < s.size(); ++i) {
@@ -1381,8 +1392,29 @@ void test_a_radio_with_no_clock_quotes_no_absolute_time() {
   // reduced to one column.
   CHECK(contains(out, "USB"));
   // ...and the spread is quoted, because a spread is a difference and the
-  // unknown origin cancels out of it exactly.
-  CHECK(contains(out, "+28.0ms"));
+  // unknown origin cancels out of it exactly. Unsigned: see below.
+  CHECK(contains(out, "28.0ms"));
+  CHECK(!contains(out, "+28.0ms"));
+}
+
+// A spread has no direction, so it does not get a sign.
+//
+// It is a max minus a min over one radio's boxes, so it is never negative and
+// a `+` in front of it is a character that can only ever say one thing. Beside
+// an OFFSET column where the sign carries the whole meaning -- ahead of the
+// bench or behind it -- that reads as though the bench were skewed one way,
+// and somebody goes looking for which way. It is a width.
+void test_a_spread_is_shown_without_a_sign() {
+  CamConf conf = plain_conf();
+  Snapshot snap = two_radios(39600.0);
+  const DeviceView v = view_of(snap, &conf);
+  const std::string out = strip_escapes(octo::render_devices(v, false, false));
+
+  CHECK(v.canonical_spread_s > 0.0);
+  // The magnitude is there...
+  CHECK(contains(out, format_ms(v.canonical_spread_s)));
+  // ...and no signed rendering of any spread on the page is.
+  CHECK(!contains(out, "+" + format_ms(v.canonical_spread_s)));
 }
 
 // A dongle in a phone charger. Same rows, different column, and nothing else
@@ -1452,6 +1484,47 @@ void test_age_is_computed_from_the_timestamp_not_the_snapshot() {
   from.now_wall = kNow + 60.0;
   const DeviceView v = octo::build_device_view(from);
   CHECK_NEAR(find_row(v, "Tentacle_A")->age_s, 61.0, 1e-6);
+}
+
+// The local radio has an age too, and it is the age of the answer.
+//
+// It will normally read zero, because the page is drawn from a snapshot it
+// just asked for. That is not a reason to leave the cell blank: the dongle's
+// age beside it means "how old is what this radio is telling me", and the
+// local row is answering the same question -- a reader comparing two numbers
+// does not have to work out whether a dash means fresh or means unknown. The
+// number stops being zero exactly when it matters, which is when a page has
+// stopped being refreshed and every row on it is older than it looks.
+void test_the_local_radio_ages_with_its_snapshot() {
+  Snapshot snap;
+  snap.wall = kNow;
+  snap.device.push_back(box("A", "Tentacle_A", true, 0.0));
+
+  DeviceSources from;
+  from.bench = &snap;
+  from.now_wall = kNow + 12.0;
+  const DeviceView v = octo::build_device_view(from);
+
+  CHECK(!v.radios.empty());
+  CHECK(v.radios[0].local);
+  CHECK(v.radios[0].has_age);
+  CHECK_NEAR(v.radios[0].age_s, 12.0, 1e-6);
+}
+
+// A daemon too old to say when it built the snapshot. There is no honest
+// number to put here -- unlike a device, a radio has no separate `age` to fall
+// back on -- so the cell stays empty rather than claiming the answer is fresh.
+void test_a_snapshot_with_no_timestamp_gives_the_local_radio_no_age() {
+  Snapshot snap;
+  snap.wall = 0.0;
+  snap.device.push_back(box("A", "Tentacle_A", true, 0.0));
+
+  DeviceSources from;
+  from.bench = &snap;
+  from.now_wall = kNow;
+  const DeviceView v = octo::build_device_view(from);
+  CHECK(!v.radios.empty());
+  CHECK(!v.radios[0].has_age);
 }
 
 // A daemon too old to send the stamp, and a device restored from disk whose
@@ -1647,6 +1720,9 @@ int main() {
   test_a_radio_with_no_clock_quotes_no_absolute_time();
   test_a_radio_reached_over_the_air_says_so();
   test_a_radio_that_is_not_answering_keeps_its_row();
+  test_a_spread_is_shown_without_a_sign();
+  test_the_local_radio_ages_with_its_snapshot();
+  test_a_snapshot_with_no_timestamp_gives_the_local_radio_no_age();
   test_age_is_computed_from_the_timestamp_not_the_snapshot();
   test_age_falls_back_when_there_is_no_timestamp();
   test_a_timestamp_in_the_future_is_not_a_negative_age();

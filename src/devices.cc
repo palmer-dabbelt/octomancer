@@ -79,6 +79,38 @@ bool box_votes(const CamConf* conf, const DeviceSnapshot& d) {
   return d.live && d.has_time && box_is_enabled(conf, d.id);
 }
 
+// The same question, asked of one radio's boxes only. A radio's canonical
+// time has to be built from what that radio heard and nothing else, or the
+// difference between two machines' clocks ends up inside a figure that is
+// supposed to be the difference between two timecode boxes.
+bool box_votes_for(const CamConf* conf, const DeviceSnapshot& d,
+                   const std::string& radio) {
+  return d.radio == radio && box_votes(conf, d);
+}
+
+// The median, spread and count over one radio's voters. Shared by this
+// machine's radio and every dongle, because they deserve exactly the same
+// arithmetic -- if they got different arithmetic, the two copies of a box
+// could differ for a reason that was ours rather than the room's.
+RadioView radio_view(const DeviceSources& from, const std::string& radio) {
+  RadioView rv;
+  rv.name = radio;
+  std::vector<double> votes;
+  if (from.bench != nullptr) {
+    for (const DeviceSnapshot& d : from.bench->device) {
+      if (box_votes_for(from.conf, d, radio)) votes.push_back(d.median_offset);
+    }
+  }
+  if (votes.empty()) return rv;
+  rv.has_canonical = true;
+  rv.contributing = static_cast<int>(votes.size());
+  rv.canonical_offset_s = median_offset(votes);
+  const auto lo = std::min_element(votes.begin(), votes.end());
+  const auto hi = std::max_element(votes.begin(), votes.end());
+  rv.canonical_spread_s = *hi - *lo;
+  return rv;
+}
+
 std::string camera_note(const CameraStatus& c) {
   // The precedence the UI already uses, in the order a person would say them
   // out loud: what the camera is doing beats what it is configured to do,
@@ -123,6 +155,27 @@ WarnLevel warn_level_for(const DeviceRow& r) {
   // canonical time, or the device has never said what time it thinks it is,
   // and staying quiet about that would amount to saying it is fine.
   return r.offset_is_stale ? WarnLevel::kNone : WarnLevel::kUnsure;
+}
+
+// A label cut to fit, losing the middle rather than the end.
+//
+// The end is where the information is. A box that has never been named is
+// listed by its hardware address, and every box from one manufacturer shares
+// the first three bytes -- so cutting from the right turns four different
+// boxes into four identical rows of C4:1E:AE:18:A7, which is worse than
+// useless: it looks like the table is repeating itself.
+//
+// Names are cut from the right as before, because a name's beginning is what
+// distinguishes it. The rule is therefore about which end carries the
+// difference, and identifiers and names disagree about that.
+std::string fit_label(const std::string& label, size_t width, bool from_end) {
+  if (label.size() <= width) return label;
+  if (!from_end) return label.substr(0, width);
+  if (width < 5) return label.substr(label.size() - width);
+  const size_t keep = width - 2;
+  const size_t head = keep / 2;
+  return label.substr(0, head) + ".." +
+         label.substr(label.size() - (keep - head));
 }
 
 // The marker a warned row carries in the DEVICE column. One character either
@@ -175,19 +228,12 @@ DeviceView build_device_view(const DeviceSources& from) {
   // from BenchStatus for the reason the header gives. Spread is their full
   // min-to-max range: it is the number that says whether the bench agrees with
   // itself, and if it does not then the median is not a time at all.
-  std::vector<double> votes;
-  if (from.bench != nullptr) {
-    for (const DeviceSnapshot& d : from.bench->device) {
-      if (box_votes(from.conf, d)) votes.push_back(d.median_offset);
-    }
-  }
-  if (!votes.empty()) {
+  const RadioView here = radio_view(from, std::string());
+  if (here.has_canonical) {
     v.has_canonical = true;
-    v.contributing = static_cast<int>(votes.size());
-    v.canonical_offset_s = median_offset(votes);
-    const auto lo = std::min_element(votes.begin(), votes.end());
-    const auto hi = std::max_element(votes.begin(), votes.end());
-    v.canonical_spread_s = *hi - *lo;
+    v.contributing = here.contributing;
+    v.canonical_offset_s = here.canonical_offset_s;
+    v.canonical_spread_s = here.canonical_spread_s;
     v.canonical_source = "octomancerd";
   } else if (from.cameras != nullptr && from.cameras->bench.has) {
     // Nothing to compute from, but the other daemon has a bench of its own and
@@ -200,6 +246,20 @@ DeviceView build_device_view(const DeviceSources& from) {
     v.canonical_source = "octomancer-sync";
   }
 
+  // Every other radio that contributed a row, each with a canonical time of
+  // its own. First-appearance order rather than sorted, so a dongle does not
+  // move around the page when a box it can hear goes quiet.
+  if (from.bench != nullptr) {
+    for (const DeviceSnapshot& d : from.bench->device) {
+      if (d.radio.empty()) continue;
+      bool known = false;
+      for (const RadioView& rv : v.radios) {
+        if (rv.name == d.radio) { known = true; break; }
+      }
+      if (!known) v.radios.push_back(radio_view(from, d.radio));
+    }
+  }
+
   // --- the boxes -------------------------------------------------------
 
   if (from.bench != nullptr) {
@@ -208,9 +268,22 @@ DeviceView build_device_view(const DeviceSources& from) {
         ++v.hidden;
         continue;
       }
+      // Which canonical time this row is quoted against: its own radio's.
+      bool row_has_canonical = v.has_canonical;
+      double row_canonical = v.canonical_offset_s;
+      if (!d.radio.empty()) {
+        row_has_canonical = false;
+        for (const RadioView& rv : v.radios) {
+          if (rv.name != d.radio) continue;
+          row_has_canonical = rv.has_canonical;
+          row_canonical = rv.canonical_offset_s;
+          break;
+        }
+      }
       DeviceRow r;
       r.kind = DeviceKind::kTentacle;
       r.id = d.id;
+      r.radio = d.radio;
       r.name = d.name.empty() ? d.id : d.name;
       // Nothing ever connects to a timecode box: the timecode is in the
       // advertisement, so a box is either being heard or it is not, and there
@@ -221,10 +294,10 @@ DeviceView build_device_view(const DeviceSources& from) {
       // Only while we are hearing it. An old reading minus a current
       // canonical time is not a stale offset, it is a wrong one, and it grows
       // for as long as the box stays quiet. See DeviceRow::has_offset.
-      if (v.has_canonical && d.has_time) {
+      if (row_has_canonical && d.has_time) {
         if (d.live) {
           r.has_offset = true;
-          r.offset_s = d.median_offset - v.canonical_offset_s;
+          r.offset_s = d.median_offset - row_canonical;
         } else {
           r.offset_is_stale = true;
         }
@@ -493,6 +566,11 @@ std::string render_devices(const DeviceView& v, bool verbose, bool color) {
   // explaining that there is nothing to measure against is printed whether or
   // not anybody asked for detail. Saying why something is missing is not
   // verbosity.
+  // Only when a second radio has contributed rows. The ordinary table is the
+  // one almost everybody sees, and it should not grow a column of blanks for
+  // the sake of a case that is not theirs.
+  const bool show_via = !v.radios.empty();
+
   std::string head;
   if (!v.has_canonical) {
     head += fmt("%sno canonical time -- no enabled timecode box is live, so"
@@ -516,6 +594,27 @@ std::string render_devices(const DeviceView& v, bool verbose, bool color) {
     head += fmt("%s%d timecode box%s off the air: listed below, but not voting"
                 " on the canonical time and not in the spread%s\n",
                 st.dim, v.silent, v.silent == 1 ? "" : "es", st.off);
+  }
+  for (const RadioView& rv : v.radios) {
+    // Said plainly, because the duplicate rows below are otherwise alarming:
+    // a bench that appears to have doubled overnight is a thing somebody
+    // investigates.
+    if (rv.has_canonical) {
+      head += fmt("%salso hearing via %s -- %d timecode box%s, spread %s;"
+                  " boxes heard by both radios are listed twice%s\n",
+                  st.dim, rv.name.c_str(), rv.contributing,
+                  rv.contributing == 1 ? "" : "es",
+                  offset_text(rv.canonical_spread_s).c_str(), st.off);
+    } else {
+      head += fmt("%salso listening via %s, which has not heard a timecode"
+                  " box yet%s\n", st.dim, rv.name.c_str(), st.off);
+    }
+    if (verbose) {
+      head += fmt("%s  its offsets are against its own bench, not ours: the"
+                  " two radios cannot agree on an identifier for a box, so"
+                  " nothing here can prove two rows are the same one%s\n",
+                  st.dim, st.off);
+    }
   }
   if (v.hidden > 0) {
     // Kept out of --verbose for the same reason as the missing canonical time:
@@ -544,7 +643,9 @@ std::string render_devices(const DeviceView& v, bool verbose, bool color) {
   // the two share a prefix rather than each spelling out its own. Two tables
   // that can drift apart are two tables somebody has to learn separately, and
   // the whole point of one renderer is that there is only ever one to learn.
-  out += fmt("%s%-14s %6s %10s %-11s %5s%s", st.head, "DEVICE", "AGE",
+  out += fmt("%s%-14s%s", st.head, "DEVICE", st.off);
+  if (show_via) out += fmt("%s %-10s%s", st.head, "VIA", st.off);
+  out += fmt("%s %6s %10s %-11s %5s%s", st.head, "AGE",
              "OFFSET", "LINK", "RSSI", st.off);
   if (verbose) {
     out += fmt("%s %-15s %10s %9s %s%s", st.head, "TIMECODE", "MEDIAN", "DRIFT",
@@ -566,10 +667,13 @@ std::string render_devices(const DeviceView& v, bool verbose, bool color) {
     // characters wider for the sake of a flag most rows do not carry. It
     // costs a warned row two characters of name, which is the cheaper of the
     // two prices.
-    std::string label = r.name;
+    // A row showing an identifier rather than a name is the case that needs
+    // the middle taken out; see fit_label.
+    const bool is_id = r.name == r.id;
+    std::string label = fit_label(r.name, 14, is_id);
     const char* mark = warn_mark(r.warn_level);
     if (mark[0] != '\0') {
-      if (label.size() > 12) label.resize(12);
+      label = fit_label(r.name, 12, is_id);
       label += mark;
     }
     const std::string age =
@@ -597,8 +701,15 @@ std::string render_devices(const DeviceView& v, bool verbose, bool color) {
     // invisible until somebody copies a row out of a terminal, and then it is
     // not.
     const std::string rssi = r.has_rssi ? fmt("%d", r.rssi) : "--";
-    out += fmt("%s%-14.14s%s %s%6s%s %s%10s%s %s%-11s%s %s%5s%s",
-               name_colour, label.c_str(), st.off,
+    out += fmt("%s%-14.14s%s", name_colour, label.c_str(), st.off);
+    if (show_via) {
+      // Blank rather than "this Mac" for our own rows. The column is there to
+      // mark the ones that came from somewhere else; labelling the majority
+      // would bury that under repetition.
+      out += fmt("%s %-10.10s%s", st.dim,
+                 r.radio.empty() ? "" : r.radio.c_str(), st.off);
+    }
+    out += fmt(" %s%6s%s %s%10s%s %s%-11s%s %s%5s%s",
                r.has_age && *live == '\0' ? "" : st.dim, age.c_str(), st.off,
                r.has_offset ? "" : st.dim, off.c_str(), st.off,
                link_colour, link_state_name(r.link), st.off,

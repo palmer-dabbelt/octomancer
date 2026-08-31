@@ -149,6 +149,8 @@ CamConf conf_with(const char* tag, const std::string& body) {
   return conf;
 }
 
+CamConf plain_conf() { return conf_with("plain", ""); }
+
 // ------------------------------------------------------------ the canonical
 
 void test_canonical_is_a_median_of_enabled_live_boxes() {
@@ -1111,6 +1113,208 @@ void test_the_table_marks_and_names_the_warned() {
   }
 }
 
+// ------------------------------------------------------- the second radio
+
+// A dongle hears the same room from a different place, and its rows arrive in
+// the same snapshot tagged with which radio heard them.
+//
+// The property that matters is that its rows read the same as ours even
+// though its clock does not agree with ours -- and, in the normal standalone
+// case, has never been set at all. Both radios say "this box is fourteen
+// milliseconds ahead of its bench", because the arbitrary constant in a
+// free-running clock is the same for every box that radio hears and therefore
+// cancels when a row is quoted against its own radio's median.
+//
+// This is the whole reason for listening twice. If the two copies of a box
+// disagree, that is a fact about the room; if they disagreed merely because
+// one radio had a different idea of what time it was, the second radio would
+// be telling us nothing at all.
+DeviceSnapshot heard_by(const std::string& radio, const DeviceSnapshot& src,
+                        double displaced) {
+  DeviceSnapshot d = src;
+  d.radio = radio;
+  d.id = radio + ":" + src.id;
+  d.median_offset += displaced;
+  d.offset += displaced;
+  return d;
+}
+
+Snapshot two_radios(double displaced) {
+  Snapshot snap;
+  snap.device.push_back(box("A", "Tentacle_A", true, -0.500));
+  snap.device.push_back(box("B", "Tentacle_B", true, -0.486));
+  snap.device.push_back(box("C", "Tentacle_C", true, -0.514));
+  const size_t local = snap.device.size();
+  for (size_t i = 0; i < local; ++i) {
+    snap.device.push_back(heard_by("dongle", snap.device[i], displaced));
+  }
+  return snap;
+}
+
+void test_a_box_heard_twice_reads_the_same_from_both_radios() {
+  CamConf conf = plain_conf();
+  // Eleven hours: a dongle that was plugged in this morning and never told
+  // the time. Nothing about this number is special, which is the point.
+  const DeviceView v = view_of(two_radios(39600.0), &conf);
+
+  const DeviceRow* ours = find_row(v, "Tentacle_B");
+  const DeviceRow* theirs = nullptr;
+  for (const DeviceRow& r : v.rows) {
+    if (r.name == "Tentacle_B" && r.radio == "dongle") theirs = &r;
+  }
+  CHECK(ours != nullptr);
+  CHECK(theirs != nullptr);
+  CHECK_STR(ours->radio, "");
+  CHECK(ours->has_offset);
+  CHECK(theirs->has_offset);
+  // Tentacle_B is 14 ms ahead of the median, from either end of the room.
+  CHECK_NEAR(ours->offset_s, 0.014, 1e-9);
+  CHECK_NEAR(theirs->offset_s, 0.014, 1e-9);
+}
+
+// The header is about this machine, so a dongle's boxes must not be counted
+// in it -- and its eleven-hour displacement must not reach the canonical time.
+void test_the_header_is_about_this_machines_radio_only() {
+  CamConf conf = plain_conf();
+  const DeviceView v = view_of(two_radios(39600.0), &conf);
+
+  CHECK(v.has_canonical);
+  CHECK_EQ(v.contributing, 3);
+  CHECK_NEAR(v.canonical_offset_s, -0.500, 1e-9);
+  CHECK_NEAR(v.canonical_spread_s, 0.028, 1e-9);
+  // Six rows: every box twice, because nothing can prove they are the same box.
+  CHECK_EQ(static_cast<int>(v.rows.size()), 6);
+}
+
+void test_the_other_radio_is_listed_with_its_own_bench() {
+  CamConf conf = plain_conf();
+  const DeviceView v = view_of(two_radios(39600.0), &conf);
+
+  CHECK_EQ(static_cast<int>(v.radios.size()), 1);
+  CHECK_STR(v.radios[0].name, "dongle");
+  CHECK(v.radios[0].has_canonical);
+  CHECK_EQ(v.radios[0].contributing, 3);
+  // Its own median, displacement and all -- which is the honest figure for a
+  // radio that does not know what time it is, and is why the rows are quoted
+  // against it rather than it being shown as an offset.
+  CHECK_NEAR(v.radios[0].canonical_offset_s, 39600.0 - 0.500, 1e-9);
+  // ...but it agrees with us exactly about how far apart the boxes are.
+  CHECK_NEAR(v.radios[0].canonical_spread_s, v.canonical_spread_s, 1e-9);
+}
+
+// A dongle that has only just been plugged in has heard one box, or none. Its
+// rows then have nothing to be quoted against, and the column stays empty
+// rather than borrowing ours -- ours is in a different frame, and subtracting
+// it would render eleven hours as a sync error.
+void test_a_radio_with_no_bench_of_its_own_quotes_no_offsets() {
+  CamConf conf = plain_conf();
+  Snapshot snap;
+  snap.device.push_back(box("A", "Tentacle_A", true, -0.500));
+  snap.device.push_back(box("B", "Tentacle_B", true, -0.486));
+  // One box, heard by the dongle, with no time yet.
+  DeviceSnapshot d = heard_by("dongle", snap.device[0], 39600.0);
+  d.has_time = false;
+  snap.device.push_back(d);
+
+  const DeviceView v = view_of(snap, &conf);
+  CHECK(v.has_canonical);
+  CHECK_EQ(static_cast<int>(v.radios.size()), 1);
+  CHECK(!v.radios[0].has_canonical);
+
+  const DeviceRow* theirs = nullptr;
+  for (const DeviceRow& r : v.rows) {
+    if (r.radio == "dongle") theirs = &r;
+  }
+  CHECK(theirs != nullptr);
+  CHECK(!theirs->has_offset);
+  // Not "stale" either: it never said a time, which is a different thing from
+  // having said one we are declining to quote.
+  CHECK(!theirs->offset_is_stale);
+}
+
+// The table only grows a column when there is something to put in it. Almost
+// nobody has a dongle plugged in, and a column of blanks on every row for the
+// sake of the people who do is a worse table for everybody.
+void test_the_table_is_unchanged_without_a_second_radio() {
+  CamConf conf = plain_conf();
+  Snapshot snap;
+  snap.device.push_back(box("A", "Tentacle_A", true, -0.500));
+  snap.device.push_back(box("B", "Tentacle_B", true, -0.486));
+  const std::string out =
+      octo::render_devices(view_of(snap, &conf), false, false);
+
+  CHECK(!contains(out, "VIA"));
+  CHECK(!contains(out, "also hearing"));
+  CHECK(contains(out, "DEVICE"));
+}
+
+void test_the_table_says_which_radio_heard_each_row() {
+  CamConf conf = plain_conf();
+  const DeviceView v = view_of(two_radios(39600.0), &conf);
+  const std::string out = octo::render_devices(v, false, false);
+
+  CHECK(contains(out, "VIA"));
+  // Said out loud, because a bench that appears to have doubled overnight is
+  // something a person would otherwise go and investigate.
+  CHECK(contains(out, "also hearing via dongle"));
+  CHECK(contains(out, "listed twice"));
+
+  // Our own rows carry no label -- the column marks what came from elsewhere,
+  // and writing "this Mac" on the majority would bury that under repetition.
+  const std::string ours = row_for(out, "Tentacle_A ");
+  CHECK(!contains(ours, "dongle"));
+  // ...and the dongle's rows do.
+  CHECK(contains(out, "dongle"));
+}
+
+// A box the dongle has never been told the name of is listed by its hardware
+// address, and every box from one manufacturer shares the first three bytes.
+// Cutting the column from the right would render four different boxes as four
+// identical rows, which does not look like a truncation -- it looks like the
+// table repeating itself.
+void test_unnamed_boxes_keep_the_end_of_their_address() {
+  CamConf conf = plain_conf();
+  Snapshot snap;
+  snap.device.push_back(box("A", "Tentacle_A", true, -0.500));
+  for (int i = 1; i <= 3; ++i) {
+    DeviceSnapshot d = box("C4:1E:AE:18:A7:0" + std::to_string(i), "", true,
+                           39599.5 + 0.001 * i);
+    d.radio = "dongle";
+    snap.device.push_back(d);
+  }
+  const std::string out =
+      octo::render_devices(view_of(snap, &conf), false, false);
+
+  CHECK(contains(out, "A7:01"));
+  CHECK(contains(out, "A7:02"));
+  CHECK(contains(out, "A7:03"));
+  // Not three copies of the same prefix and nothing else.
+  CHECK(!contains(out, "C4:1E:AE:18:A7 "));
+}
+
+void test_a_radio_that_has_heard_nothing_still_says_it_is_there() {
+  CamConf conf = plain_conf();
+  Snapshot snap;
+  snap.device.push_back(box("A", "Tentacle_A", true, -0.500));
+  DeviceSnapshot d = heard_by("dongle", snap.device[0], 0.0);
+  d.has_time = false;
+  snap.device.push_back(d);
+
+  const std::string out =
+      octo::render_devices(view_of(snap, &conf), false, false);
+  CHECK(contains(out, "also listening via dongle"));
+  CHECK(contains(out, "has not heard a timecode box yet"));
+}
+
+void test_the_second_radio_survives_colour_unchanged() {
+  CamConf conf = plain_conf();
+  const DeviceView v = view_of(two_radios(39600.0), &conf);
+  CHECK_STR(strip_escapes(octo::render_devices(v, false, true)),
+            octo::render_devices(v, false, false));
+  CHECK_STR(strip_escapes(octo::render_devices(v, true, true)),
+            octo::render_devices(v, true, false));
+}
+
 }  // namespace
 
 int main() {
@@ -1146,5 +1350,14 @@ int main() {
   test_worst_warning_is_the_loudest_of_them();
   test_warn_level_names();
   test_the_table_marks_and_names_the_warned();
+  test_a_box_heard_twice_reads_the_same_from_both_radios();
+  test_the_header_is_about_this_machines_radio_only();
+  test_the_other_radio_is_listed_with_its_own_bench();
+  test_a_radio_with_no_bench_of_its_own_quotes_no_offsets();
+  test_the_table_is_unchanged_without_a_second_radio();
+  test_the_table_says_which_radio_heard_each_row();
+  test_unnamed_boxes_keep_the_end_of_their_address();
+  test_a_radio_that_has_heard_nothing_still_says_it_is_there();
+  test_the_second_radio_survives_colour_unchanged();
   return octotest::report("devices");
 }

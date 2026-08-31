@@ -17,11 +17,19 @@
 #include <unistd.h>
 
 #include <atomic>
+#include <cstdarg>
+#include <map>
+#include <memory>
+#include <vector>
 #include <cstdio>
 #include <cstdlib>
 #include <string>
 
+#include "boxcdc.h"
 #include "client.h"
+#include "dongle.h"
+#include "hciport.h"
+#include "loop.h"
 #include "devicedb.h"
 #include "jsonlog.h"
 #include "proto.h"
@@ -61,6 +69,16 @@ struct Options {
   std::string devices_path = octo::DeviceDb::default_path();
   double log_interval = 60.0;
   double probe_seconds = 0.0;
+  // A sync daemon of our own to listen to, over the box protocol. Empty with
+  // use_box set means "find one"; --no-box turns the whole thing off.
+  //
+  // Deliberately not spelled --dongle, which is taken and means something
+  // else: --radio dongle --dongle PORT drives a dongle's radio over HCI from
+  // *this* process, which is the transitional arrangement radio.h argues
+  // against. This is the other thing -- a box running its own sync daemon,
+  // which octomancerd listens to rather than reaches through.
+  std::string box_port;
+  bool use_box = true;
   bool foreground = false;
   bool quiet = false;
   octo::Rotation rotation;
@@ -87,6 +105,14 @@ void usage(FILE* out) {
       "  --probe SEC           listen for SEC seconds, print a report, exit\n"
       "  --foreground          stay attached; the launchd agent uses this\n"
       "  --quiet               no chatter on stderr\n"
+      "  --box PORT            listen to a sync daemon of our own on PORT,\n"
+      "                        over the box protocol. Without this a\n"
+      "                        plugged-in dongle is found automatically.\n"
+      "                        Its boxes are listed beside ours, tagged\n"
+      "                        with which radio heard them; they are never\n"
+      "                        merged, because nothing can prove two rows\n"
+      "                        are the same box.\n"
+      "  --no-box              do not go looking for one\n"
       "\n"
       "  --alert-threshold SEC a box this far from this Mac needs re-jamming\n"
       "                        (default 60)\n"
@@ -126,7 +152,7 @@ bool parse_args(int argc, char** argv, Options* opt) {
     kThreshold, kClear, kConfirm, kRenotify, kNotify,
     kWindow, kStale, kDriftSpan, kCameraGone,
     kRadio, kDongle, kHciTrace, kVersion, kHelp,
-    kDevices,
+    kDevices, kBox, kNoBox,
   };
   static const struct option longs[] = {
       {"socket", required_argument, nullptr, kSocket},
@@ -151,6 +177,8 @@ bool parse_args(int argc, char** argv, Options* opt) {
       {"devices", required_argument, nullptr, kDevices},
       {"radio", required_argument, nullptr, kRadio},
       {"dongle", required_argument, nullptr, kDongle},
+      {"box", required_argument, nullptr, kBox},
+      {"no-box", no_argument, nullptr, kNoBox},
       {"hci-trace", no_argument, nullptr, kHciTrace},
       {"version", no_argument, nullptr, kVersion},
       {"help", no_argument, nullptr, kHelp},
@@ -177,6 +205,8 @@ bool parse_args(int argc, char** argv, Options* opt) {
       case kRenotify: opt->policy.renotify_after = std::atof(optarg); break;
       case kNotify: opt->notify_command = optarg; break;
       case kDevices: opt->devices_path = optarg; break;
+      case kBox: opt->box_port = optarg; opt->use_box = true; break;
+      case kNoBox: opt->use_box = false; break;
       case kWindow: opt->policy.window = std::atof(optarg); break;
       case kStale: opt->policy.stale_after = std::atof(optarg); break;
       case kDriftSpan: opt->policy.min_drift_span = std::atof(optarg); break;
@@ -289,6 +319,139 @@ void save_devices(const octo::Registry& registry, const std::string& path,
     complained = true;
   }
 }
+
+// A sync daemon of our own, on the end of a USB cable.
+//
+// All the judgement is in src/dongle.h, which is tested; this is the part that
+// owns a file descriptor. It exists because octomancerd is the one program
+// with any business knowing a dongle is plugged in -- see "Two radios, and
+// which program knows" in doc/box-notes.md, and the long note above
+// choose_dongle() in src/radio.h.
+//
+// Finding one is the awkward part. There is no way here to ask macOS which
+// /dev/cu.usbmodem* is ours -- that would want IOKit, and this file is
+// deliberately portable -- so every candidate is opened in turn and the
+// greeting is what settles it. A port that does not say `hello` within a few
+// seconds is somebody else's microcontroller: it is let go, and not tried
+// again for a good while, because holding a stranger's Arduino open every
+// three seconds forever is exactly the sort of thing that gets a daemon
+// uninstalled. Nothing is ever written to a port that has not greeted us.
+class BoxPeer {
+ public:
+  // How long to give a freshly opened port to introduce itself. Generous: the
+  // firmware sends its greeting when DTR rises, and macOS takes a moment over
+  // that.
+  static constexpr double kGreetWithin = 4.0;
+  // How often to go looking when there is nothing attached.
+  static constexpr double kRetryEvery = 5.0;
+  // How long a port that did not greet us is left alone.
+  static constexpr double kShyFor = 300.0;
+
+  BoxPeer(std::string named, bool quiet)
+      : named_(std::move(named)), quiet_(quiet), loop_(octo::make_loop()) {}
+
+  // Everything that has to happen on a tick: service the link, give up on a
+  // port that never spoke, ask for devices when one is due, and go looking
+  // when there is nothing attached.
+  void pump(double now) {
+    if (loop_) loop_->tick(0.0);
+
+    // The link reported itself closed from inside its own callback, where it
+    // could not be destroyed. This is the first safe moment.
+    if (gone_) drop(now);
+
+    if (link_ && !view_.greeted() && now - opened_at_ > kGreetWithin) {
+      say("%s did not answer the box protocol -- not a sync daemon, leaving"
+          " it alone", port_name_.c_str());
+      shy_[port_name_] = now;
+      drop(now);
+    }
+
+    if (link_) {
+      octo::Message ask;
+      if (view_.wants_poll(now, &ask)) {
+        link_->send(ask);
+        // A failed write closes the link rather than returning, so asking
+        // whether it is still open is how "did that go out" is spelled here.
+        if (link_->is_open()) view_.polled(now);
+      }
+      return;
+    }
+
+    if (now < next_try_) return;
+    next_try_ = now + kRetryEvery;
+    attach(now);
+  }
+
+  const octo::DongleView& view() const { return view_; }
+
+ private:
+  __attribute__((format(printf, 2, 3))) void say(const char* fmt, ...) {
+    if (quiet_) return;
+    va_list ap;
+    va_start(ap, fmt);
+    std::fputs("octomancerd: ", stderr);
+    std::vfprintf(stderr, fmt, ap);
+    std::fputc('\n', stderr);
+    va_end(ap);
+  }
+
+  void attach(double now) {
+    std::vector<std::string> candidates;
+    if (!named_.empty()) {
+      candidates.push_back(named_);
+    } else {
+      candidates = octo::hci::list_candidate_ports();
+    }
+    for (const std::string& path : candidates) {
+      auto shy = shy_.find(path);
+      if (shy != shy_.end() && now - shy->second < kShyFor) continue;
+      std::string err;
+      std::unique_ptr<octo::hci::Port> port = octo::hci::open_port(path, &err);
+      if (port == nullptr) continue;
+      port_name_ = port->name();
+      link_ = octo::BoxLink::attach(loop_.get(), std::move(port));
+      if (link_ == nullptr) continue;
+      opened_at_ = now;
+      view_.opened(now);
+      link_->on_message([this](const octo::Message& msg) {
+        const bool was = view_.greeted();
+        view_.observe(msg, octo::mono_now());
+        if (!was && view_.greeted()) {
+          say("a sync daemon answered on %s -- listing its boxes as \"%s\"",
+              port_name_.c_str(), view_.radio().c_str());
+        }
+      });
+      link_->on_closed([this](const std::string& why) {
+        say("%s went away: %s", port_name_.c_str(), why.c_str());
+        // Not drop(): we are inside the link's own callback, so the object
+        // has to outlive this. The next pump() clears it.
+        view_.closed(octo::mono_now());
+        gone_ = true;
+      });
+      return;
+    }
+  }
+
+  void drop(double now) {
+    if (link_) link_->close("octomancerd let go");
+    link_.reset();
+    view_.closed(now);
+    gone_ = false;
+    port_name_.clear();
+  }
+
+  std::string named_;
+  bool quiet_;
+  std::unique_ptr<octo::Loop> loop_;
+  std::unique_ptr<octo::BoxLink> link_;
+  octo::DongleView view_;
+  std::map<std::string, double> shy_;
+  std::string port_name_;
+  double opened_at_ = 0.0;
+  double next_try_ = 0.0;
+  bool gone_ = false;
+};
 
 void log_snapshot(octo::JsonLog* log, const octo::Snapshot& s) {
   std::string fields;
@@ -520,7 +683,28 @@ int main(int argc, char** argv) {
   // thing here a person actually asked for, and a device that came back from
   // the dead because the daemon was killed a moment later would be indexed
   // under "this program does not do what I tell it".
-  octo::Handler base = octo::registry_handler(registry);
+  // A sync daemon of our own, if there is one plugged in. Its boxes are
+  // appended to every snapshot, tagged with which radio heard them; they are
+  // never merged with ours, because the two radios cannot agree on what to
+  // call a box and nothing in a Tentacle advertisement would settle it. See
+  // src/dongle.h.
+  std::unique_ptr<BoxPeer> box;
+  if (opt.use_box) box.reset(new BoxPeer(opt.box_port, opt.quiet));
+
+  auto assemble = [&registry, &box]() {
+    octo::Snapshot snap = registry.snapshot();
+    if (!box) return snap;
+    const std::vector<octo::DeviceSnapshot> rows =
+        box->view().devices(octo::mono_now());
+    for (const octo::DeviceSnapshot& d : rows) {
+      ++snap.remote_devices;
+      if (d.live) ++snap.remote_live;
+      snap.device.push_back(d);
+    }
+    return snap;
+  };
+
+  octo::Handler base = octo::registry_handler(registry, assemble);
   octo::Server server(
       [&](const std::string& command) {
         const std::string reply = base(command);
@@ -566,6 +750,9 @@ int main(int argc, char** argv) {
   bool warned_no_radio = false;
   while (!g_stop) {
     server.serve(200);
+    // After the wait, so a dongle's answer is in before anything reads the
+    // snapshot -- the same reason bridge.drain() is where it is.
+    if (box) box->pump(octo::mono_now());
     // Before anything reads the registry, and after the wait that is where
     // the time goes. This program still runs its own loop rather than the
     // one in src/loop.h, so it drains the bridge by hand; the sync daemon

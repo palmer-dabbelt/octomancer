@@ -63,6 +63,8 @@ libocto_a_SOURCES = \
 	src/crypto.h \
 	src/devices.cc \
 	src/devices.h \
+	src/dongle.cc \
+	src/dongle.h \
 	src/escape.cc \
 	src/escape.h \
 	src/hci.cc \
@@ -310,6 +312,7 @@ check_PROGRAMS = \
 	tests/test_scenario \
 	tests/test_crypto \
 	tests/test_devices \
+	tests/test_dongle \
 	tests/test_devicedb \
 	tests/test_hci \
 	tests/test_jsonlog \
@@ -347,6 +350,8 @@ tests_test_proto_LDADD = libocto.a
 tests_test_pairing_SOURCES = tests/test_pairing.cc tests/harness.h
 tests_test_pairing_LDADD = libocto.a
 
+tests_test_dongle_SOURCES = tests/test_dongle.cc tests/harness.h
+tests_test_dongle_LDADD = libocto.a
 tests_test_bench_SOURCES = tests/test_bench.cc tests/harness.h
 tests_test_bench_LDADD = libocto.a
 tests_test_bmd_SOURCES = tests/test_bmd.cc tests/harness.h

@@ -95,6 +95,23 @@ struct AlertEvent {
 struct DeviceSnapshot {
   std::string id;
   std::string name;
+
+  // Which radio heard this. Empty means the one in this machine, which is
+  // both the common case and the only one the registry itself produces;
+  // anything else was heard by a dongle and folded in by src/dongle.h.
+  //
+  // It is a field rather than a merge, and that is forced rather than chosen.
+  // The two radios cannot agree on what to call a box: CoreBluetooth hands
+  // out a per-host UUID and refuses to show the hardware address, while the
+  // dongle sees the address and nothing else. Nor is there anything in the
+  // advertisement to match on -- a Tentacle broadcasts a clock and no serial
+  // number at all (src/tentacle.h). So a box in earshot of both appears
+  // twice, once per radio, and the rows are related by the reader rather than
+  // by a guess made here. Two readings of the same box from two radios is
+  // also the more useful thing to look at: they should agree, and noticing
+  // that they do not is the entire reason for having the second radio.
+  std::string radio;
+
   int rssi = 0;
   uint64_t adverts = 0;
   uint64_t decoded = 0;
@@ -178,6 +195,19 @@ struct Snapshot {
 
   int devices = 0;
   int live = 0;
+
+  // Rows in `device` that some other radio heard -- a dongle on a cable, or
+  // one reached over Bluetooth. Counted separately and NOT included in
+  // `devices` or `live` above, so that a reader which knows nothing about
+  // second radios still gets right answers about this one. The array is
+  // longer than `devices` by exactly `remote_devices`.
+  //
+  // The bench figures below are always this machine's radio alone. Folding in
+  // another radio's readings would add the distance between two machines'
+  // clocks to a figure that is supposed to be the distance between two
+  // timecode boxes, and would count every box in earshot of both twice.
+  int remote_devices = 0;
+  int remote_live = 0;
   int alerting = 0;
   bool has_bench = false;
   double bench_offset = 0.0;  // median across live boxes

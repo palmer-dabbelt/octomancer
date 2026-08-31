@@ -81,6 +81,10 @@ struct DeviceRow {
   DeviceKind kind = DeviceKind::kTentacle;
   std::string id;
   std::string name;
+  // Which radio heard it; empty for the one in this machine. A box in earshot
+  // of both gets two rows, because nothing can prove they are the same box --
+  // see DeviceSnapshot::radio.
+  std::string radio;
   // Always true in a view built today, because a disabled device gets counted
   // in `hidden` instead of getting a row. It is here for the Configuration
   // page, which has to list the devices somebody switched off in order to
@@ -145,11 +149,38 @@ struct DeviceRow {
   bool contributes = false;  // did this row vote on the canonical time
 };
 
+// A radio other than this machine's, and what it makes of the room.
+//
+// Each one gets its own canonical time and every row it heard is quoted
+// against that rather than against ours. This is not tidiness: a dongle that
+// has not been told the time measures everything against a clock that started
+// at zero when it was plugged in, so its raw offsets are displaced by an
+// arbitrary constant -- hours of it. That constant is the same for every box
+// the dongle hears, so it cancels exactly when a row is expressed as its
+// distance from its own radio's median, and does not cancel at all otherwise.
+//
+// The happy consequence is that the two copies of a box become directly
+// comparable without either radio knowing what time it is. Both say "this box
+// is 14 ms ahead of its bench", and if they disagree about that, something is
+// genuinely wrong -- which is the whole reason for listening twice.
+struct RadioView {
+  std::string name;
+  bool has_canonical = false;
+  double canonical_offset_s = 0.0;
+  double canonical_spread_s = 0.0;
+  int contributing = 0;
+};
+
 struct DeviceView {
   // Timecode boxes first, then cameras; within each kind, the ones we hear
   // from before the ones we are not. Order within those groups is the order
   // the daemons gave, which is stable across polls.
   std::vector<DeviceRow> rows;
+
+  // Radios other than this machine's that contributed rows, in the order
+  // their first row appeared. This machine's own radio is not in here: it is
+  // the one the header is about.
+  std::vector<RadioView> radios;
 
   bool has_canonical = false;
   // The canonical time versus this Mac. Shown once, in the header, because it

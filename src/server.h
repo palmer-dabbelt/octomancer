@@ -31,6 +31,20 @@ using Handler = std::function<std::string(const std::string&)>;
 // read.
 Handler registry_handler(Registry& registry);
 
+// Where a snapshot comes from, when it is not simply the registry's own.
+//
+// octomancerd assembles one: the registry's, plus whatever rows a dongle on
+// the end of a cable has contributed. Passing the assembly in rather than
+// teaching the registry about dongles keeps the registry what it is -- the
+// record of what *this* radio heard -- and keeps the joining-up in the one
+// program that knows a dongle exists.
+using SnapshotSource = std::function<Snapshot()>;
+
+// The same handler, over a snapshot somebody else assembles. `forget` still
+// goes to the registry: a row from another radio is not ours to throw away,
+// and it will be gone from the next answer that radio gives anyway.
+Handler registry_handler(Registry& registry, SnapshotSource snapshot);
+
 class Server {
  public:
   explicit Server(Handler handler, std::string path);

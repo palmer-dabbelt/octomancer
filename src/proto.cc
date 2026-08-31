@@ -86,6 +86,10 @@ std::string render_text(const Snapshot& s) {
     put(&out, "bench_offset", s.bench_offset);
     put(&out, "bench_spread", s.bench_spread);
   }
+  if (s.remote_devices > 0) {
+    put(&out, "remote_devices", static_cast<long long>(s.remote_devices));
+    put(&out, "remote_live", static_cast<long long>(s.remote_live));
+  }
   out += "\n";
 
   // Always emitted, even before a camera has ever been heard. A reader has to
@@ -111,6 +115,10 @@ std::string render_text(const Snapshot& s) {
     out += "device";
     put(&out, "id", d.id);
     put(&out, "name", d.name);
+    // Only when it is not ours. An empty key on every row would be noise on a
+    // line somebody reads, and absence already means "the radio in this
+    // machine" everywhere else.
+    if (!d.radio.empty()) put(&out, "radio", d.radio);
     put(&out, "rssi", static_cast<long long>(d.rssi));
     put(&out, "adverts", static_cast<long long>(d.adverts));
     put(&out, "decoded", static_cast<long long>(d.decoded));
@@ -153,6 +161,11 @@ std::string render_json(const Snapshot& s) {
   out += ",\"clock_steps\":" + std::to_string(s.clock_steps);
   out += ",\"devices\":" + std::to_string(s.devices);
   out += ",\"live\":" + std::to_string(s.live);
+  // Not folded into "devices"/"live" above: those describe this machine's
+  // radio, and a reader that has never heard of a second one must not be
+  // handed a total that quietly includes it.
+  out += ",\"remote_devices\":" + std::to_string(s.remote_devices);
+  out += ",\"remote_live\":" + std::to_string(s.remote_live);
   out += ",\"alerting\":" + std::to_string(s.alerting);
   out += ",\"alert_threshold\":" + json_number(s.alert_threshold, 1);
   if (s.has_bench) {
@@ -185,6 +198,7 @@ std::string render_json(const Snapshot& s) {
     out += "{";
     out += "\"id\":" + json_string(d.id);
     out += ",\"name\":" + json_string(d.name);
+    out += ",\"radio\":" + json_string(d.radio);
     out += ",\"rssi\":" + std::to_string(d.rssi);
     out += ",\"adverts\":" + std::to_string(d.adverts);
     out += ",\"decoded\":" + std::to_string(d.decoded);
@@ -286,6 +300,10 @@ bool parse_text(const std::string& text, Snapshot* out, std::string* err) {
         else if (key == "has_bench") out->has_bench = to_int(value) != 0;
         else if (key == "bench_offset") out->bench_offset = to_double(value);
         else if (key == "bench_spread") out->bench_spread = to_double(value);
+        else if (key == "remote_devices")
+          out->remote_devices = static_cast<int>(to_int(value));
+        else if (key == "remote_live")
+          out->remote_live = static_cast<int>(to_int(value));
       }
       continue;
     }
@@ -320,6 +338,7 @@ bool parse_text(const std::string& text, Snapshot* out, std::string* err) {
         if (!split_kv(token, &key, &value)) continue;
         if (key == "id") d.id = value;
         else if (key == "name") d.name = value;
+        else if (key == "radio") d.radio = value;
         else if (key == "rssi") d.rssi = static_cast<int>(to_int(value));
         else if (key == "adverts") d.adverts = to_int(value);
         else if (key == "decoded") d.decoded = to_int(value);

@@ -175,6 +175,36 @@ void test_an_empty_room_is_not_an_offset_of_zero() {
   CHECK_STR(b.boxes_json, "{}");
 }
 
+// A dongle on the end of a USB cable hears the same room, and its rows travel
+// in the same snapshot. They must not vote here. Their offsets are quoted
+// against the dongle's clock, which is a different clock -- often a clock that
+// has never been set at all -- so averaging them in would add the distance
+// between two machines to a figure that is meant to be the distance between
+// two timecode boxes. It would also count every box in earshot of both twice.
+void test_another_radio_does_not_vote() {
+  const CamConf conf = plain();
+  Snapshot snap = the_bench();
+  // The same four boxes, heard by a dongle that booted eleven hours ago and
+  // has never been told the time, so every reading is displaced by that.
+  const double displaced = 39600.0;
+  for (int i = 0; i < 4; ++i) {
+    DeviceSnapshot d = snap.device[i];
+    d.id = "C4:1E:AE:18:A7:0" + std::to_string(i);
+    d.radio = "dongle";
+    d.median_offset += displaced;
+    snap.device.push_back(d);
+  }
+
+  const Bench b = octo::bench_from(snap, conf, "octomancerd");
+  CHECK_EQ(b.boxes, 4);
+  CHECK_EQ(b.skipped, 0);
+  // Unmoved by eleven hours of somebody else's clock sitting in the same
+  // snapshot.
+  CHECK_NEAR(b.offset, (-3.585987 + -3.594125) / 2.0, 1e-9);
+  CHECK_NEAR(b.spread, -3.575476 - -3.600590, 1e-9);
+  CHECK(!contains(b.boxes_json, "C4:1E"));
+}
+
 // One box is a bench, and its spread is genuinely zero -- there is nothing for
 // it to disagree with. Worth pinning because it is indistinguishable, in the
 // numbers alone, from the stale reading above.
@@ -218,6 +248,7 @@ int main() {
   test_a_box_off_the_air_does_not_vote();
   test_a_box_with_no_reading_does_not_vote();
   test_a_switched_off_box_is_skipped_and_counted();
+  test_another_radio_does_not_vote();
   test_an_empty_room_is_not_an_offset_of_zero();
   test_one_box_is_a_bench_with_no_spread();
   test_the_record_names_the_voters_and_their_readings();

@@ -59,12 +59,19 @@ std::string default_socket_path() {
 }
 
 Handler registry_handler(Registry& registry) {
-  return [&registry](const std::string& command) -> std::string {
+  return registry_handler(registry, SnapshotSource());
+}
+
+Handler registry_handler(Registry& registry, SnapshotSource snapshot) {
+  return [&registry, snapshot](const std::string& command) -> std::string {
+    auto shot = [&registry, &snapshot]() {
+      return snapshot ? snapshot() : registry.snapshot();
+    };
     if (command == "status" || command.empty()) {
-      return render_text(registry.snapshot());
+      return render_text(shot());
     }
     if (command == "json") {
-      return render_json(registry.snapshot()) + "\n";
+      return render_json(shot()) + "\n";
     }
     if (command == "ping") {
       return "octomancer " + std::to_string(kProtocolVersion) + "\npong\n";

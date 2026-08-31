@@ -9,9 +9,19 @@
 namespace octo {
 namespace {
 
-// Whether this box is entitled to a vote. Three separate reasons not to be,
+// Whether this box is entitled to a vote. Several separate reasons not to be,
 // and they are kept apart because only one of them is a person's decision.
-bool heard_now(const DeviceSnapshot& d) { return d.live && d.has_time; }
+//
+// A row from another radio never votes. Not because it is less trustworthy --
+// a dongle three metres closer to the boxes may well be hearing them better
+// -- but because its offsets are quoted against *its* clock, and averaging
+// them in with ours would add the difference between two machines' clocks to
+// a figure that is supposed to be the difference between two timecode boxes.
+// It would also count every box in earshot of both radios twice, which is a
+// way of making a bench look more certain than it is.
+bool heard_now(const DeviceSnapshot& d) {
+  return d.radio.empty() && d.live && d.has_time;
+}
 
 }  // namespace
 

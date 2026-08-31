@@ -14,7 +14,8 @@ namespace {
 
 }  // namespace
 
-bool handle_box_admin(const std::string& line, CdcPeer* peer) {
+bool handle_box_admin(const std::string& line, MsgPeer* peer,
+                      const PeerStats& stats) {
   Message msg;
   std::string err;
   if (!decode(line, &msg, &err)) return false;  // the daemon reports bad lines
@@ -26,9 +27,9 @@ bool handle_box_admin(const std::string& line, CdcPeer* peer) {
     // Everything that can be dropped, and was. All cumulative: the question a
     // person asks is "has this ever happened", not "is it happening now".
     out.set_int("adverts_dropped", zephyr_scanner_dropped());
-    out.set_int("tx_dropped", peer->dropped_tx());
-    out.set_int("rx_dropped", peer->dropped_rx());
-    out.set_int("long_lines", peer->long_lines());
+    out.set_int("tx_dropped", stats.dropped_tx);
+    out.set_int("rx_dropped", stats.dropped_rx);
+    out.set_int("long_lines", stats.long_lines);
     // Whether this build can print the numbers it is being asked for. If this
     // is 0 then every other figure in this message is an integer that happened
     // to survive, and every double the box has sent is empty.

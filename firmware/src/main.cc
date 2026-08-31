@@ -37,6 +37,7 @@
 #include "hwwatchdog.h"
 #include "boxclock.h"
 #include "boxmsg.h"
+#include "blepeer.h"
 #include "cdcpeer.h"
 #include "loop.h"
 #include "registry.h"
@@ -119,6 +120,10 @@ int main() {
   daemon.set_wall_clock([&clock]() { return clock.wall(); });
 
   octo::CdcPeer peer(loop.get(), cdc_uart());
+  // The same protocol over the air. Started later -- it needs the controller
+  // up -- but constructed here so that everything with the program's lifetime
+  // is in one place.
+  octo::BlePeer air(loop.get());
 
   // Console chatter, onto the only wire there is. Never load-bearing -- a
   // client is free to ignore every `say` line -- but it is the difference
@@ -198,8 +203,29 @@ int main() {
   peer.on_line([&daemon, &peer](const std::string& line) {
     // Two verbs mean something only on a box -- see firmware/src/boxadmin.h.
     // Everything else, including every malformed line, is the daemon's.
-    if (handle_box_admin(line, &peer)) return;
+    octo::PeerStats stats;
+    stats.dropped_tx = peer.dropped_tx();
+    stats.dropped_rx = peer.dropped_rx();
+    stats.long_lines = peer.long_lines();
+    if (handle_box_admin(line, &peer, stats)) return;
     daemon.peer_line(&peer, line);
+  });
+
+  // ...and exactly the same over Bluetooth. Nothing here decides which link is
+  // in charge, and nothing here should: src/syncd.h keeps a list of peers and
+  // announces to all of them, so a box with a cable and a radio link simply
+  // has two. Whether to use the radio at all is a question only the host can
+  // answer, because only the host knows whether it also has the cable -- see
+  // want_bluetooth() in src/dongle.h.
+  air.on_open([&daemon, &air]() { daemon.peer_opened(&air); });
+  air.on_close([&daemon, &air]() { daemon.peer_closed(&air); });
+  air.on_line([&daemon, &air](const std::string& line) {
+    octo::PeerStats stats;
+    stats.dropped_tx = air.dropped_tx();
+    stats.dropped_rx = air.dropped_rx();
+    stats.long_lines = air.long_lines();
+    if (handle_box_admin(line, &air, stats)) return;
+    daemon.peer_line(&air, line);
   });
 
   std::string err;
@@ -287,6 +313,15 @@ int main() {
           [&daemon](const octo::Advert& a) { daemon.observe_advert(a); },
           [&daemon](const octo::Sighting& s) { daemon.observe_camera(s); },
           [&daemon](const std::string& state) { daemon.set_radio_state(state); });
+      // Reachable over the air as well, now that there is a controller. After
+      // the scanner rather than before it: listening is this box's job and
+      // being talked to is a convenience, so if only one of them can be had,
+      // it should be the listening.
+      std::string air_err;
+      if (!air.start(&air_err)) {
+        say_now("the radio would not advertise -- this box is reachable only"
+                " over USB");
+      }
       if (!scanner->start(&radio_err)) {
         // start() has already reported the state through the handler above, so
         // the roster says "poweredOff" rather than staying "unknown" -- which

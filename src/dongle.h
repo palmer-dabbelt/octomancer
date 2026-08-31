@@ -35,6 +35,39 @@
 
 namespace octo {
 
+// The ways there are to reach a box.
+//
+// A dongle in a USB port is reachable down the cable; the same dongle in a
+// phone charger is reachable only over Bluetooth. Both carry the same box
+// protocol -- that is the whole point of src/boxmsg.h -- so what differs is
+// only which pipe the lines arrive through.
+enum class LinkWay { kNone, kUsb, kBluetooth };
+
+const char* link_way_name(LinkWay way);
+
+// Whether to have a Bluetooth link at all, given whether USB is working.
+//
+// Normally: only when USB is not. Not because the radio link is untrusted but
+// because it costs something real at both ends -- a connection slot on a box
+// whose whole job is listening, airtime in a room that is already full of
+// advertisements, and a second copy of every line. USB is faster, has no
+// range limit worth worrying about, and cannot be jammed by somebody standing
+// in the wrong place.
+//
+// In debug: always, so the radio path can be exercised with the dongle still
+// plugged in. Testing it by unplugging the cable means testing it with no way
+// to see what the box thinks is happening, which is how the last two firmware
+// problems stayed invisible for a day each.
+bool want_bluetooth(bool usb_ready, bool debug_both);
+
+// Which link carries the conversation. USB whenever it is there.
+//
+// Exactly one carries it, even when both are up. Two links feeding one view
+// would deliver every device list twice, and since a list replaces the last
+// one wholesale, the result is not a doubled bench -- it is a bench that
+// alternates between two radios' answers on no schedule anybody chose.
+LinkWay carrier(bool usb_ready, bool ble_ready);
+
 class DongleView {
  public:
   // How often to ask what it can hear. A dongle answers a `devices` request

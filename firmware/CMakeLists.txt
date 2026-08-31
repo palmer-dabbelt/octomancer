@@ -33,6 +33,7 @@ target_compile_definitions(app PRIVATE _POSIX_C_SOURCE=200809L)
 # The glue, which exists only on this target.
 target_sources(app PRIVATE
   src/main.cc
+  src/blepeer.cc
   src/boxadmin.cc
   src/boxclock.cc
   src/cdcpeer.cc

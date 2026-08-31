@@ -3,6 +3,25 @@
 
 namespace octo {
 
+const char* link_way_name(LinkWay way) {
+  switch (way) {
+    case LinkWay::kUsb: return "usb";
+    case LinkWay::kBluetooth: return "bluetooth";
+    case LinkWay::kNone: break;
+  }
+  return "none";
+}
+
+bool want_bluetooth(bool usb_ready, bool debug_both) {
+  return debug_both || !usb_ready;
+}
+
+LinkWay carrier(bool usb_ready, bool ble_ready) {
+  if (usb_ready) return LinkWay::kUsb;
+  if (ble_ready) return LinkWay::kBluetooth;
+  return LinkWay::kNone;
+}
+
 DongleView::DongleView(std::string radio) : radio_(std::move(radio)) {}
 
 DeviceSnapshot device_from_message(const Message& msg,

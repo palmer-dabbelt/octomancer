@@ -333,6 +333,49 @@ void test_an_end_for_something_else_does_not_finish_a_batch() {
   CHECK_EQ(static_cast<int>(v.devices(1001.0).size()), 1);
 }
 
+// ------------------------------------------------------- which way in
+
+// USB wins whenever it is there, and the reason is not that the radio link is
+// untrusted. It is that a Bluetooth link costs a connection slot on a box
+// whose whole job is listening, and airtime in a room already full of
+// advertisements, to carry lines that are already arriving down a cable.
+void test_usb_wins_whenever_it_is_there() {
+  CHECK(octo::carrier(true, true) == octo::LinkWay::kUsb);
+  CHECK(octo::carrier(true, false) == octo::LinkWay::kUsb);
+  CHECK(octo::carrier(false, true) == octo::LinkWay::kBluetooth);
+  CHECK(octo::carrier(false, false) == octo::LinkWay::kNone);
+}
+
+// ...and only one of them carries the conversation, even when both are up.
+// Two links feeding one view would deliver every device list twice, and since
+// a list replaces the last one wholesale, that is not a doubled bench -- it is
+// a bench that alternates between two radios' answers on no schedule anybody
+// chose.
+void test_exactly_one_link_carries_the_conversation() {
+  CHECK(octo::carrier(true, true) != octo::LinkWay::kBluetooth);
+}
+
+void test_bluetooth_comes_up_only_when_it_is_needed() {
+  CHECK(!octo::want_bluetooth(true, false));
+  CHECK(octo::want_bluetooth(false, false));
+}
+
+// The debug mode exists because the obvious way to test the radio path -- pull
+// the cable -- tests it with no way left to see what the box thinks is
+// happening. Both links up, USB still carrying.
+void test_debug_brings_bluetooth_up_alongside_usb() {
+  CHECK(octo::want_bluetooth(true, true));
+  CHECK(octo::want_bluetooth(false, true));
+  // ...and does not change which one is in charge.
+  CHECK(octo::carrier(true, true) == octo::LinkWay::kUsb);
+}
+
+void test_link_way_names() {
+  CHECK_STR(octo::link_way_name(octo::LinkWay::kUsb), "usb");
+  CHECK_STR(octo::link_way_name(octo::LinkWay::kBluetooth), "bluetooth");
+  CHECK_STR(octo::link_way_name(octo::LinkWay::kNone), "none");
+}
+
 }  // namespace
 
 int main() {
@@ -354,5 +397,10 @@ int main() {
   test_a_poll_that_was_not_sent_does_not_count();
   test_unknown_verbs_are_ignored();
   test_an_end_for_something_else_does_not_finish_a_batch();
+  test_usb_wins_whenever_it_is_there();
+  test_exactly_one_link_carries_the_conversation();
+  test_bluetooth_comes_up_only_when_it_is_needed();
+  test_debug_brings_bluetooth_up_alongside_usb();
+  test_link_way_names();
   return octotest::report("test_dongle");
 }

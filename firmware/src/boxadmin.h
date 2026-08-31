@@ -22,15 +22,29 @@
 #ifndef OCTO_FW_BOXADMIN_H
 #define OCTO_FW_BOXADMIN_H
 
+#include <cstdint>
 #include <string>
 
-#include "cdcpeer.h"
+#include "syncd.h"
 
 namespace octo {
 
+// What the transport this line arrived on has had to throw away.
+//
+// Passed in rather than read off the peer, because there are two kinds of peer
+// now -- a cable and a radio link -- and the counters are the only thing about
+// them these verbs care about. A `boxstats` asked over Bluetooth should report
+// what Bluetooth dropped, not what the cable did.
+struct PeerStats {
+  uint32_t dropped_tx = 0;
+  uint32_t dropped_rx = 0;
+  uint32_t long_lines = 0;
+};
+
 // True if the line was one of ours and has been answered. False means the
 // daemon should see it, which is every ordinary message.
-bool handle_box_admin(const std::string& line, CdcPeer* peer);
+bool handle_box_admin(const std::string& line, MsgPeer* peer,
+                      const PeerStats& stats);
 
 }  // namespace octo
 

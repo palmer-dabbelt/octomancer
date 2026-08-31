@@ -210,6 +210,38 @@ So **a box in earshot of both appears twice**, tagged with which radio heard
 it, and the table says so out loud rather than leaving somebody to discover
 that their bench appears to have doubled overnight.
 
+#### The mesh clock, and why no two radios should agree about the time
+
+Each radio keeps a **virtual mesh clock**: its own best estimate of what time
+the Tentacle mesh thinks it is, built from every mesh broadcast it has heard.
+It is not stored as a time. It is stored as an *offset* -- the median of
+`box_seconds_of_day - local_seconds_of_day` across the live enabled boxes --
+and the mesh time of day is that offset added to the local clock whenever
+somebody asks.
+
+Storing it that way is what makes it work on a radio with no clock. The local
+term appears on both sides of the subtraction and cancels exactly, so a
+free-running clock that started at zero when the dongle was plugged in gives
+precisely the same mesh time of day as a Mac synchronised to an atomic clock.
+The one condition is that the local clock runs at the right *rate*, which a
+crystal does.
+
+**Every number this system reports is a difference against that radio's own
+mesh clock.** A timecode box's offset is how far it is from the mesh as this
+radio hears the mesh. A camera's error is the same. Nothing is ever reported
+against another radio's anything.
+
+So **the skew between two radios' clocks is meaningless and is not tracked**.
+It is not a fault to be corrected, it is a quantity with no referent: the two
+radios are not trying to agree, they are each measuring the same room against
+themselves. Two radios whose clocks differ by four hours will report the same
+box as fourteen milliseconds fast, and that agreement is the only thing worth
+checking. Anything that reported the four hours would be reporting an artefact
+of when somebody last set a clock.
+
+The one fact that genuinely has to travel is the **date**, and that is a
+separate message for a separate reason -- see below.
+
 #### Each radio's rows are quoted against that radio's own bench
 
 This is what makes the second copy worth having, and it is the one piece of
@@ -238,6 +270,39 @@ Two consequences follow, and both are enforced in code:
 The columns are only as comparable as the overlap in what the two radios hear,
 though. A median over two boxes and a median over four are different axes, and
 the numbers converge as the overlap does.
+
+#### The date is the only thing a radio cannot work out for itself
+
+A mesh broadcast carries a time of day and no date. So a dongle knows what
+time it is to the millisecond and has no idea what year it is, which is fine
+for measuring boxes against each other and not fine for setting a camera: a
+Blackmagic real-time clock is a date and a time together, in one write.
+
+Three ways to date that write, in descending order of how much they are worth
+trusting:
+
+1. **This host's own clock.** A machine that knows the time knows the date.
+2. **A date a host told us**, over the `date` message. octomancerd sends it to
+   every box that greets it.
+3. **The camera's own date**, read back from its real-time clock. The weakest,
+   and also the one that changes nothing: writing a camera's date back to it
+   leaves the date exactly as it was, which is the right thing to do with a
+   fact nobody present can check.
+
+If none of the three is available the write is skipped and the camera's clock
+is left alone, which is the honest outcome -- a camera with a wrong date and a
+right time is worse than one nobody touched.
+
+**`date` is deliberately not `time`.** Setting a whole wall clock invites the
+idea that the two radios should agree about what time it is, and they should
+not, for the reasons above. A date is one integer triple that changes once a
+day; a clock is a thing that would need disciplining forever.
+
+Expect to send it often. A dongle has no battery-backed clock, so it forgets
+the date on every power cycle -- and a dongle in a phone charger is a device
+that gets power-cycled. octomancerd therefore sends it on every greeting
+rather than once, and `DongleView` forgets having sent it whenever the link
+drops, because a box that went away and came back may have rebooted.
 
 #### What is built
 

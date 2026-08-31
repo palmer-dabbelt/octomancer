@@ -95,6 +95,44 @@ Civil utc_civil(double unix_seconds) {
   return c;
 }
 
+namespace {
+
+// Howard Hinnant's civil-from-days pair, which is exact for every date in
+// range and needs no library. Days are counted from 1970-01-01.
+int64_t days_from_civil(int y, int m, int d) {
+  y -= m <= 2;
+  const int64_t era = (y >= 0 ? y : y - 399) / 400;
+  const unsigned yoe = static_cast<unsigned>(y - era * 400);
+  const unsigned doy =
+      (153 * (m + (m > 2 ? -3 : 9)) + 2) / 5 + static_cast<unsigned>(d) - 1;
+  const unsigned doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+  return era * 146097 + static_cast<int64_t>(doe) - 719468;
+}
+
+void civil_from_days(int64_t z, int* y, unsigned* m, unsigned* d) {
+  z += 719468;
+  const int64_t era = (z >= 0 ? z : z - 146096) / 146097;
+  const unsigned doe = static_cast<unsigned>(z - era * 146097);
+  const unsigned yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+  const int64_t yr = static_cast<int64_t>(yoe) + era * 400;
+  const unsigned doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+  const unsigned mp = (5 * doy + 2) / 153;
+  *d = doy - (153 * mp + 2) / 5 + 1;
+  *m = mp + (mp < 10 ? 3 : -9);
+  *y = static_cast<int>(yr + (*m <= 2));
+}
+
+}  // namespace
+
+void add_days(Civil* when, int days) {
+  if (when == nullptr || days == 0) return;
+  const int64_t z = days_from_civil(when->year, when->month, when->day) + days;
+  unsigned m = 0, d = 0;
+  civil_from_days(z, &when->year, &m, &d);
+  when->month = static_cast<int>(m);
+  when->day = static_cast<int>(d);
+}
+
 std::vector<uint8_t> rtc_packet(const Civil& when, int frames, uint8_t dest) {
   std::vector<uint8_t> payload;
   payload.reserve(8);
@@ -117,6 +155,54 @@ bool decode_bcd_timecode(uint32_t word, int* h, int* m, int* s, int* f) {
   if (m) *m = out[1];
   if (s) *s = out[2];
   if (f) *f = out[3];
+  return true;
+}
+
+bool decode_bcd_date(uint32_t word, int* y, int* mo, int* d) {
+  int part[4];
+  const int shifts[4] = {24, 16, 8, 0};
+  for (int i = 0; i < 4; ++i) {
+    const uint8_t byte = static_cast<uint8_t>((word >> shifts[i]) & 0xFF);
+    const int hi = byte >> 4, lo = byte & 0x0F;
+    if (hi > 9 || lo > 9) return false;
+    part[i] = hi * 10 + lo;
+  }
+  const int year = part[0] * 100 + part[1];
+  const int month = part[2];
+  const int day = part[3];
+  // A calendar check rather than only a BCD one. Zeros are what a camera that
+  // has never had its clock set reports, and they decode as perfectly valid
+  // BCD; writing 0000-00-00 back would replace "unset" with "wrong".
+  if (year < 2000 || year > 2099) return false;
+  if (month < 1 || month > 12) return false;
+  if (day < 1 || day > 31) return false;
+  if (y) *y = year;
+  if (mo) *mo = month;
+  if (d) *d = day;
+  return true;
+}
+
+bool decode_rtc(const Value& value, Civil* date, double* sod) {
+  if (value.ints.size() < 2) return false;
+  const uint32_t time_word = static_cast<uint32_t>(value.ints[0] & 0xFFFFFFFF);
+  const uint32_t date_word = static_cast<uint32_t>(value.ints[1] & 0xFFFFFFFF);
+
+  int y = 0, mo = 0, d = 0;
+  if (!decode_bcd_date(date_word, &y, &mo, &d)) return false;
+  int h = 0, m = 0, s = 0, f = 0;
+  if (!decode_bcd_timecode(time_word, &h, &m, &s, &f)) return false;
+  // A BCD word can hold 99 hours; a clock cannot.
+  if (h > 23 || m > 59 || s > 59) return false;
+
+  if (date != nullptr) {
+    date->year = y;
+    date->month = mo;
+    date->day = d;
+    date->hour = h;
+    date->minute = m;
+    date->second = s;
+  }
+  if (sod != nullptr) *sod = h * 3600.0 + m * 60.0 + s;
   return true;
 }
 

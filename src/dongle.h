@@ -91,6 +91,21 @@ bool want_bluetooth(bool usb_ready, bool debug_both);
 // alternates between two radios' answers on no schedule anybody chose.
 LinkWay carrier(bool usb_ready, bool ble_ready);
 
+// A calendar day, which is the only part of a clock that has to travel
+// between two radios. See SyncDaemon::DateOnly, which this mirrors across the
+// wire.
+struct DateStamp {
+  int year = 0;
+  int month = 0;
+  int day = 0;
+
+  bool known() const { return year > 0 && month > 0 && day > 0; }
+  bool operator==(const DateStamp& other) const {
+    return year == other.year && month == other.month && day == other.day;
+  }
+  bool operator!=(const DateStamp& other) const { return !(*this == other); }
+};
+
 class DongleView {
  public:
   // How often to ask what it can hear. A dongle answers a `devices` request
@@ -139,6 +154,21 @@ class DongleView {
   bool greeted() const { return greeted_; }
 
   // --- what the daemon asks -----------------------------------------------
+
+  // True when this box should be told today's date, filling *out with the
+  // message.
+  //
+  // A dongle has no battery-backed clock, so it forgets the date on every
+  // power cycle -- and a dongle in a phone charger is a device that gets
+  // power-cycled. So this is sent on every greeting rather than once, and
+  // again when the date changes underneath a box that has been up all night.
+  //
+  // Only the date. Not the time: the mesh broadcasts a time of day and the
+  // box measures against its own clock, so the two ends have no reason to
+  // agree about what time it is and syncing them would be work in service of
+  // a number nobody should read.
+  bool wants_date(const DateStamp& today, Message* out);
+  void dated(const DateStamp& today);
 
   // True when it is time to ask again, filling *out with the request. Asking
   // is the caller's job because only the caller can fail to send it.
@@ -189,6 +219,10 @@ class DongleView {
   double current_mono_ = 0.0;
   double asked_mono_ = 0.0;
   bool ever_asked_ = false;
+
+  // The date this box was last told, so it is not told the same one twice a
+  // second -- and is told again the moment it changes, or the box restarts.
+  DateStamp dated_;
 };
 
 // One `dev` line as a row. Exposed for the tests, and because the mapping

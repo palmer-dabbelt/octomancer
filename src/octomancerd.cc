@@ -25,6 +25,7 @@
 #include <cstdlib>
 #include <string>
 
+#include "bmd.h"
 #include "boxble.h"
 #include "boxcdc.h"
 #include "client.h"
@@ -438,6 +439,19 @@ class BoxPeer {
                                           ? air_.get()
                                           : nullptr;
     if (voice != nullptr) {
+      // The date first, and before any question, because a box that does not
+      // know the date cannot act on the answer to one.
+      octo::Message tell;
+      if (view_.wants_date(today(), &tell)) {
+        voice->send(tell);
+        if (voice->is_open()) {
+          view_.dated(today());
+          say("told the dongle today's date (%04d-%02d-%02d) -- it has no"
+              " clock to remember one with",
+              today().year, today().month, today().day);
+        }
+      }
+
       octo::Message ask;
       if (view_.wants_poll(now, &ask)) {
         voice->send(ask);
@@ -451,6 +465,18 @@ class BoxPeer {
     if (now < next_try_) return;
     next_try_ = now + kRetryEvery;
     attach(now);
+  }
+
+  // Today, as this Mac understands it. UTC, because that is what a camera's
+  // real-time clock is specified in -- see src/bmd.h, where writing local time
+  // gets the offset applied twice.
+  static octo::DateStamp today() {
+    const octo::bmd::Civil now = octo::bmd::utc_civil(octo::wall_now());
+    octo::DateStamp out;
+    out.year = now.year;
+    out.month = now.month;
+    out.day = now.day;
+    return out;
   }
 
   // Whether the radio link is up, for the status line. Reported separately

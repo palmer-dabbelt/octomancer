@@ -285,6 +285,37 @@ class SyncDaemon {
   using TimeHandler = std::function<void(const WallTime&)>;
   void on_settime(TimeHandler handler);
 
+  // Today's date, from a host that knows one.
+  //
+  // Lighter than `time`, and the only part a radio actually needs from a
+  // host. The mesh broadcasts a time of day, so a dongle knows *that* exactly
+  // -- an offset is a difference between two seconds-of-day figures and a
+  // free-running clock cancels out of it. What no amount of listening will
+  // ever supply is the date, and a camera's real-time clock wants one.
+  //
+  // Kept separate from `time` on purpose. Setting a whole wall clock invites
+  // the idea that the two radios should agree about what time it is, and they
+  // should not: each measures the mesh against its own clock and reports the
+  // difference, so the skew between them is meaningless and syncing it would
+  // be work in service of a number nobody should read. A date is the one fact
+  // that genuinely has to travel.
+  //
+  // Expect to send it often. A dongle has no battery-backed clock, so it
+  // forgets the date on every power cycle -- and a dongle in a phone charger
+  // is a device that gets power-cycled.
+  struct DateOnly {
+    int year = 0;
+    int month = 0;
+    int day = 0;
+  };
+  using DateHandler = std::function<void(const DateOnly&)>;
+  void on_setdate(DateHandler handler);
+
+  // Whether this daemon can date a write, and what it would date it to.
+  // True when the host has a real clock of its own, or when one has told us.
+  bool date_known() const;
+  bmd::Civil today() const;
+
   void start();
   void stop();
   bool started() const { return started_; }
@@ -349,6 +380,20 @@ class SyncDaemon {
     BenchView bench;
     double offset = 0.0;
     bool may_write = false;
+
+    // The camera's own idea of the date, read back from its real-time clock.
+    //
+    // Only needed on a radio that has no date of its own -- a dongle in a
+    // phone charger -- where it is the only date in the system. Captured once
+    // per cycle rather than read at write time, so a camera that stops
+    // reporting its clock halfway through cannot turn into a write dated from
+    // nothing.
+    bool have_camera_date = false;
+    bmd::Civil camera_date;
+    // The time of day the camera believes it is, from the same reading, kept
+    // so a write across midnight can be dated to the correct side of it. See
+    // aligned_value_on_date.
+    double camera_date_sod = -1.0;
 
     // The camera this cycle is trying, which is not yet the camera it is bound
     // to: binding happens when the connection succeeds.
@@ -432,6 +477,10 @@ class SyncDaemon {
   BindHandler on_bind_;
   SayHandler on_say_;
   TimeHandler on_time_;
+  DateHandler on_date_;
+  // A date pushed by a host, for a radio with no clock of its own.
+  bool told_date_ = false;
+  DateOnly date_told_;
 
   bool started_ = false;
   Phase phase_ = Phase::kStopped;

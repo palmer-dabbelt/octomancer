@@ -454,4 +454,37 @@ bmd::Civil aligned_value(double send_unix, double offset, double bias) {
   return bmd::utc_civil(std::floor(send_unix + offset + bias + 0.5));
 }
 
+bmd::Civil aligned_value_on_date(double send_unix, double offset, double bias,
+                                 const bmd::Civil& camera_date,
+                                 double camera_sod) {
+  // The instant this host would have written, whatever its clock is anchored
+  // to. Only the time of day in it is trustworthy; see the header.
+  const bmd::Civil loose =
+      bmd::utc_civil(std::floor(send_unix + offset + bias + 0.5));
+
+  bmd::Civil out = camera_date;
+  out.hour = loose.hour;
+  out.minute = loose.minute;
+  out.second = loose.second;
+
+  if (camera_sod < 0.0) return out;
+
+  // Midnight. The two are within a second or so of each other in the ordinary
+  // case, so a gap approaching a whole day means they are on opposite sides of
+  // it -- and only one of the two directions can happen to a clock being
+  // corrected forwards or backwards by milliseconds.
+  const double target_sod =
+      out.hour * 3600.0 + out.minute * 60.0 + out.second;
+  const double gap = target_sod - camera_sod;
+  if (gap < -43200.0) {
+    // The mesh has passed midnight and the camera has not: tomorrow.
+    add_days(&out, 1);
+  } else if (gap > 43200.0) {
+    // The camera has passed midnight and the mesh has not: yesterday. Reached
+    // when a camera is running slightly fast across the boundary.
+    add_days(&out, -1);
+  }
+  return out;
+}
+
 }  // namespace octo

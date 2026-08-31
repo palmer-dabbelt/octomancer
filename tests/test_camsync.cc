@@ -322,6 +322,143 @@ void test_drift_uses_the_write_anchor() {
   CHECK_NEAR(d.anchor_span, 90.0, 1e-9);
 }
 
+// Writing a camera's clock from a radio that has never been told the time.
+//
+// This is the standalone dongle: it has heard the mesh, so it knows the time
+// of day exactly, and it has no idea what the date is. The camera has a date.
+// Between them there is everything needed.
+//
+// The host clock below is 11 hours after the Unix epoch -- a dongle that was
+// plugged in eleven hours ago and started counting from zero -- and the offset
+// is what the mesh says relative to it.
+void test_a_clockless_radio_writes_from_the_cameras_date() {
+  // 11:00:00 on the dongle's own free-running clock...
+  const double send = 11 * 3600.0;
+  // ...and the mesh says it is 14:30:20, so the offset is the difference.
+  const double offset = (14 * 3600.0 + 30 * 60.0 + 20.0) - send;
+
+  octo::bmd::Civil camera_date;
+  camera_date.year = 2026;
+  camera_date.month = 8;
+  camera_date.day = 31;
+
+  const double camera_sod = 14 * 3600.0 + 30 * 60.0 + 19.0;  // a second slow
+  const octo::bmd::Civil out = octo::aligned_value_on_date(
+      send, offset, 0, camera_date, camera_sod);
+
+  // The date is the camera's, untouched.
+  CHECK_EQ(out.year, 2026);
+  CHECK_EQ(out.month, 8);
+  CHECK_EQ(out.day, 31);
+  // The time of day is the mesh's, exactly, despite the host clock being
+  // fifty-six years out.
+  CHECK_EQ(out.hour, 14);
+  CHECK_EQ(out.minute, 30);
+  CHECK_EQ(out.second, 20);
+
+  // The proof that the host clock cancels: move it anywhere at all, keep the
+  // mesh where it is, and the answer does not change.
+  for (double anchor : {0.0, 1.0, 987654321.0, 1788190848.0}) {
+    const double moved_offset =
+        (14 * 3600.0 + 30 * 60.0 + 20.0) - std::fmod(anchor, 86400.0);
+    const octo::bmd::Civil again = octo::aligned_value_on_date(
+        anchor, moved_offset, 0, camera_date, camera_sod);
+    CHECK_EQ(again.hour, 14);
+    CHECK_EQ(again.minute, 30);
+    CHECK_EQ(again.second, 20);
+    CHECK_EQ(again.day, 31);
+  }
+}
+
+// The fault that would happen once a night, on exactly one write, and get
+// blamed on anything but the clock.
+//
+// The mesh has just passed midnight; the camera still says 23:59:59 and its
+// date is still yesterday. Dating the write from the camera without noticing
+// would set it a whole day slow.
+void test_a_write_across_midnight_moves_the_date_with_it() {
+  const double send = 5000.0;                 // any free-running anchor
+  const double target = 0.0;                  // 00:00:00, mesh time
+  const double offset = target - std::fmod(send, 86400.0);
+
+  octo::bmd::Civil camera_date;
+  camera_date.year = 2026;
+  camera_date.month = 8;
+  camera_date.day = 31;
+  const double camera_sod = 86399.0;          // 23:59:59, still yesterday
+
+  const octo::bmd::Civil out = octo::aligned_value_on_date(
+      send, offset, 0, camera_date, camera_sod);
+  CHECK_EQ(out.hour, 0);
+  CHECK_EQ(out.minute, 0);
+  CHECK_EQ(out.second, 0);
+  // September, and the month rolled with it.
+  CHECK_EQ(out.year, 2026);
+  CHECK_EQ(out.month, 9);
+  CHECK_EQ(out.day, 1);
+}
+
+// ...and the other way, for a camera running fast enough to have crossed
+// midnight before the mesh did.
+void test_a_camera_ahead_across_midnight_is_dated_back() {
+  const double send = 5000.0;
+  const double target = 86399.0;              // 23:59:59, mesh time
+  const double offset = target - std::fmod(send, 86400.0);
+
+  octo::bmd::Civil camera_date;
+  camera_date.year = 2026;
+  camera_date.month = 9;
+  camera_date.day = 1;                        // the camera thinks it is tomorrow
+  const double camera_sod = 1.0;              // 00:00:01
+
+  const octo::bmd::Civil out = octo::aligned_value_on_date(
+      send, offset, 0, camera_date, camera_sod);
+  CHECK_EQ(out.hour, 23);
+  CHECK_EQ(out.minute, 59);
+  CHECK_EQ(out.second, 59);
+  CHECK_EQ(out.month, 8);
+  CHECK_EQ(out.day, 31);
+}
+
+// A camera that has not said what time it thinks it is gets no rollover
+// correction, because there is nothing to compare against. The date is used
+// exactly as given rather than guessed at.
+void test_no_camera_reading_means_no_rollover_guess() {
+  const double send = 5000.0;
+  const double offset = 0.0 - std::fmod(send, 86400.0);
+
+  octo::bmd::Civil camera_date;
+  camera_date.year = 2026;
+  camera_date.month = 8;
+  camera_date.day = 31;
+
+  const octo::bmd::Civil out =
+      octo::aligned_value_on_date(send, offset, 0, camera_date, -1.0);
+  CHECK_EQ(out.hour, 0);
+  CHECK_EQ(out.day, 31);
+  CHECK_EQ(out.month, 8);
+}
+
+// An ordinary correction -- milliseconds, mid-afternoon -- must not be
+// mistaken for a midnight crossing.
+void test_an_ordinary_correction_does_not_move_the_date() {
+  const double send = 1788190848.0;
+  const double target = 12 * 3600.0 + 15.0;
+  const double offset = target - std::fmod(send, 86400.0);
+
+  octo::bmd::Civil camera_date;
+  camera_date.year = 2026;
+  camera_date.month = 8;
+  camera_date.day = 31;
+
+  for (double err : {-0.4, -0.05, 0.0, 0.05, 0.4}) {
+    const octo::bmd::Civil out = octo::aligned_value_on_date(
+        send, offset, 0, camera_date, target + err);
+    CHECK_EQ(out.day, 31);
+    CHECK_EQ(out.month, 8);
+  }
+}
+
 void test_aligned_write_lands_on_a_whole_second() {
   SyncOptions opt = defaults();
 
@@ -751,6 +888,11 @@ int main() {
   test_bias_is_learned_then_settles();
   test_improvement_counts_even_outside_tolerance();
   test_drift_uses_the_write_anchor();
+  test_a_clockless_radio_writes_from_the_cameras_date();
+  test_a_write_across_midnight_moves_the_date_with_it();
+  test_a_camera_ahead_across_midnight_is_dated_back();
+  test_no_camera_reading_means_no_rollover_guess();
+  test_an_ordinary_correction_does_not_move_the_date();
   test_aligned_write_lands_on_a_whole_second();
   test_format_span();
   test_power_cycle_is_not_drift();

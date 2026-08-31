@@ -118,6 +118,16 @@ struct Civil {
 // Break a Unix timestamp into UTC calendar fields, truncating the fraction.
 Civil utc_civil(double unix_seconds);
 
+// Move a calendar date by whole days, correctly across months, years and leap
+// years. Integer arithmetic only: this is compiled for the dongle too, where
+// the C library is picolibc and a date routine that reaches for a timezone is
+// a hazard rather than a convenience -- see doc/dongle-notes.md, where
+// localtime_r cost an evening.
+//
+// Only the date fields move; the time of day is left exactly as it was, which
+// is what every caller here wants.
+void add_days(Civil* when, int days);
+
 // Real Time Clock: group 7 parameter 0, int32[2] = {time, date}, each field
 // little-endian per the p105 examples.
 std::vector<uint8_t> rtc_packet(const Civil& when, int frames,
@@ -128,6 +138,18 @@ std::vector<uint8_t> rtc_packet(const Civil& when, int frames,
 // 0x09125310 -> "09:12:53:10". Returns false if any nibble is not a decimal
 // digit, because a non-BCD word decoded as BCD yields a believable wrong time.
 bool decode_bcd_timecode(uint32_t word, int* h, int* m, int* s, int* f);
+
+// 0x20260831 -> 2026, 8, 31. The other half of encode_date, and the reason it
+// exists is worth stating: a box that has never been told the date can still
+// write a camera's clock, because the camera knows its own date and only the
+// time of day is wrong. Reading it back is what makes that possible.
+//
+// Refuses anything that is not four BCD bytes *and* not a plausible calendar
+// date. A camera that has never had its clock set reports zeros, and a zeroth
+// day of a zeroth month written back as though it were a date is worse than
+// admitting we do not know: it would take a camera whose date was merely
+// unset and give it one that is wrong.
+bool decode_bcd_date(uint32_t word, int* y, int* mo, int* d);
 bool decode_bcd_timecode(uint32_t word, std::string* out);
 
 struct Message {
@@ -154,6 +176,17 @@ struct Value {
 };
 
 bool decode_value(const Message& msg, Value* out);
+
+// The Real Time Clock as the camera reports it: the same int32[2] pair that
+// rtc_packet writes, {time, date}. Fills whichever of `date` and `sod` is
+// asked for, and returns false unless *both* halves decode -- a camera that
+// answers with half a clock has told us nothing we can safely use, and the
+// caller's next move either way is to leave its clock alone.
+//
+// `sod` is seconds since midnight, from the time half, ignoring the frames
+// field: the RTC's frame count is not a clock, it is whatever the camera
+// happened to be showing.
+bool decode_rtc(const Value& value, Civil* date, double* sod);
 
 struct Timecode {
   int hours = 0;

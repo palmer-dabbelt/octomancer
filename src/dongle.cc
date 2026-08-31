@@ -119,6 +119,11 @@ void DongleView::closed(double now_mono) {
   (void)now_mono;
   attached_ = false;
   greeted_ = false;
+  // Forgotten deliberately. A box that went away and came back is a box that
+  // may have rebooted, and a rebooted dongle has forgotten the date -- it has
+  // no clock to remember it with. Assuming otherwise leaves a box that cannot
+  // set a camera and will never be told why.
+  dated_ = DateStamp();
   in_batch_ = false;
   pending_.clear();
   current_.clear();
@@ -192,6 +197,22 @@ void DongleView::observe(const Message& msg, double now_mono) {
   // Anything else -- bench, ok, err, a verb from a version we have not met --
   // is not this object's business.
 }
+
+bool DongleView::wants_date(const DateStamp& today, Message* out) {
+  if (!attached_ || !greeted_) return false;
+  if (!today.known()) return false;
+  if (dated_ == today) return false;
+  if (out != nullptr) {
+    out->verb = "date";
+    out->fields.clear();
+    out->set_int("y", today.year);
+    out->set_int("mo", today.month);
+    out->set_int("d", today.day);
+  }
+  return true;
+}
+
+void DongleView::dated(const DateStamp& today) { dated_ = today; }
 
 bool DongleView::wants_poll(double now_mono, Message* out) {
   if (!attached_ || !greeted_) return false;

@@ -930,6 +930,135 @@ void test_time_sets_the_clock_of_a_daemon_that_has_none() {
   CHECK_NEAR(rig.wall(), 1700000030.5, 1e-2);
 }
 
+// A date is the one fact a radio genuinely cannot work out for itself.
+//
+// The mesh broadcasts a time of day, so a dongle knows that exactly -- an
+// offset is a difference between two seconds-of-day figures and its own
+// free-running clock cancels out of it. No amount of listening will ever
+// supply the date, and a camera's real-time clock wants one.
+void test_a_date_can_be_pushed_to_a_daemon_with_no_clock() {
+  Rig rig;
+  rig.build();
+  // A dongle: monotonic from the first instant, and with no idea what
+  // year it is. See firmware/src/boxclock.h.
+  rig.wall0 = 0.0;
+  CHECK(!rig.daemon->date_known());
+
+  FakePeer peer;
+  rig.daemon->peer_opened(&peer);
+  rig.daemon->peer_line(&peer, "date y=2026 mo=8 d=31 id=7");
+
+  Message ok;
+  CHECK(peer.last("ok", &ok));
+  CHECK_STR(ok.get("what"), "date");
+  CHECK_STR(ok.get("id"), "7");
+  // Echoed, so a client can see what was adopted rather than what it sent.
+  CHECK_STR(ok.get("y"), "2026");
+  CHECK_STR(ok.get("mo"), "8");
+  CHECK_STR(ok.get("d"), "31");
+
+  CHECK(rig.daemon->date_known());
+  const octo::bmd::Civil today = rig.daemon->today();
+  CHECK_EQ(today.year, 2026);
+  CHECK_EQ(today.month, 8);
+  CHECK_EQ(today.day, 31);
+}
+
+// A plausible wrong date is harder to notice than an obviously wrong one,
+// and it ends up stamped on a camera's clock.
+void test_an_impossible_date_is_refused() {
+  Rig rig;
+  rig.build();
+  // A dongle: monotonic from the first instant, and with no idea what
+  // year it is. See firmware/src/boxclock.h.
+  rig.wall0 = 0.0;
+  FakePeer peer;
+  rig.daemon->peer_opened(&peer);
+
+  const char* bad_lines[] = {
+      "date y=1970 mo=1 d=1",    // before this protocol existed
+      "date y=2026 mo=13 d=1",   // no thirteenth month
+      "date y=2026 mo=0 d=1",    // nor a zeroth
+      "date y=2026 mo=8 d=0",    // nor a zeroth day
+      "date y=2026 mo=8 d=32",   // nor a thirty-second
+  };
+  for (const char* line : bad_lines) {
+    rig.daemon->peer_line(&peer, line);
+    Message err;
+    CHECK(peer.last("err", &err));
+    CHECK_STR(err.get("reason"), "bad-date");
+  }
+  // ...and none of them was adopted.
+  CHECK(!rig.daemon->date_known());
+}
+
+void test_a_date_says_which_field_is_missing() {
+  Rig rig;
+  rig.build();
+  // A dongle: monotonic from the first instant, and with no idea what
+  // year it is. See firmware/src/boxclock.h.
+  rig.wall0 = 0.0;
+  FakePeer peer;
+  rig.daemon->peer_opened(&peer);
+
+  rig.daemon->peer_line(&peer, "date mo=8 d=31");
+  Message err;
+  CHECK(peer.last("err", &err));
+  CHECK_STR(err.get("reason"), "missing-field");
+  CHECK_STR(err.get("field"), "y");
+  CHECK(!rig.daemon->date_known());
+}
+
+// A host with a real clock needs telling nothing: it knows the date because
+// it knows the time. And its own clock outranks anything pushed at it, so a
+// stale message from yesterday cannot overrule a clock that is right.
+void test_a_real_clock_is_its_own_date_and_outranks_a_pushed_one() {
+  Rig rig;
+  rig.build();
+  rig.wall0 = 1788190848.0;  // 2026-08-31, mid-morning UTC
+  CHECK(rig.daemon->date_known());
+  CHECK_EQ(rig.daemon->today().year, 2026);
+  CHECK_EQ(rig.daemon->today().month, 8);
+  CHECK_EQ(rig.daemon->today().day, 31);
+
+  FakePeer peer;
+  rig.daemon->peer_opened(&peer);
+  rig.daemon->peer_line(&peer, "date y=2019 mo=1 d=2");
+  // Accepted as a message -- it is well formed -- and ignored as an answer.
+  CHECK_EQ(rig.daemon->today().year, 2026);
+  CHECK_EQ(rig.daemon->today().day, 31);
+}
+
+// The status line says whether a write could be dated, separately from
+// whether the clock is real. They are different facts: a dongle told today's
+// date still free-runs, and can still set a camera.
+void test_the_status_says_whether_a_write_could_be_dated() {
+  Rig rig;
+  rig.build();
+  // A dongle: monotonic from the first instant, and with no idea what
+  // year it is. See firmware/src/boxclock.h.
+  rig.wall0 = 0.0;
+  // ...and it has heard the mesh, which is what makes the clock demonstrably
+  // free-running rather than merely unmeasured.
+  rig.feed_boxes(3, 0.020);
+  FakePeer peer;
+  rig.daemon->peer_opened(&peer);
+
+  rig.daemon->peer_line(&peer, "status");
+  Message st;
+  CHECK(peer.last("status", &st));
+  CHECK_STR(st.get("clock"), "free");
+  CHECK_STR(st.get("date"), "0");
+
+  rig.daemon->peer_line(&peer, "date y=2026 mo=8 d=31");
+  rig.daemon->peer_line(&peer, "status");
+  CHECK(peer.last("status", &st));
+  // Still free-running, and now able to date a write anyway. That combination
+  // is the whole point.
+  CHECK_STR(st.get("clock"), "free");
+  CHECK_STR(st.get("date"), "1");
+}
+
 void test_time_without_a_value_is_an_error() {
   Rig rig;
   rig.build();
@@ -1238,6 +1367,11 @@ int main() {
   test_ping_and_unknown_verbs_are_both_answered();
   test_time_is_refused_by_a_daemon_that_has_a_clock();
   test_time_sets_the_clock_of_a_daemon_that_has_none();
+  test_a_date_can_be_pushed_to_a_daemon_with_no_clock();
+  test_an_impossible_date_is_refused();
+  test_a_date_says_which_field_is_missing();
+  test_a_real_clock_is_its_own_date_and_outranks_a_pushed_one();
+  test_the_status_says_whether_a_write_could_be_dated();
   test_time_without_a_value_is_an_error();
   test_time_carries_the_zone_as_well_as_the_instant();
   test_time_without_a_zone_leaves_the_zone_unsaid();

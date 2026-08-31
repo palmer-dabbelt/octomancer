@@ -333,6 +333,73 @@ void test_an_end_for_something_else_does_not_finish_a_batch() {
   CHECK_EQ(static_cast<int>(v.devices(1001.0).size()), 1);
 }
 
+// ----------------------------------------------------------- the date
+
+octo::DateStamp stamp(int y, int mo, int d) {
+  octo::DateStamp s;
+  s.year = y;
+  s.month = mo;
+  s.day = d;
+  return s;
+}
+
+// The one fact that genuinely has to travel between two radios. Everything
+// else about a clock each end works out for itself.
+void test_a_greeted_box_is_told_todays_date_once() {
+  DongleView v;
+  Message out;
+  v.opened(1000.0);
+  // Not before the greeting: nothing is said to a port that has not said who
+  // it is, and that rule does not get an exception for being helpful.
+  CHECK(!v.wants_date(stamp(2026, 8, 31), &out));
+
+  v.observe(msg_of("hello proto=1 role=sync"), 1000.0);
+  CHECK(v.wants_date(stamp(2026, 8, 31), &out));
+  CHECK_STR(out.verb, "date");
+  CHECK_STR(out.get("y"), "2026");
+  CHECK_STR(out.get("mo"), "8");
+  CHECK_STR(out.get("d"), "31");
+
+  // Once told, not told again -- until tomorrow.
+  v.dated(stamp(2026, 8, 31));
+  CHECK(!v.wants_date(stamp(2026, 8, 31), &out));
+  CHECK(v.wants_date(stamp(2026, 9, 1), &out));
+  CHECK_STR(out.get("mo"), "9");
+  CHECK_STR(out.get("d"), "1");
+}
+
+// The case this exists for. A dongle has no battery-backed clock, so it
+// forgets the date whenever it loses power -- and a dongle in a phone charger
+// is a device that loses power. A box that went away and came back must be
+// told again, or it silently cannot set a camera.
+void test_a_box_that_came_back_is_told_the_date_again() {
+  DongleView v;
+  Message out;
+  v.opened(1000.0);
+  v.observe(msg_of("hello proto=1 role=sync"), 1000.0);
+  v.dated(stamp(2026, 8, 31));
+  CHECK(!v.wants_date(stamp(2026, 8, 31), &out));
+
+  // Unplugged, replugged, greeted afresh.
+  v.closed(1001.0);
+  v.opened(1002.0);
+  v.observe(msg_of("hello proto=1 role=sync"), 1002.0);
+  CHECK(v.wants_date(stamp(2026, 8, 31), &out));
+}
+
+// A host that does not know the date says nothing, rather than pushing a
+// zero that would be range-refused at the far end and look like a protocol
+// fault.
+void test_a_host_with_no_date_says_nothing() {
+  DongleView v;
+  Message out;
+  v.opened(1000.0);
+  v.observe(msg_of("hello proto=1 role=sync"), 1000.0);
+  CHECK(!v.wants_date(octo::DateStamp(), &out));
+  CHECK(!v.wants_date(stamp(2026, 0, 31), &out));
+  CHECK(!v.wants_date(stamp(0, 8, 31), &out));
+}
+
 // ------------------------------------------------------- which way in
 
 // USB wins whenever it is there, and the reason is not that the radio link is
@@ -418,6 +485,9 @@ int main() {
   test_a_poll_that_was_not_sent_does_not_count();
   test_unknown_verbs_are_ignored();
   test_an_end_for_something_else_does_not_finish_a_batch();
+  test_a_greeted_box_is_told_todays_date_once();
+  test_a_box_that_came_back_is_told_the_date_again();
+  test_a_host_with_no_date_says_nothing();
   test_usb_wins_whenever_it_is_there();
   test_exactly_one_link_carries_the_conversation();
   test_bluetooth_comes_up_only_when_it_is_needed();

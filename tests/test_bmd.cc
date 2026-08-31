@@ -187,6 +187,80 @@ void test_decode_value() {
 
 }  // namespace
 
+// A camera that has never had its clock set reports zeros, which are valid
+// BCD and an invalid date. Writing them back would replace "unset" with
+// "wrong", which is worse: an unset clock is obviously unset.
+void test_a_date_has_to_be_a_date_and_not_just_bcd() {
+  int y = 0, mo = 0, d = 0;
+  CHECK(octo::bmd::decode_bcd_date(0x20260831, &y, &mo, &d));
+  CHECK_EQ(y, 2026);
+  CHECK_EQ(mo, 8);
+  CHECK_EQ(d, 31);
+
+  // Zeros: perfect BCD, not a date.
+  CHECK(!octo::bmd::decode_bcd_date(0x00000000, &y, &mo, &d));
+  // A nibble that is not a decimal digit.
+  CHECK(!octo::bmd::decode_bcd_date(0x2026FF31, &y, &mo, &d));
+  // A thirteenth month and a zeroth day.
+  CHECK(!octo::bmd::decode_bcd_date(0x20261301, &y, &mo, &d));
+  CHECK(!octo::bmd::decode_bcd_date(0x20261200, &y, &mo, &d));
+  // ...and the fields are left alone when it refuses, so a caller that
+  // forgets to check does not get half an answer.
+  CHECK_EQ(y, 2026);
+  CHECK_EQ(mo, 8);
+  CHECK_EQ(d, 31);
+}
+
+// Round trip against the encoder that writes these, which is the only promise
+// anything downstream relies on.
+void test_a_date_survives_the_round_trip() {
+  const int days[] = {1, 9, 10, 28, 29, 30, 31};
+  for (int y = 2024; y <= 2027; ++y) {
+    for (int mo = 1; mo <= 12; ++mo) {
+      for (int d : days) {
+        int gy = 0, gmo = 0, gd = 0;
+        CHECK(octo::bmd::decode_bcd_date(octo::bmd::encode_date(y, mo, d),
+                                         &gy, &gmo, &gd));
+        CHECK_EQ(gy, y);
+        CHECK_EQ(gmo, mo);
+        CHECK_EQ(gd, d);
+      }
+    }
+  }
+}
+
+void test_days_move_across_months_and_leap_years() {
+  struct Case {
+    int y, mo, d, by, ey, emo, ed;
+  } cases[] = {
+      {2026, 8, 31, 1, 2026, 9, 1},     // month end
+      {2026, 12, 31, 1, 2027, 1, 1},    // year end
+      {2026, 1, 1, -1, 2025, 12, 31},   // backwards over a year end
+      {2024, 2, 28, 1, 2024, 2, 29},    // a leap year has one
+      {2025, 2, 28, 1, 2025, 3, 1},     // ...and a common year does not
+      {2024, 3, 1, -1, 2024, 2, 29},    // backwards into it
+      {2100, 2, 28, 1, 2100, 3, 1},     // 2100 is not a leap year
+      {2000, 2, 28, 1, 2000, 2, 29},    // 2000 is
+  };
+  for (const Case& c : cases) {
+    octo::bmd::Civil when;
+    when.year = c.y;
+    when.month = c.mo;
+    when.day = c.d;
+    when.hour = 13;
+    when.minute = 45;
+    when.second = 7;
+    octo::bmd::add_days(&when, c.by);
+    CHECK_EQ(when.year, c.ey);
+    CHECK_EQ(when.month, c.emo);
+    CHECK_EQ(when.day, c.ed);
+    // The time of day is not the date's business.
+    CHECK_EQ(when.hour, 13);
+    CHECK_EQ(when.minute, 45);
+    CHECK_EQ(when.second, 7);
+  }
+}
+
 int main() {
   test_p105_examples();
   test_bcd();
@@ -195,5 +269,8 @@ int main() {
   test_parse_timecode();
   test_parse_stream();
   test_decode_value();
+  test_a_date_has_to_be_a_date_and_not_just_bcd();
+  test_a_date_survives_the_round_trip();
+  test_days_move_across_months_and_leap_years();
   return octotest::report("test_bmd");
 }

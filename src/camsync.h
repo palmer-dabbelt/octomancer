@@ -337,6 +337,36 @@ double aligned_wait(double now_unix, double offset, double bias, double lead);
 // single time.
 bmd::Civil aligned_value(double send_unix, double offset, double bias);
 
+// The same value, but dated from the camera rather than from this host's
+// clock.
+//
+// This is what lets a radio that has never been told the time set a camera's
+// clock, which is the whole point of a dongle in a phone charger.
+//
+// The arithmetic already works out the *time of day* without a real clock,
+// and that is not a lucky accident. `offset` is a difference between two
+// seconds-of-day figures, so `send_unix + offset` has the mesh's time of day
+// in it whatever `send_unix` is anchored to; a free-running clock cancels
+// exactly, because it is the same clock on both sides of the subtraction. All
+// that is wrong on such a host is the date, and the camera is carrying one.
+//
+// So: keep the camera's date, take the time of day from the mesh, and hand
+// back the instant those two describe.
+//
+// **The midnight case is handled and worth knowing about.** A write aimed at
+// the first second of a new day is composed while the camera's date still
+// says yesterday, and dating it from the camera would set the clock a whole
+// day slow -- once a night, on exactly one write, which is the kind of fault
+// that gets blamed on anything but the clock. `camera_sod` is what the camera
+// itself last said the time of day was; when it and the mesh are on opposite
+// sides of midnight, the date is moved to match.
+//
+// `camera_sod` negative means the camera has not said, in which case no
+// rollover correction is attempted and the date is used as given.
+bmd::Civil aligned_value_on_date(double send_unix, double offset, double bias,
+                                 const bmd::Civil& camera_date,
+                                 double camera_sod);
+
 // --- learning how early to send --------------------------------------------
 
 // What one write says about the apply delay, in seconds.

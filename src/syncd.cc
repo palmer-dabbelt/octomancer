@@ -130,6 +130,27 @@ void SyncDaemon::set_state(const SyncState& state) { state_ = state; }
 void SyncDaemon::on_cycle(CycleHandler handler) { on_cycle_ = std::move(handler); }
 void SyncDaemon::on_bind(BindHandler handler) { on_bind_ = std::move(handler); }
 void SyncDaemon::on_say(SayHandler handler) { on_say_ = std::move(handler); }
+void SyncDaemon::on_setdate(DateHandler handler) {
+  on_date_ = std::move(handler);
+}
+
+bool SyncDaemon::date_known() const {
+  // A real clock carries a date with it; otherwise somebody has to have said.
+  return wall_known(wall()) || told_date_;
+}
+
+bmd::Civil SyncDaemon::today() const {
+  // The host's own clock first: a machine that knows the time knows the date,
+  // and preferring a pushed date over it would let a stale message from
+  // yesterday outrank a clock that is right.
+  if (wall_known(wall())) return bmd::utc_civil(wall());
+  bmd::Civil out;
+  out.year = date_told_.year;
+  out.month = date_told_.month;
+  out.day = date_told_.day;
+  return out;
+}
+
 void SyncDaemon::on_settime(TimeHandler handler) {
   on_time_ = std::move(handler);
 }
@@ -267,25 +288,26 @@ void SyncDaemon::begin_cycle() {
     return;
   }
 
-  // A bench measured against a free-running clock says exactly how far the
-  // boxes are from each other and nothing at all about what time it is. The
-  // write path composes an absolute instant out of this host's clock plus the
-  // bench offset, so running it here would set the camera to a confident,
-  // arbitrary time -- somewhere in 1970, on a dongle that has been up ten
-  // minutes.
+  // A radio that has never been told the time can still do this, and the
+  // reason is that it does not need to know the date to fix a clock that is
+  // seconds out.
   //
-  // Refusing is the interim answer and not the intended one. A standalone
-  // dongle *can* know the time of day, because a Tentacle broadcasts one; what
-  // it cannot know is the date, or the offset from UTC that the camera's RTC
-  // is kept in. Composing a write from the camera's own clock -- keep its
-  // date, correct it by the error we measured -- needs neither, and is where
-  // this is going. See doc/box-notes.md.
-  if (!cur_.bench.absolute) {
+  // The mesh broadcasts a time of day, so a free-running host knows that
+  // exactly: `offset` is a difference between two seconds-of-day figures and
+  // its own clock cancels out of it. What such a host does not know is the
+  // date. The camera does -- somebody set it -- so the write is composed from
+  // the camera's date and the mesh's time of day, and neither end has to know
+  // what the other's clock is anchored to.
+  //
+  // Only checked here, once, so that a camera which stops reporting its clock
+  // mid-cycle cannot turn into a write dated from nothing.
+  if (!date_known() && !cur_.have_camera_date) {
     const std::string why =
-        "the bench agrees but this host does not know what time it is, so"
-        " there is nothing to set the camera to yet";
+        "nobody here knows the date -- this radio has not been told one and"
+        " the camera has not said what its own is, so there is nothing to"
+        " date a write from";
     say(why);
-    finish_cycle("skip:no-clock", why);
+    finish_cycle("skip:no-date", why);
     return;
   }
 
@@ -523,6 +545,23 @@ void SyncDaemon::evaluate() {
     return;
   }
 
+  // The camera's own date, if it has volunteered its real-time clock. Only a
+  // radio with no date of its own will use it, but it is read on every cycle
+  // rather than only on those hosts: a value read on one path and not the
+  // other is a value that is wrong the first time it is needed.
+  {
+    const auto rtc = view.state.find(std::make_pair(7, 0));
+    if (rtc != view.state.end()) {
+      bmd::Civil date;
+      double sod = -1.0;
+      if (bmd::decode_rtc(rtc->second, &date, &sod)) {
+        cur_.have_camera_date = true;
+        cur_.camera_date = date;
+        cur_.camera_date_sod = sod;
+      }
+    }
+  }
+
   const double now = mono();
   const double error = error_from(view, fps);
   cur_.report.has_error = true;
@@ -642,7 +681,31 @@ void SyncDaemon::step_align() {
 void SyncDaemon::step_write() {
   phase_ = Phase::kWriting;
   const double send_at = wall();
-  const bmd::Civil when = aligned_value(send_at, cur_.offset, cur_.bias);
+  // Dated from the camera when this radio has no date of its own; see
+  // step_decide. On a host with a real clock the two agree, and the host's is
+  // used because it is the one the rest of the cycle is quoted against.
+  //
+  // Three ways to date a write, in order of how much they are worth trusting:
+  // this host's own clock, a date a host told us, and the camera's own. The
+  // last is the weakest and is also the one that changes nothing -- writing a
+  // camera's date back to it leaves the date exactly as it was, which is the
+  // right thing to do with a fact nobody can check.
+  //
+  // The *time of day* comes from the mesh in every one of the three. That is
+  // the number this program exists to get right, and it never comes from a
+  // host clock.
+  bmd::Civil when;
+  if (cur_.bench.absolute) {
+    when = aligned_value(send_at, cur_.offset, cur_.bias);
+  } else {
+    const bool told = date_known();
+    const bmd::Civil date = told ? today() : cur_.camera_date;
+    // No rollover correction against a date we were told: the camera's reading
+    // is what midnight is judged from, and it has no bearing on a date that
+    // came from a machine which knows what day it is.
+    when = aligned_value_on_date(send_at, cur_.offset, cur_.bias, date,
+                                 told ? -1.0 : cur_.camera_date_sod);
+  }
   cur_.report.wrote_value = when;
   cur_.report.has_write = true;
   cur_.report.bias = cur_.bias;
@@ -985,6 +1048,10 @@ Message SyncDaemon::status_message() const {
   // the time reports `clock=free`, and a client that treats those offsets as
   // absolute is making a mistake this field exists to prevent.
   msg.set("clock", bench.absolute ? "real" : "free");
+  // Whether this radio could date a write if a camera asked it to. Separate
+  // from `clock`, because they are separate facts: a dongle told today's date
+  // still has a free-running clock, and it can still set a camera.
+  msg.set_bool("date", date_known());
   if (bench.skipped > 0) msg.set_int("disabled", bench.skipped);
 
   // A camera stops advertising while something holds a connection to it, so a
@@ -1068,6 +1135,52 @@ void SyncDaemon::handle(MsgPeer* peer, const Message& msg) {
     out.set("version", OCTO_VERSION);
 #endif
     reply(out);
+    return;
+  }
+
+  if (msg.verb == "date") {
+    // Three fields rather than one packed number: this protocol is read by
+    // people on serial consoles, and `date y=2026 mo=8 d=31` says what it is
+    // where 20260831 has to be decoded by eye.
+    int64_t y = 0, mo = 0, d = 0;
+    const char* missing = !msg.get_int("y", &y)    ? "y"
+                          : !msg.get_int("mo", &mo) ? "mo"
+                          : !msg.get_int("d", &d)   ? "d"
+                                                    : nullptr;
+    if (missing != nullptr) {
+      Message bad;
+      bad.verb = "err";
+      if (msg.has("id")) bad.set("id", msg.get("id"));
+      bad.set("reason", "missing-field");
+      bad.set("field", missing);
+      reply(bad);
+      return;
+    }
+    // Range-checked rather than taken on trust. A date is used to stamp a
+    // camera's clock, and a plausible wrong one is harder to notice than an
+    // obviously wrong one -- which is the whole argument for checking.
+    if (y < 2000 || y > 2099 || mo < 1 || mo > 12 || d < 1 || d > 31) {
+      Message bad;
+      bad.verb = "err";
+      if (msg.has("id")) bad.set("id", msg.get("id"));
+      bad.set("reason", "bad-date");
+      reply(bad);
+      return;
+    }
+    date_told_.year = static_cast<int>(y);
+    date_told_.month = static_cast<int>(mo);
+    date_told_.day = static_cast<int>(d);
+    told_date_ = true;
+    if (on_date_) on_date_(date_told_);
+
+    Message ok;
+    ok.verb = "ok";
+    if (msg.has("id")) ok.set("id", msg.get("id"));
+    ok.set("what", "date");
+    ok.set_int("y", y);
+    ok.set_int("mo", mo);
+    ok.set_int("d", d);
+    reply(ok);
     return;
   }
 

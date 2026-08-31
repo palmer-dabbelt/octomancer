@@ -349,17 +349,24 @@ void save_devices(const octo::Registry& registry, const octo::NameBook& names,
     d.probed = it->second.probed_done;
     written.insert(d.id);
   }
-  // A device somebody named that this Mac's radio has never heard has no row
-  // in the registry to carry its name out on -- most often one of a dongle's,
-  // which lives in a different namespace entirely. Losing it would mean a
-  // rename silently failing to survive a restart, for exactly the devices
-  // whose owner cared enough to label one.
+  // A device this Mac's radio has never heard has no row in the registry to
+  // carry its name out on -- most often one of a dongle's, which lives in a
+  // different namespace entirely. Losing it would mean a rename silently
+  // failing to survive a restart, for exactly the devices whose owner cared
+  // enough to label one.
+  //
+  // Not only the names a person typed. A dongle learns a box's name by
+  // scanning actively, which it only does while it has something it cannot
+  // name (src/naming.h) -- so throwing the answer away at shutdown meant every
+  // restart began with a page of hardware addresses and a wait of half a
+  // minute or more while the radio went and asked again. The name is cheap to
+  // keep and expensive to re-learn, which is the whole argument for a file.
   //
   // These are written with no sighting in them, and the loader knows to put
   // them in the name book rather than the roster. See the note there.
   for (const auto& entry : names.all()) {
     if (written.count(entry.first) != 0) continue;
-    if (entry.second.user.empty()) continue;
+    if (entry.second.empty()) continue;
     octo::RememberedDevice d;
     d.id = entry.first;
     d.name = entry.second.heard;

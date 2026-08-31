@@ -214,7 +214,36 @@ void test_name_source_names() {
 
 }  // namespace
 
+// What is worth writing to the roster file, which is the question
+// DeviceName::empty() answers and octomancerd's save_devices asks.
+//
+// The rule used to be "only what a person typed", and that quietly cost a
+// dongle its names on every restart: it learns them by scanning actively,
+// which it only does while something is unnamed, so an answer thrown away at
+// shutdown had to be fetched again by putting the radio on the air for half a
+// minute. A heard name is cheap to keep and expensive to re-learn.
+void test_a_heard_name_is_worth_keeping() {
+  octo::DeviceName heard;
+  heard.heard = "FS5";
+  CHECK(!heard.empty());
+
+  octo::DeviceName typed;
+  typed.user = "B camera";
+  CHECK(!typed.empty());
+
+  // A probe that came back with nothing is also worth keeping, because it is
+  // the only thing that stops the device being asked again forever.
+  octo::DeviceName asked;
+  asked.probed_done = true;
+  CHECK(!asked.empty());
+
+  // And a device we know nothing about is not written at all, rather than
+  // written as a row of empty strings.
+  CHECK(octo::DeviceName().empty());
+}
+
 int main() {
+  test_a_heard_name_is_worth_keeping();
   test_an_unknown_device_is_called_by_its_id();
   test_the_order_is_person_then_probe_then_advertisement();
   test_a_device_can_be_named_before_it_is_ever_heard();

@@ -701,6 +701,11 @@ struct ScanHit {
   //    short arm, so anything here has a real lever behind it.
   std::vector<double> ppm;
   for (const octo::DeviceSnapshot& d : _snapshot.device) {
+    // This machine's radio only. The condition is "the bench and *this Mac*
+    // are pulling apart", and a dongle's rows are quoted against the dongle's
+    // own clock -- folding them in would measure the drift between two
+    // crystals neither of which is the one in this notification.
+    if (!d.radio.empty()) continue;
     if (d.live && d.has_drift) ppm.push_back(d.drift_ppm);
   }
   if (!ppm.empty()) {
@@ -731,6 +736,11 @@ struct ScanHit {
   for (const octo::DeviceSnapshot& d : _snapshot.device) {
     if (!d.alerting) continue;
     if (_alerting.count(d.id)) continue;
+    // The body below says "from this Mac", which is only true of this Mac's
+    // rows. A dongle measures against the clock it started at boot, so the
+    // same sentence about one of its rows would name a number of hours and
+    // send somebody to re-jam a box that is fine.
+    if (!d.radio.empty()) continue;
     [self postNotification:[NSString stringWithFormat:@"%@ has drifted",
                                                       ns(d.name)]
                       body:[NSString stringWithFormat:
@@ -938,11 +948,24 @@ struct ScanHit {
   }
 
   if (_benchUp) {
-    for (const octo::DeviceSnapshot& d : _snapshot.device) {
-      NSString* line = [NSString stringWithFormat:@"%@%@  %@",
-                                                  d.alerting ? @"⚠ " : @"",
-                                                  ns(d.name),
-                                                  offset_text(d.median_offset)];
+    // From the view rather than from the snapshot, because the snapshot's
+    // median_offset is measured against whichever radio heard the row. For
+    // this Mac's rows those are the same number; for a dongle's they differ by
+    // however long ago it was plugged in, and the menu used to print that --
+    // eleven hours, in the column where milliseconds belong. The view quotes
+    // every row against its own radio's bench, which is the only form in
+    // which two radios' rows can sit in one list.
+    const octo::DeviceView view = [self deviceView];
+    for (const octo::DeviceRow& r : view.rows) {
+      if (r.kind != octo::DeviceKind::kTentacle) continue;
+      NSString* where =
+          r.radio.empty() ? @"" : [NSString stringWithFormat:@" (%@)",
+                                                             ns(r.radio)];
+      NSString* line =
+          [NSString stringWithFormat:@"%@%@%@  %@", r.alerting ? @"⚠ " : @"",
+                                     ns(r.name), where,
+                                     r.has_offset ? offset_text(r.offset_s)
+                                                  : @"--"];
       [_menu addItem:[self disabledItem:line]];
     }
   } else {
@@ -2036,8 +2059,17 @@ const CGFloat kWindowWidth = 460.0;
 
   _boxResValue.stringValue =
       r->resolution.empty() ? @"--" : ns(r->resolution);
-  _boxMacValue.stringValue =
-      r->has_median ? offset_text(r->median_offset_s) : @"--";
+  // Only for rows this Mac heard. The raw median is quoted against whichever
+  // radio took the reading, so under a label that says "this Mac" a dongle's
+  // row would be answering a question nobody asked -- and answering it with a
+  // number that looks like a catastrophic drift.
+  if (!r->radio.empty()) {
+    _boxMacValue.stringValue = @"not measured from here";
+    _boxMacValue.textColor = [NSColor secondaryLabelColor];
+  } else {
+    _boxMacValue.stringValue =
+        r->has_median ? offset_text(r->median_offset_s) : @"--";
+  }
 
   if (r->has_drift) {
     _boxDriftValue.stringValue =
@@ -2411,7 +2443,17 @@ const CGFloat kWindowWidth = 460.0;
       mark = @" ?";
       named = [NSColor systemYellowColor];
     }
-    cells[0].stringValue = [ns(r.name) stringByAppendingString:mark];
+    // Which radio heard it, when it was not this one. The terminal spends a
+    // column on this; here there is room to say it in words, and without it a
+    // bench in earshot of a dongle lists "BMPCC" twice with nothing to tell
+    // the two apart -- which reads as the page repeating itself rather than
+    // as two radios agreeing.
+    NSString* via =
+        r.radio.empty()
+            ? @""
+            : [NSString stringWithFormat:@" (via %@)", ns(r.radio)];
+    cells[0].stringValue =
+        [[ns(r.name) stringByAppendingString:via] stringByAppendingString:mark];
     cells[0].textColor = named;
 
     // A held link ages from nothing: the camera stopped advertising because we

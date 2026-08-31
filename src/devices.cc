@@ -571,7 +571,31 @@ std::string render_devices(const DeviceView& v, bool verbose, bool color) {
   // the sake of a case that is not theirs.
   const bool show_via = !v.radios.empty();
 
+  // What is wrong with *this Mac's* radio, when we are hearing nothing on it.
+  //
+  // Both halves matter. It used to be printed only when the *table* came out
+  // empty, which was sound until a dongle could contribute rows: a Mac whose
+  // radio has been refused then produces a page full of somebody else's
+  // boxes, and the one line explaining why none of them are ours went quiet
+  // exactly when it became most useful. Found the hard way on the install
+  // that lost the grant, after a long detour -- the daemon had been saying it
+  // in its .err file the whole time.
+  //
+  // And it stays conditional on hearing nothing, because a radio that is
+  // delivering advertisements is working whatever it last reported about
+  // itself. Complaining over a table of live boxes would be the page arguing
+  // with itself.
+  int heard_here = 0;
+  for (const DeviceRow& r : v.rows) {
+    if (r.radio.empty() && link_is_live(r.link)) ++heard_here;
+  }
+  const std::string complaint =
+      heard_here == 0 ? radio_complaint(v.radio) : std::string();
+
   std::string head;
+  if (!complaint.empty()) {
+    head += fmt("%s%s%s\n", st.dim, complaint.c_str(), st.off);
+  }
   if (!v.has_canonical) {
     head += fmt("%sno canonical time -- no enabled timecode box is live, so"
                 " there is nothing to measure against%s\n", st.dim, st.off);
@@ -625,13 +649,12 @@ std::string render_devices(const DeviceView& v, bool verbose, bool color) {
   if (!head.empty()) out += head + "\n";
 
   if (v.rows.empty()) {
+    // The reason, if the radio is it, is already in the header above. Without
+    // it the output is identical whether the room is empty, Bluetooth is
+    // switched off, or macOS is refusing the daemon the radio -- three
+    // problems with three different answers, none of them "check the
+    // batteries".
     out += fmt("%sno devices%s\n", st.dim, st.off);
-    // ...and, when the radio is the reason, which reason. Without this the
-    // output is identical whether the room is empty, Bluetooth is switched
-    // off, or macOS is refusing the daemon the radio -- three problems with
-    // three different answers, none of them "check the batteries".
-    const std::string why = radio_complaint(v.radio);
-    if (!why.empty()) out += fmt("%s%s%s\n", st.dim, why.c_str(), st.off);
     return out;
   }
 

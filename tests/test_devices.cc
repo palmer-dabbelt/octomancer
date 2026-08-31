@@ -1315,6 +1315,58 @@ void test_the_second_radio_survives_colour_unchanged() {
             octo::render_devices(v, true, false));
 }
 
+// The regression that cost an evening on 2026-08-30.
+//
+// The line explaining that macOS has refused this Mac's radio used to be
+// printed only when the table came out empty. Then a dongle could contribute
+// rows, so a refused Mac produced a page full of somebody else's boxes -- and
+// the one line saying why none of them were ours went quiet exactly when it
+// became most useful.
+void test_a_refused_radio_says_so_even_when_a_dongle_fills_the_table() {
+  CamConf conf = plain_conf();
+  Snapshot snap;
+  snap.radio = "unknown";  // what a missing permission looks like on macOS
+  for (int i = 1; i <= 3; ++i) {
+    DeviceSnapshot d = box("C4:1E:AE:18:A7:0" + std::to_string(i), "", true,
+                           39599.5 + 0.001 * i);
+    d.radio = "dongle";
+    snap.device.push_back(d);
+  }
+  const std::string out =
+      octo::render_devices(view_of(snap, &conf), false, false);
+
+  CHECK(contains(out, "never reported a state"));
+  // ...and the dongle's boxes are still listed, because they are still true.
+  CHECK(contains(out, "A7:01"));
+}
+
+// The other half of the rule: a radio that is delivering advertisements is
+// working, whatever it last said about itself. Complaining over a table of
+// live boxes would be the page arguing with itself.
+void test_a_working_radio_is_not_complained_about() {
+  CamConf conf = plain_conf();
+  Snapshot snap;
+  snap.radio = "unknown";
+  snap.device.push_back(box("A", "Tentacle_A", true, -0.500));
+  snap.device.push_back(box("B", "Tentacle_B", true, -0.486));
+
+  const std::string out =
+      octo::render_devices(view_of(snap, &conf), false, false);
+  CHECK(!contains(out, "never reported a state"));
+}
+
+// And a Mac hearing nothing at all still gets told why, which is where this
+// line started.
+void test_an_empty_page_still_says_why() {
+  CamConf conf = plain_conf();
+  Snapshot snap;
+  snap.radio = "poweredOff";
+  const std::string out =
+      octo::render_devices(view_of(snap, &conf), false, false);
+  CHECK(contains(out, "Bluetooth is switched off"));
+  CHECK(contains(out, "no devices"));
+}
+
 }  // namespace
 
 int main() {
@@ -1359,5 +1411,8 @@ int main() {
   test_unnamed_boxes_keep_the_end_of_their_address();
   test_a_radio_that_has_heard_nothing_still_says_it_is_there();
   test_the_second_radio_survives_colour_unchanged();
+  test_a_refused_radio_says_so_even_when_a_dongle_fills_the_table();
+  test_a_working_radio_is_not_complained_about();
+  test_an_empty_page_still_says_why();
   return octotest::report("devices");
 }

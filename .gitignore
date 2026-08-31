@@ -90,5 +90,8 @@
 /third_party/zephyr-sdk-*/
 /third_party/bin/
 /third_party/.nrfutil/
+# The bootloader's port name, learned from this machine's dongle. A fact
+# about one piece of hardware on one bus, not about the project.
+/third_party/.dfu-port
 /third_party/build-*/
 /tests/test_hcishare

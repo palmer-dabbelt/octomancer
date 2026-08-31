@@ -658,20 +658,126 @@ So there are **about twelve seconds** to get a transfer started, and the
 bootloader's serial number differs from the application's, so the port to use
 is the one that was not there before.
 
-Twelve seconds is not obviously tight, and the reason it is: `nrfutil` against
-a port it cannot open takes **forty seconds** to give up, at almost no CPU --
-it is retrying, not starting. So an attempt that misses the opening does not
-fail fast, it fails long after the window has closed, and reports
-`FileNotFoundError` on a path that certainly existed when the script looked.
-That reads as a lost race and gives no hint that the tool was the slow part.
+#### Why the obvious way round cannot work
 
-`--replace` does the whole handoff as one operation for this reason: ask the
-dongle into DFU, poll at twenty hertz for a port that was not there before, and
-go straight to the flasher with it. Nothing may be added between those steps.
-An earlier version reached the flasher through an `ioreg` check that took about
-a second and worked; a later one had an explicit `sleep 1` and did not. It is
-that marginal, and it will sometimes lose.
+Twelve seconds is not obviously tight. What makes it tight is `nrfutil`, and
+the previous version of this note had the reason exactly backwards, so it is
+worth stating carefully.
+
+The note used to say that nrfutil against a port it cannot open takes forty
+seconds to give up because *it is retrying, not starting*. That is wrong. It
+is starting. Measured three ways on this machine:
+
+| what was run | time |
+| --- | --- |
+| `nrfutil nrf5sdk-tools pkg --help`, cold | 10.2s |
+| the same, warm | 7.6s |
+| `dfu serial` against `/dev/null` | 41.2s |
+| `dfu serial` against a path that has never existed | 41.2s |
+
+The last two are the tell. A path that has never existed and a path that
+exists and is not a serial port fail at the same instant, to a tenth of a
+second, forty-one seconds in. nrfutil is a PyInstaller bundle that unpacks
+itself, imports `pc_ble_driver`, and reads and checksums the package before it
+touches anything -- and then it opens the port **once**, with no retry at all.
+
+So `trigger DFU, then run the flasher` cannot ever work, and no amount of
+tightening the gap between those two steps will make it work. By the time
+nrfutil is ready to open anything, the window has been shut for half a minute.
+Every failure looked like a lost race, which it was -- but the lost time was
+before the script's first line, not between its steps.
+
+#### The way round that does work
+
+Start the flasher **first** and reboot the dongle **last**:
+
+```
+t+0     nrfutil starts, and spends the next forty seconds unpacking itself
+t+35    the dongle is asked to reboot into its bootloader
+t+38    the bootloader's port appears
+t+41    nrfutil opens it -- three seconds into a twelve-second window
+t+...   Device programmed.
+```
+
+That is what `--replace` does now, and it worked first time. `NRFUTIL_LEAD` in
+`tools/flash-dongle.sh` is the thirty-five, with the arithmetic beside it.
+
+This needs the bootloader's port name **in advance**, and it cannot be
+derived: the bootloader reports a different USB serial from the application.
+On this dongle the application is `/dev/cu.usbmodem212401`, from its position
+on the bus, and the bootloader is `/dev/cu.usbmodemC499F7F00D5B1`, from the
+chip. Knowing one tells you nothing about the other. It is stable per dongle,
+though, so `--replace` records it in `third_party/.dfu-port` whenever it sees
+a bootloader appear: the first attempt on a new dongle loses the race the old
+way, learns the name, and every attempt after it wins. If the name is wrong,
+the run falls back to the old behaviour and corrects the file.
 
 **The button is still the reliable route**, and that is what it is for: DFU
 entered by holding the button stays open indefinitely rather than for twelve
-seconds. Use `--replace` for the ordinary case and the button when it matters.
+seconds. But `--replace` is no longer a coin toss.
+
+
+## The evening the box got a radio link
+
+2026-08-30. The dongle already spoke the box protocol down its cable; it now
+speaks the same protocol over a GATT characteristic as well
+(`firmware/src/blepeer.h`), which is the last of the three transports
+`src/boxsock.h` has always named.
+
+It is a peer like any other, and that is the whole of the design. `src/syncd.h`
+keeps a list of peers and announces to all of them, so a box with a cable and a
+radio link simply has two, and nothing on the box arbitrates between them.
+Which link to use is a question only the host can answer, because only the host
+knows whether it also has the cable.
+
+The UUIDs are Nordic's UART Service. Nothing here is a UART; NUS is simply the
+one well-known "bytes in, bytes out" GATT service, and every generic Bluetooth
+tool on every phone can open it and type into it. A device with no console and
+no screen, whose failures have twice been invisible for a day, gains more from
+being openable by software nobody had to write first than it would from a
+private UUID.
+
+`CONFIG_BT_MAX_CONN` is two, and only one of them is a host. The other is kept
+for the camera this box will connect out to when it has a central role to do it
+with. One would work perfectly today and fail later in a way that would take an
+evening to find: a camera sync that succeeded whenever nobody was connected
+over Bluetooth and failed silently whenever somebody was.
+
+### What is pinned to hardware, and what is not
+
+| Claim | How it was checked |
+| --- | --- |
+| The image builds for the right board | `CONFIG_BOARD="raytac_mdbt50q_cx_40_dongle"` in the build's own `.config` |
+| It fits | 29.7% of flash, 59.1% of RAM |
+| Float printf is still linked | `nm zephyr.elf` shows `__d_vfprintf` and no `__l_vfprintf` |
+| The fault handler is still ours | `nm zephyr.elf` shows `k_sys_fatal_error_handler` |
+| The service is in the image | `nm zephyr.elf` shows `octo_nus`, `octo_nus_write`, `octo_nus_ccc` |
+| The image runs | it enumerated, greeted, and listed boxes over USB after flashing |
+| **It advertises** | `octomancer` at **rssi=-40**, first of 34 devices in `octomancer scan --all` |
+
+Not checked, because nothing on the host can do it yet: that a central can
+connect, subscribe, and hold a conversation over the characteristic. The
+advertisement being on the air says the service is registered and the
+controller is in peripheral mode. It says nothing about whether a line
+survives the round trip.
+
+### The stall after setting the clock appears to be gone
+
+The open problem from the previous session was that setting the dongle's clock
+led to the loop stalling within a minute, caught by the watchdog. That was
+never diagnosed, because the diagnosis needed a sharper watchdog message that
+could not be got onto the box: every attempt to replace the image lost the
+bootloader race.
+
+With the image finally flashed, the box was given the time and then asked what
+it could hear every thirty seconds. It answered every time, out to two
+minutes, with its boxes now reading -3.57s against a real clock rather than
+-7591s against a free-running one -- which is the Mac's own bench figure to
+within a hundredth of a second.
+
+So the likeliest explanation is the dullest one: it was the same stack
+overflow in `strtod` all along, and the 16 KB stack that fixed the crash fixed
+this too. **That is a hypothesis, not a finding.** What is known is that the
+box now survives two minutes of the thing that used to end it in less than
+one, and that the fix for the crash was never actually running when the stall
+was observed. A longer soak is what would settle it.

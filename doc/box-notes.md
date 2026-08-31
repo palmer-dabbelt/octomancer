@@ -156,7 +156,8 @@ thing is wired, so it is worth stating on its own:
   exactly the same source, over its own radio.
 * **Only octomancerd knows there are two.** It holds a connection to each --
   a unix socket to the local one, USB CDC or BLE GATT to the dongle's -- and
-  merges what they report.
+  puts what they report side by side. Side by side, not merged; see below,
+  because that turned out not to be a choice.
 
 The two sync daemons are independent and neither is aware of the other. That is
 what makes the arrangement scale to a third radio without any of them changing,
@@ -183,10 +184,79 @@ how the dongle's camera path is exercised while there is no firmware to run a
 sync daemon on the dongle itself. It is scaffolding, not the shape of the
 system, and the code says so where somebody might mistake one for the other.
 
-What is **not** built yet is the other half: octomancerd does not connect to a
-dongle over CDC, because nothing outside the tests speaks the box protocol at
-all. Today a dongle in a port is simply named and left alone. See
-`doc/KNOWN_ISSUES.md`.
+#### The rows cannot be merged, and it is the data that says so
+
+The obvious thing to want is one row per box, with both radios' readings on
+it. It cannot be done, and the reason is worth writing down so that nobody
+spends an evening trying.
+
+**The two radios cannot agree on what to call a box.** CoreBluetooth hands out
+a UUID that is specific to this host and refuses to show the hardware address
+at all; the dongle sees the address and has nothing else. The same box is
+`B80D95C9-7D0B-140A-0351-2F4D55A1114E` to the Mac and `CF:40:5D:89:32:19` to
+the dongle, and neither identifier can be computed from the other.
+
+**Nor is there anything in the advertisement to match on.** A Tentacle
+broadcasts a clock -- see `src/tentacle.h` -- and no serial number, no
+manufacturer id, nothing that distinguishes one box from another except the
+time it happens to be saying, which is the same time every box in the room is
+saying. There is a tempting trick available here (the offsets between boxes
+form a fingerprint, and two radios should see the same fingerprint shifted by
+a constant) and it should stay untaken: it is inference, it fails when two
+boxes sit close together, and the cost of getting it wrong is somebody
+re-jamming a box on the strength of a reading from a different one.
+
+So **a box in earshot of both appears twice**, tagged with which radio heard
+it, and the table says so out loud rather than leaving somebody to discover
+that their bench appears to have doubled overnight.
+
+#### Each radio's rows are quoted against that radio's own bench
+
+This is what makes the second copy worth having, and it is the one piece of
+arithmetic in the arrangement.
+
+A dongle running standalone has never been told the time. Its clock started at
+zero when it was plugged in, so its raw offsets are displaced by however long
+ago that was -- hours of it. But that constant is the *same for every box that
+dongle hears*, so it cancels exactly when a row is expressed as its distance
+from its own radio's median, and does not cancel at all otherwise.
+
+The result is that both radios say "this box is fourteen milliseconds ahead of
+its bench", while disagreeing by four hours about what time it is. If they
+disagree about the fourteen milliseconds, something is genuinely wrong -- and
+noticing that is the entire reason for listening twice.
+
+Two consequences follow, and both are enforced in code:
+
+* **Nothing from another radio votes in the bench a camera is written
+  against.** Its offsets are against a different clock, and every box in
+  earshot of both would be counted twice. `src/bench.cc`.
+* **A radio with no bench of its own quotes no offsets.** A dongle that has
+  just been plugged in has heard one box or none; borrowing our median would
+  render its four-hour displacement as a sync error. `src/devices.cc`.
+
+The columns are only as comparable as the overlap in what the two radios hear,
+though. A median over two boxes and a median over four are different axes, and
+the numbers converge as the overlap does.
+
+#### What is built
+
+octomancerd finds a dongle, listens to it over USB CDC, and lists its boxes
+beside its own with a VIA column. `--peer PORT` names one and `--no-peer`
+turns it off. The judgement is `src/dongle.h`, tested with no hardware in the
+building; the transport is `src/boxcdc.h`; the glue is `BoxPeer` in
+`src/octomancerd.cc`.
+
+Finding one is done by opening serial devices and waiting to be greeted. There
+is no way to ask macOS which `/dev/cu.usbmodem*` is ours without IOKit, and
+that file is portable on purpose, so the greeting is what turns an open port
+into a dongle. **Nothing is ever written to a port that has not said
+`hello`**, and a port that does not is let go and left alone for five minutes:
+that list includes everybody else's microcontroller, and holding a stranger's
+board open every few seconds forever is how a daemon gets uninstalled.
+
+The BLE half of the transport exists on the box (`firmware/src/blepeer.h`) and
+the host does not yet use it. See `doc/KNOWN_ISSUES.md`.
 
 ### What the sync daemon says, and what it can be told
 

@@ -329,12 +329,73 @@ enter_dfu() {
 # The new port is identified by not having been there before, rather than by
 # name. Bootloader and application enumerate with different serial numbers and
 # neither is fixed.
+# How long nrfutil spends before it touches the serial port, and the single
+# most useful number in this file.
+#
+# It is not a timeout and it is not the transfer: it is start-up. nrfutil is a
+# PyInstaller bundle that unpacks itself, imports pc_ble_driver, and reads and
+# checksums the package, and only then opens the port -- **once**, with no
+# retry. Measured repeatedly on this machine at 41.2 seconds, to a tenth.
+#
+# Which inverts the obvious approach. The bootloader is on the bus for about
+# twelve seconds (2.8 to 15 after the reboot), so `trigger DFU, then run
+# nrfutil` cannot work: by the time nrfutil is ready to open anything, the
+# window has been shut for half a minute. That is the whole of why replacing
+# this dongle's image over the cable kept failing, and it looked like a flaky
+# bootloader rather than a slow flasher.
+#
+# So the flasher goes first and the reboot comes last. Thirty-five seconds of
+# lead puts the port on the bus at about t+38, and nrfutil reaches for it at
+# t+41 -- three seconds into a twelve-second window, with margin on both sides.
+NRFUTIL_LEAD=35
+
+# Where the bootloader's port name is remembered between runs.
+#
+# It has to be known in advance, and it cannot be derived: the bootloader
+# reports a different USB serial from the application, so the name the dongle
+# has while running (/dev/cu.usbmodem212401 here, from its position on the bus)
+# says nothing about the name it will have in DFU
+# (/dev/cu.usbmodemC499F7F00D5B1, from the chip). It is stable per dongle,
+# though, so the first replace on a new one loses the race, records the name,
+# and every one after it wins.
+DFU_PORT_FILE=$TP/.dfu-port
+
 replace() {
     pkg=$1
     [ -n "$pkg" ] || die "--replace needs a .zip package"
     [ -f "$pkg" ] || die "$pkg: no such file"
 
     before=" $(ls /dev/cu.usbmodem* /dev/ttyACM* 2>/dev/null | tr '\n' ' ')"
+
+    # If we know what this dongle's bootloader calls itself, start the flasher
+    # *first* and trigger DFU while it is still warming up. See the long note
+    # above this function for why that is the whole trick.
+    boot=$(cat "$DFU_PORT_FILE" 2>/dev/null || true)
+    if [ -n "$boot" ]; then
+        echo "bootloader expected at $boot"
+        echo "starting the flasher first; it needs ${NRFUTIL_LEAD}s before it"
+        echo "reaches for the port, and it only reaches once."
+        tool=$(dfu_tool)
+        [ "$tool" = none ] && die "no nrfutil; run: $0 --setup"
+        nrfutil_env
+        "$tool" nrf5sdk-tools dfu serial --package "$pkg" --port "$boot" &
+        flasher=$!
+        sleep "$NRFUTIL_LEAD"
+        echo "triggering DFU now"
+        enter_dfu "${2:-}" >/dev/null 2>&1 || true
+        # Record whatever actually turns up, so a dongle whose bootloader name
+        # has changed corrects itself rather than failing here forever.
+        watch_for_bootloader "$before" &
+        watcher=$!
+        if wait $flasher; then
+            kill $watcher 2>/dev/null || true
+            echo "flashed."
+            return 0
+        fi
+        kill $watcher 2>/dev/null || true
+        echo "that did not take. Falling back to watching for the bootloader." >&2
+    fi
+
     enter_dfu "${2:-}"
 
     i=0
@@ -343,11 +404,10 @@ replace() {
             [ -e "$p" ] || continue
             case "$before" in *" $p "*) continue ;; esac
             echo "bootloader appeared at $p"
-            # Straight in. The bootloader's inactivity timeout is the budget
-            # and it is not generous: measured on this dongle, the bootloader
-            # is on the bus from about 2.8 seconds after the reboot until about
-            # 15, so there are twelve seconds to get a transfer started. Every
-            # check between here and the flasher spends some of that.
+            # Remembered, because knowing this name in advance is what lets the
+            # next run start the flasher early and actually win.
+            mkdir -p "$(dirname "$DFU_PORT_FILE")"
+            printf '%s\n' "$p" > "$DFU_PORT_FILE"
             flash "$pkg" "$p"
             return 0
         done
@@ -357,6 +417,24 @@ replace() {
 
     die "no bootloader appeared. The dongle may not be running this firmware --
     check with --info, and see README.md for the button."
+}
+
+# Record the bootloader's port name the moment it appears, so that a dongle
+# whose name we guessed wrong is right on the next attempt.
+watch_for_bootloader() {
+    seen=$1
+    i=0
+    while [ $i -lt 400 ]; do
+        for p in /dev/cu.usbmodem* /dev/ttyACM*; do
+            [ -e "$p" ] || continue
+            case "$seen" in *" $p "*) continue ;; esac
+            mkdir -p "$(dirname "$DFU_PORT_FILE")"
+            printf '%s\n' "$p" > "$DFU_PORT_FILE"
+            return 0
+        done
+        i=$((i + 1))
+        sleep 0.05
+    done
 }
 
 

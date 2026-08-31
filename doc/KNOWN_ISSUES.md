@@ -196,6 +196,40 @@ uses, so a failure has somewhere to arrive.
 
 ## The dongle backend
 
+### The host cannot yet reach a dongle over Bluetooth
+
+The box protocol runs over a GATT characteristic on the dongle as of
+2026-08-30 -- `firmware/src/blepeer.h`, verified on hardware only as far as
+"the advertisement is on the air and macOS can see it at -40 dBm". Nothing on
+the host connects to it. `octomancerd` reaches a dongle over USB CDC and
+nothing else.
+
+So the arrangement the whole design is aimed at -- a dongle in a phone charger
+across the room, doing its job with no cable -- is half built. The box end is
+there; the Mac end is not. The decision logic for when to use which link is
+written and tested (`want_bluetooth()` and `carrier()` in `src/dongle.h`), and
+the transport under it is missing.
+
+The debug mode those functions describe is likewise decided and not yet wired
+to anything: there is no `octomancerd` flag that turns it on, because there is
+nothing for it to turn on yet.
+
+### A dongle's boxes have no names
+
+A dongle scans passively, which is deliberate: a Tentacle puts its timecode in
+the advertisement, so nothing has to be asked for, and a passive listener has
+no limit on how many boxes it can hear at once. But a Tentacle puts its *name*
+in the scan response, which only an active scan collects. So every box a
+dongle reports is listed by its hardware address.
+
+The rows are therefore hard to relate to the named rows from this Mac's radio
+by eye, even when they are obviously the same boxes. Two ways out, and neither
+has been chosen: scan actively on the dongle, which costs power and puts
+requests on the air in a room that may not want them; or have octomancerd
+supply names, which it cannot do by address because CoreBluetooth will not
+show it one (see "The rows cannot be merged" in `doc/box-notes.md`).
+
+
 ### The dongle's camera half is driven, but only as far as the scan
 
 The dongle's camera path used to implement `CameraLink` in `src/camera.h`,

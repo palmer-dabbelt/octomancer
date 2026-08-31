@@ -38,6 +38,7 @@
 /octomancer-ui
 /Octomancer.app/
 /tests/test_att
+/tests/test_bench
 /tests/test_bmd
 /tests/test_boxmsg
 /tests/test_boxcdc

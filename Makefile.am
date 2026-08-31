@@ -38,6 +38,8 @@ libocto_a_SOURCES = \
 	src/agents.h \
 	src/att.cc \
 	src/att.h \
+	src/bench.cc \
+	src/bench.h \
 	src/bmd.cc \
 	src/bmd.h \
 	src/boxmsg.cc \
@@ -291,6 +293,7 @@ AM_OBJCXXFLAGS = -fobjc-arc -std=c++17
 
 check_PROGRAMS = \
 	tests/test_att \
+	tests/test_bench \
 	tests/test_bmd \
 	tests/test_boxmsg \
 	tests/test_boxcdc \
@@ -344,6 +347,8 @@ tests_test_proto_LDADD = libocto.a
 tests_test_pairing_SOURCES = tests/test_pairing.cc tests/harness.h
 tests_test_pairing_LDADD = libocto.a
 
+tests_test_bench_SOURCES = tests/test_bench.cc tests/harness.h
+tests_test_bench_LDADD = libocto.a
 tests_test_bmd_SOURCES = tests/test_bmd.cc tests/harness.h
 tests_test_bmd_LDADD = libocto.a
 

@@ -31,6 +31,7 @@
 #include <thread>
 #include <vector>
 
+#include "bench.h"
 #include "bmd.h"
 #include "camera.h"
 #include "camconf.h"
@@ -202,77 +203,13 @@ class Record {
 
 // ------------------------------------------------------------ Tentacle side
 
-struct Bench {
-  bool ok = false;
-  double offset = 0.0;
-  double spread = 0.0;
-  int boxes = 0;
-  // Boxes we heard and then ignored, because somebody switched them off. Kept
-  // as a number rather than dropped silently: "no boxes to sync to" and "the
-  // only box in the room is disabled" are different situations and a person
-  // reading the log should not have to guess which one they are in.
-  int skipped = 0;
-  std::string source;
-  std::string boxes_json;
-};
-
-std::string boxes_to_json(const std::vector<octo::DeviceSnapshot>& devices,
-                          const octo::CamConf& conf) {
-  std::string out = "{";
-  bool first = true;
-  for (const octo::DeviceSnapshot& d : devices) {
-    if (!d.live || !d.has_time) continue;
-    // A disabled box did not vote, so it is not in the record of what was
-    // voted on. The log line has to be the arithmetic that actually happened.
-    if (!conf.box_enabled(d.id)) continue;
-    if (!first) out += ',';
-    first = false;
-    out += '"' + json_escape(d.name.empty() ? d.id : d.name) + "\":";
-    out += fmt("{\"offset_s\":%.4f,\"adverts\":%d,\"rssi\":%d,"
-               "\"resolution\":\"%s\"}",
-               d.median_offset, d.samples, d.rssi,
-               json_escape(d.resolution).c_str());
-  }
-  out += '}';
-  return out;
-}
-
-// Fold a snapshot's boxes into the bench this cycle will sync against,
-// leaving out the ones somebody has switched off.
-//
-// The median is recomputed here rather than taken from Snapshot::bench_offset,
-// which octomancerd computed across every live box it could hear. octomancerd
-// has never read cameras.conf and has no idea which boxes a person has
-// dismissed -- it is passive, and listening to a box costs nothing, so it
-// listens to all of them. Doing the arithmetic here is what makes the Devices
-// page and the clock written to the camera agree about which boxes are the
-// bench. If they disagree, the page is lying: the number it shows is not the
-// number anything acted on. devices.cc computes the same figure the same way
-// for the same reason.
-Bench bench_from(const octo::Snapshot& snap, const octo::CamConf& conf,
-                 const char* source) {
-  Bench bench;
-  std::vector<double> votes;
-  for (const octo::DeviceSnapshot& d : snap.device) {
-    if (!d.live || !d.has_time) continue;
-    if (!conf.box_enabled(d.id)) {
-      ++bench.skipped;
-      continue;
-    }
-    votes.push_back(d.median_offset);
-  }
-  if (votes.empty()) return bench;
-
-  bench.ok = true;
-  bench.offset = octo::median_offset(votes);
-  const auto lo = std::min_element(votes.begin(), votes.end());
-  const auto hi = std::max_element(votes.begin(), votes.end());
-  bench.spread = *hi - *lo;
-  bench.boxes = static_cast<int>(votes.size());
-  bench.source = source;
-  bench.boxes_json = boxes_to_json(snap.device, conf);
-  return bench;
-}
+// The bench arithmetic itself is src/bench.h's, on the testable side of the
+// seam, with tests over the cases that are awkward to arrange on a bench: a
+// box that has gone quiet, a box somebody switched off, an empty room. What
+// stays here is the two ways of getting a snapshot to do it to -- ask
+// octomancerd, or listen for ourselves.
+using octo::Bench;
+using octo::bench_from;
 
 // Listen for ourselves, when octomancerd is not running. This is the same
 // decoder and the same median arithmetic the daemon uses -- it is just given a
@@ -354,12 +291,8 @@ struct Presence {
   std::string name;
 };
 
-Presence read_presence(const Options& opt) {
+Presence presence_from(const octo::Snapshot& snap) {
   Presence p;
-  if (!opt.use_daemon) return p;
-  octo::Snapshot snap;
-  std::string err;
-  if (!octo::fetch(opt.socket_path, &snap, &err)) return p;
   if (!snap.camera.reported) return p;
   p.known = true;
   p.present = snap.camera.present;
@@ -380,6 +313,38 @@ Presence read_presence(const Options& opt) {
   p.has_rssi = snap.camera.rssi != 0;
   p.rssi = snap.camera.rssi;
   return p;
+}
+
+// One look at octomancerd, answering both the questions this program asks it.
+//
+// They are asked together because they are one round trip and one snapshot:
+// the camera and the bench were true at the same instant, and fetching them
+// separately would let a cycle act on a camera from one moment and a bench
+// from another.
+//
+// The bench half used to be thrown away here and re-fetched only when a cycle
+// needed it, which meant the figure published to clients was only ever as
+// fresh as the last cycle. With no camera in the room there are no cycles, so
+// the window kept showing whatever the bench had been at startup -- "1
+// timecode box, spread 0ms", true for about a second, beside a device list
+// showing four. It costs nothing to answer both questions from the snapshot
+// that was fetched anyway.
+struct DaemonView {
+  bool answered = false;
+  Presence camera;
+  Bench bench;
+};
+
+DaemonView read_daemon(const Options& opt, const octo::CamConf& conf) {
+  DaemonView v;
+  if (!opt.use_daemon) return v;
+  octo::Snapshot snap;
+  std::string err;
+  if (!octo::fetch(opt.socket_path, &snap, &err)) return v;
+  v.answered = true;
+  v.bench = bench_from(snap, conf, "octomancerd");
+  v.camera = presence_from(snap);
+  return v;
 }
 
 // Fold what octomancerd can see of a camera into what we are about to publish
@@ -2418,6 +2383,24 @@ int main(int argc, char** argv) {
   };
   publish_daemon();
 
+  // What the bench is, as often as we can find out cheaply.
+  //
+  // `has` follows whether anything actually voted rather than being nailed to
+  // true, because a bench of no boxes reports an offset of zero and so does a
+  // bench sitting exactly on this Mac's clock. Retracting is the honest move:
+  // it puts the window back to "No timecode boxes heard yet" instead of
+  // leaving a figure on screen that nothing is measuring any more.
+  auto publish_bench = [&](const Bench& b, bool from_daemon) {
+    octo::BenchStatus bs;
+    bs.has = b.ok;
+    bs.source = opt.source == Source::kMac ? "mac" : "tentacle";
+    bs.boxes = b.boxes;
+    bs.offset_s = b.offset;
+    bs.spread_s = b.spread;
+    bs.daemon_reachable = from_daemon;
+    control.set_bench(bs);
+  };
+
   // Said out loud, because the alternative is a daemon that looks like it is
   // working and is deliberately doing nothing. This is the expected state on a
   // fresh install: no camera is enabled until somebody enables one.
@@ -2628,7 +2611,9 @@ int main(int argc, char** argv) {
   // wildly different amounts. Asking octomancerd is a socket read; scanning
   // for it is twenty seconds of radio. So the loop below asks the cheap
   // question often and the expensive one only when it has a reason to.
-  Presence last = read_presence(opt);
+  DaemonView seen_now = read_daemon(opt, conf);
+  if (opt.use_daemon) publish_bench(seen_now.bench, seen_now.answered);
+  Presence last = seen_now.camera;
   if (last.known) {
     say("octomancerd is watching for the camera -- %s%s%s",
         last.present ? "on the air now" : "not on the air",
@@ -2713,22 +2698,13 @@ int main(int argc, char** argv) {
         // to. Only from octomancerd, because the other way of finding a bench
         // is eight seconds of scanning and this is the loop thread.
         if (opt.use_daemon) {
-          octo::Snapshot snap;
-          std::string ferr;
-          if (octo::fetch(opt.socket_path, &snap, &ferr) && snap.has_bench) {
-            const Bench b = bench_from(snap, conf, "octomancerd");
-            octo::BenchStatus bs;
-            bs.has = true;
-            bs.source = opt.source == Source::kMac ? "mac" : "tentacle";
-            bs.boxes = b.boxes;
-            bs.offset_s = b.offset;
-            bs.spread_s = b.spread;
-            bs.daemon_reachable = true;
-            control.set_bench(bs);
-            if (b.skipped > 0) {
+          const DaemonView v = read_daemon(opt, conf);
+          if (v.answered) {
+            publish_bench(v.bench, true);
+            if (v.bench.skipped > 0) {
               say("  %d timecode box%s switched off -- the bench is now %d"
-                  " box%s", b.skipped, b.skipped == 1 ? "" : "es", b.boxes,
-                  b.boxes == 1 ? "" : "es");
+                  " box%s", v.bench.skipped, v.bench.skipped == 1 ? "" : "es",
+                  v.bench.boxes, v.bench.boxes == 1 ? "" : "es");
             }
           }
         }
@@ -2736,7 +2712,13 @@ int main(int argc, char** argv) {
     }
 
     const double now = octo::mono_now();
-    const Presence cam = read_presence(opt);
+    // One fetch, both answers. The bench is republished on every tick and not
+    // only at the end of a cycle: a room with no camera in it runs no cycles
+    // at all, and the bench figure was going hours without being looked at
+    // again while the boxes it describes came and went.
+    const DaemonView view = read_daemon(opt, conf);
+    if (opt.use_daemon) publish_bench(view.bench, view.answered);
+    const Presence cam = view.camera;
 
     const bool came_up = cam.known && cam.present &&
                          (!last.known || !last.present ||

@@ -781,3 +781,59 @@ this too. **That is a hypothesis, not a finding.** What is known is that the
 box now survives two minutes of the thing that used to end it in less than
 one, and that the fix for the crash was never actually running when the stall
 was observed. A longer soak is what would settle it.
+
+
+## The morning both radios were live at once
+
+2026-08-31, and the first measurement that actually tests the two-radio
+arrangement rather than the plumbing under it. Both radios listening to the
+same room, at the same moment, out of one snapshot:
+
+```
+mac:    4 boxes, median -3.5008s, spread 37.4ms
+    BMPCC     +20.4 ms      FS5     +5.3 ms
+    Krysta     -5.3 ms      FS7    -17.0 ms
+
+dongle: 3 boxes, median -3.7643s, spread 25.6ms
+    (unnamed) +15.1 ms   (unnamed)  +0.0 ms   (unnamed) -10.5 ms
+```
+
+The dongle cannot hear FS7 -- it is the weakest box in the room at -80 dBm,
+and the dongle is a chip antenna inside a USB port. Its spread of 25.6 ms is
+BMPCC-to-Krysta, which the Mac measures at 25.7 ms, so the three it hears are
+BMPCC, FS5 and Krysta.
+
+Take those three alone, in the Mac's frame, and quote them against their own
+median rather than the median of all four:
+
+| box | Mac, three-box median | dongle |
+| --- | --- | --- |
+| BMPCC | +15.1 ms | +15.1 ms |
+| FS5 | 0.0 ms | +0.0 ms |
+| Krysta | -10.6 ms | -10.5 ms |
+
+**Two radios whose clocks are 263 milliseconds apart agree about the boxes to
+a tenth of a millisecond.** That is the property the whole arrangement is for,
+and it is what makes a second copy of a box worth showing rather than being
+noise: the numbers are directly comparable without either radio knowing what
+time it is, so a disagreement between them is a fact about the room.
+
+It also shows the caveat working, which is worth as much. The two columns are
+only comparable over the boxes both radios hear. The Mac's four-box median is
+not the dongle's three-box median -- they differ by 5.3 ms here -- so a row
+compared across the whole table rather than across the overlap is being
+measured against a different axis. The identification above went the other way
+round on purpose: the spread was used to work out *which* boxes the dongle
+could hear, and only then were the two sets compared like for like.
+
+### What is pinned to hardware, and what is not
+
+| Claim | How it was checked |
+| --- | --- |
+| Two radios agree on box separations | the table above: 0.1 ms across a 263 ms clock difference |
+| A free-running dongle's constant cancels | it did, and the constant was 263 ms of somebody else's clock |
+| The overlap caveat is real | the Mac's median and the dongle's differ by 5.3 ms over the same room |
+| The dongle hears less than the Mac does | 3 boxes of 4; the missing one is the weakest at -80 dBm |
+
+Not shown, and not claimed: that the dongle would agree about FS7 if it could
+hear it. It cannot, from a USB port on this desk.

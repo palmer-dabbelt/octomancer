@@ -125,6 +125,8 @@ void test_radio_links_round_trip() {
   usb.last_wall = 1788000000.5;
   usb.clock_is_real = false;
   in.radio_link.push_back(usb);
+  usb.label = "Raytac USB-C";  // with a space in it, which the wire must keep
+  in.radio_link.back().label = usb.label;
   RadioLink air;
   air.name = "spare";
   air.way = "bluetooth";
@@ -143,13 +145,27 @@ void test_radio_links_round_trip() {
   // The one that must survive intact: a dongle whose clock is its own boot
   // counter, so that nothing downstream quotes it as a time of day.
   CHECK(!out.radio_link[0].clock_is_real);
+  // The label is what a person typed, so it can hold a space -- the one thing
+  // a whitespace-tokenised line has to be trusted to carry.
+  CHECK_STR(out.radio_link[0].label, "Raytac USB-C");
+  // The name is the join and is not the label. A reader that took one for the
+  // other would stop matching the rows to the radio that heard them.
+  CHECK_STR(out.radio_link[0].name, "dongle");
   CHECK_STR(out.radio_link[1].way, "bluetooth");
   CHECK(!out.radio_link[1].answering);
+  // Nobody renamed the second one, so it comes back showing its own name
+  // rather than a blank -- which is what a daemon too old to send a label
+  // leaves behind, and what the section showed before labels existed.
+  CHECK_STR(out.radio_link[1].label, "spare");
 
   const std::string json = render_json(in);
   CHECK(json.find("\"radio_link\"") != std::string::npos);
   CHECK(json.find("\"way\":\"usb\"") != std::string::npos);
   CHECK(json.find("\"clock_real\":false") != std::string::npos);
+  CHECK(json.find("\"label\":\"Raytac USB-C\"") != std::string::npos);
+  // The app reads this, and a missing label there would be a blank column
+  // rather than a fallback, so JSON always carries one.
+  CHECK(json.find("\"label\":\"spare\"") != std::string::npos);
 }
 
 // A snapshot from a daemon with no dongle says so by saying nothing, and a

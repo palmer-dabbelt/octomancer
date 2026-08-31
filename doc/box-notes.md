@@ -607,6 +607,33 @@ refreshed and every row on it is older than it looks. It replaces a line that
 used to say octomancerd was running, which said less -- a daemon can be running
 and still have stopped saying anything new.
 
+**Radios can be renamed, and a rename must not move a join.** `dongle` is what
+the firmware calls itself, not a name anybody chose, and a cart with two of
+them needs to tell them apart -- so `octomancer name --radio <which> "<what>"`
+puts radios in the same name book as devices. Two things make that safe.
+
+The first is the key. Radios are stored under `radio:<name>`, and that cannot
+collide with a device because every device identifier here is hex: a hardware
+address is hex and colons, a CoreBluetooth UUID is hex and dashes, and neither
+begins with the word `radio`. This machine's own radio keys as `radio:` with
+nothing after it -- the empty radio, matching the empty tag its rows carry --
+rather than under its hostname, so renaming the machine does not lose the name
+somebody gave its radio.
+
+The second is that the name and the label are separate fields all the way
+through: `RadioLink::name` and `RadioView::name` stay whatever the firmware
+said, because every row that came through the radio is tagged with that exact
+string and it is the only thing joining the two. `label` is what gets printed.
+Renaming the section and leaving every row below it still saying `dongle` would
+read as two radios, so `radio_label_for()` does the translation once and both
+the terminal and the window call it -- the alternative being two copies of the
+same lookup that drift.
+
+Only a person can name a radio. Nothing advertises a dongle and there is
+nothing to connect to and ask, so of the three claims in `src/naming.h` only
+the first ever applies -- which is why `refresh --radio` refuses rather than
+reporting work it did not do, and points at `name` with no argument instead.
+
 **Unplugging the dongle does not empty the page.** It used to: `DongleView`
 dropped its last complete answer the moment the cable came out, or the moment
 that answer went stale, on the argument that ageing a row makes a claim about

@@ -193,7 +193,17 @@ struct CameraSnapshot {
 struct RadioLink {
   // What the rows are tagged with. Empty is this machine's own radio, which
   // never appears here -- it has no link to describe.
+  //
+  // An identifier, not a label. Every device row that came through this radio
+  // carries this exact string, and that is the only thing joining the two, so
+  // it is whatever the firmware calls itself and nothing is allowed to change
+  // it. What a person calls the radio goes in `label`.
   std::string name;
+  // What to show for it, which is `name` unless somebody has renamed it. Kept
+  // apart from `name` for the reason above: a rename must not move a join.
+  // Empty from a daemon too old to send one, and a reader falls back to
+  // `name`, which is what it used to show anyway.
+  std::string label;
   // When this radio last answered, on this machine's clock. Sent for the same
   // reason a device's is: an age computed here goes stale the moment the
   // snapshot stops being fresh, and a dongle that has quietly stopped

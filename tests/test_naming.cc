@@ -273,7 +273,57 @@ void test_the_naming_window_outlasts_a_slow_box() {
   CHECK(octo::kNameWithin > 60.0);
 }
 
+// Radios go in the same book as devices, so the thing that has to hold is that
+// the two namespaces cannot reach each other. They cannot, and not by luck:
+// every device identifier this program deals in is hex, and no hex string
+// begins with the word "radio".
+void test_a_radio_key_cannot_collide_with_a_device_id() {
+  CHECK_STR(octo::radio_name_key("dongle"), "radio:dongle");
+  CHECK(octo::is_radio_key(octo::radio_name_key("dongle")));
+
+  // The two shapes a device identifier actually comes in.
+  CHECK(!octo::is_radio_key("C1:95:4D:A4:9D:18"));
+  CHECK(!octo::is_radio_key("A1B2C3D4-0000-1111-2222-333344445555"));
+  // And nothing shorter than the prefix trips it.
+  CHECK(!octo::is_radio_key(""));
+  CHECK(!octo::is_radio_key("rad"));
+}
+
+// This machine's radio is the one whose rows carry no tag, and it keys as the
+// empty radio rather than as its hostname. Keying it by hostname would lose
+// the name somebody gave it the day the machine was renamed, which is a day
+// somebody is already reorganising things and would not connect the two.
+void test_the_local_radio_keys_without_a_hostname() {
+  CHECK_STR(octo::radio_name_key(""), "radio:");
+  CHECK(octo::is_radio_key(octo::radio_name_key("")));
+  CHECK(octo::radio_name_key("") != octo::radio_name_key("dongle"));
+}
+
+// Only a person can name a radio: nothing advertises a dongle and there is
+// nothing to connect to and ask. So the fallback is the caller's, and what
+// comes back for an unnamed radio is empty rather than the key -- which is
+// what display() would have handed over, prefix and all.
+void test_a_radio_has_only_the_name_somebody_gave_it() {
+  octo::NameBook book;
+  CHECK_STR(octo::radio_user_name(book, "dongle"), "");
+
+  // Not even a heard name counts, if something ever managed to record one.
+  book.heard(octo::radio_name_key("dongle"), "Raytac");
+  CHECK_STR(octo::radio_user_name(book, "dongle"), "");
+
+  book.rename(octo::radio_name_key("dongle"), "cart left");
+  CHECK_STR(octo::radio_user_name(book, "dongle"), "cart left");
+  // And the device namespace is untouched by any of it.
+  CHECK_STR(octo::radio_user_name(book, "cart left"), "");
+
+  book.rename(octo::radio_name_key("dongle"), "");
+  CHECK_STR(octo::radio_user_name(book, "dongle"), "");
+}
+
 int main() {
+  test_a_radio_key_cannot_collide_with_a_device_id();
+  test_the_local_radio_keys_without_a_hostname();
+  test_a_radio_has_only_the_name_somebody_gave_it();
   test_one_unnamed_device_is_enough_to_scan_actively();
   test_a_scan_setting_is_left_alone_for_a_while();
   test_the_naming_window_outlasts_a_slow_box();

@@ -118,6 +118,7 @@ std::string render_text(const Snapshot& s) {
   for (const RadioLink& r : s.radio_link) {
     out += "radio";
     put(&out, "name", r.name);
+    if (!r.label.empty() && r.label != r.name) put(&out, "label", r.label);
     put(&out, "way", r.way);
     put(&out, "answering", static_cast<long long>(r.answering ? 1 : 0));
     put(&out, "age", r.age, 2);
@@ -190,6 +191,7 @@ std::string render_json(const Snapshot& s) {
       if (!first_link) out += ",";
       first_link = false;
       out += "{\"name\":" + json_string(r.name);
+      out += ",\"label\":" + json_string(r.label.empty() ? r.name : r.label);
       out += ",\"way\":" + json_string(r.way);
       out += ",\"answering\":" + std::string(r.answering ? "true" : "false");
       out += ",\"age\":" + json_number(r.age, 2);
@@ -373,12 +375,16 @@ bool parse_text(const std::string& text, Snapshot* out, std::string* err) {
       while (fields >> token) {
         if (!split_kv(token, &key, &value)) continue;
         if (key == "name") r.name = value;
+        else if (key == "label") r.label = value;
         else if (key == "way") r.way = value;
         else if (key == "answering") r.answering = to_int(value) != 0;
         else if (key == "age") r.age = to_double(value);
         else if (key == "last_wall") r.last_wall = to_double(value);
         else if (key == "clock_real") r.clock_is_real = to_int(value) != 0;
       }
+      // A daemon too old to send one, or one that had nothing to add: the
+      // radio shows under its own name, exactly as it did before labels.
+      if (r.label.empty()) r.label = r.name;
       // A line with no name says nothing and would render as a blank row.
       if (!r.name.empty()) out->radio_link.push_back(std::move(r));
       continue;

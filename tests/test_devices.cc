@@ -1475,6 +1475,62 @@ void test_a_radio_that_never_answered_has_no_age() {
   CHECK(!dongle->has_age);
 }
 
+// Renaming a radio has to move both places its name appears, and must not move
+// the thing that joins them. The rows are tagged with the firmware's name; the
+// section and the VIA column show the label. Renaming the section and leaving
+// every row below it still saying "dongle" would read as two radios.
+void test_a_renamed_radio_is_renamed_everywhere() {
+  CamConf conf = plain_conf();
+  Snapshot snap = two_radios(39600.0);
+  octo::RadioLink link;
+  link.name = "dongle";           // still the join
+  link.label = "Raytac USB-C";    // what somebody typed
+  link.way = "usb";
+  link.answering = true;
+  link.last_wall = kNow - 2.0;
+  link.age = 2.0;
+  snap.radio_link.push_back(link);
+
+  DeviceSources from;
+  from.bench = &snap;
+  from.conf = &conf;
+  from.now_wall = kNow;
+  const DeviceView v = octo::build_device_view(from);
+
+  const octo::RadioView* dongle = nullptr;
+  for (const octo::RadioView& rv : v.radios) {
+    if (rv.name == "dongle") dongle = &rv;
+  }
+  CHECK(dongle != nullptr);
+  if (dongle == nullptr) return;
+  // The identifier survives the rename, or the rows stop finding their radio.
+  CHECK_STR(dongle->name, "dongle");
+  CHECK_STR(dongle->label, "Raytac USB-C");
+  // Which is not a cosmetic point: the rows still join, so the radio still has
+  // boxes and therefore still has a canonical time of its own.
+  CHECK(dongle->has_canonical);
+  CHECK(dongle->live_boxes > 0);
+
+  const std::string out = octo::render_devices(v, false, false);
+  CHECK(contains(out, "Raytac USB-C"));
+  // Both places, and the old name in neither of them.
+  CHECK(contains(row_for(out, "Raytac USB-C"), "USB"));
+  const std::string via = row_for(out, "Tentacle_C");
+  CHECK(!via.empty());
+  CHECK(contains(out, "Raytac USB-C"));
+  CHECK(!contains(out, "dongle"));
+}
+
+// A daemon too old to send a label, or a view somebody assembled by hand for a
+// preview, leaves it empty -- and a blank where a radio's name goes is worse
+// than the name it had before labels existed.
+void test_a_radio_with_no_label_shows_its_name() {
+  CamConf conf = plain_conf();
+  const DeviceView v = view_of(two_radios(39600.0), &conf);
+  const std::string out = octo::render_devices(v, false, false);
+  CHECK(contains(out, "dongle"));
+}
+
 // A box the dongle has never been told the name of is listed by its hardware
 // address, and every box from one manufacturer shares the first three bytes.
 // Cutting the column from the right would render four different boxes as four
@@ -1876,6 +1932,8 @@ int main() {
   test_the_via_column_is_only_dim_when_the_row_is();
   test_a_radio_that_stopped_answering_keeps_its_age();
   test_a_radio_that_never_answered_has_no_age();
+  test_a_renamed_radio_is_renamed_everywhere();
+  test_a_radio_with_no_label_shows_its_name();
   test_unnamed_boxes_keep_the_end_of_their_address();
   test_a_radio_that_has_heard_nothing_still_says_it_is_there();
   test_a_radio_with_no_clock_quotes_no_absolute_time();

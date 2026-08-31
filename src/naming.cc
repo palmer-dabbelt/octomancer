@@ -32,6 +32,28 @@ bool is_placeholder_name(const std::string& name) {
   return name.empty() || name == "(unnamed)" || name == "(no name)";
 }
 
+// Short, and not a word a hardware address or a UUID can start with, so the
+// two namespaces cannot reach each other. See the note in naming.h.
+const char kRadioPrefix[] = "radio:";
+
+std::string radio_name_key(const std::string& radio) {
+  return std::string(kRadioPrefix) + radio;
+}
+
+bool is_radio_key(const std::string& id) {
+  return id.compare(0, sizeof kRadioPrefix - 1, kRadioPrefix) == 0;
+}
+
+std::string radio_user_name(const NameBook& names, const std::string& radio) {
+  NameSource from = NameSource::kNone;
+  const std::string got = names.display(radio_name_key(radio), &from);
+  // Only a person's name counts, and the test has to be on the source rather
+  // than on the string: display() falls back to the identifier when it knows
+  // nothing, and the identifier here is the key with its prefix still on, so a
+  // string test would put "radio:dongle" in a column.
+  return from == NameSource::kUser ? got : std::string();
+}
+
 std::string NameBook::display(const std::string& id, NameSource* from) const {
   const auto it = names_.find(id);
   if (it != names_.end()) {

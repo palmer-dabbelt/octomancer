@@ -999,7 +999,13 @@ int main(int argc, char** argv) {
 
   auto assemble = [&registry, &box, &names, &host]() {
     octo::Snapshot snap = registry.snapshot();
-    snap.host = host;
+    // What to call this machine's radio, which is its hostname unless somebody
+    // has said otherwise. The field has only ever been used as that radio's
+    // name on a page, so a rename belongs in it rather than in a second field
+    // beside it -- and unlike a dongle's, this radio's rows are joined by being
+    // untagged, so there is no identifier here for a rename to break.
+    const std::string mine = octo::radio_user_name(names, std::string());
+    snap.host = mine.empty() ? host : mine;
     if (box) {
       const double now = octo::mono_now();
       const double wall = octo::wall_now();
@@ -1020,6 +1026,11 @@ int main(int argc, char** argv) {
       // the rows alone cannot tell those apart -- both are an absence.
       octo::RadioLink link;
       link.name = box->view().radio();
+      // The name stays the join; the label is what a reader sees. "dongle" is
+      // what the firmware calls itself rather than anything anybody chose, and
+      // a cart with two of them needs to tell them apart.
+      link.label = octo::radio_user_name(names, link.name);
+      if (link.label.empty()) link.label = link.name;
       link.way = octo::link_way_name(box->carrying());
       link.answering = box->view().greeted() && box->view().ever_answered();
       link.age = box->view().answer_age(now);

@@ -161,6 +161,40 @@ inline constexpr double kScanSettleSeconds = 20.0;
 // rather than staying active forever on a device that will never answer.
 inline constexpr double kNameWithin = 300.0;
 
+// A radio's entry in the same book, under a key that cannot collide with a
+// device's.
+//
+// Radios have names worth giving too: somebody with two dongles on a cart
+// wants to know which one is "cart left", and "dongle" is what the firmware
+// calls itself rather than a choice anybody made. The book is already the
+// thing that remembers a name across a restart and writes it through to disk
+// the moment it changes, so radios go in it -- one mechanism rather than a
+// second one that would have to be taught the same lessons.
+//
+// The prefix is what keeps the two apart. Every device identifier this program
+// deals in is hex: a hardware address is hex and colons, a CoreBluetooth UUID
+// is hex and dashes, and neither can begin with "radio:". A radio's own name
+// is whatever its firmware says, so it is the part that varies and it goes
+// after the prefix rather than in front of it.
+//
+// Only a person can name a radio. Nothing advertises a dongle and there is
+// nothing to connect to and ask, so of the three claims in this file's opening
+// note only the first one ever applies -- which is why radio_display() takes
+// the user's name or the radio's own and never looks at the other two.
+// The empty radio is this machine's own -- the one whose rows carry no tag at
+// all -- and it keys as "radio:" with nothing after it. Deliberately not the
+// hostname: a machine that gets renamed would otherwise lose the name somebody
+// gave its radio, and the caller asking to rename it has only the label in
+// front of it to go on, not the hostname underneath.
+std::string radio_name_key(const std::string& radio);
+bool is_radio_key(const std::string& id);
+
+// What a person has called this radio, or empty when nobody has. The fallback
+// is left to the caller because it differs: a dongle falls back to the name its
+// firmware gave, and this machine's radio falls back to the hostname, and
+// neither is knowable from here.
+std::string radio_user_name(const NameBook& names, const std::string& radio);
+
 // The stand-ins a snapshot uses when a device has not said what it is called.
 // Not names, and storing one as though it were would put "(unnamed)" on a row
 // that a probe could have named properly.

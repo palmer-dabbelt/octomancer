@@ -166,7 +166,14 @@ struct DeviceRow {
 struct RadioView {
   // What the rows are tagged with, except for the local radio, which is
   // tagged with nothing and named here for the reader.
+  //
+  // This is the join between a radio and the rows it heard, so it is the
+  // firmware's own name and nothing renames it. What to print is `label`.
   std::string name;
+  // What to call it on a page: `name`, unless somebody has renamed the radio.
+  // Two fields rather than one because a rename must not move a join -- see
+  // RadioLink in registry.h, which splits them for the same reason.
+  std::string label;
   // Whether this is the radio in this machine. The local one is always
   // present and always first, so that the section reads as a list of radios
   // rather than a list of exceptions.
@@ -272,6 +279,18 @@ DeviceView build_device_view(const DeviceSources& from);
 // table and nothing else, and a three-line table listing one radio is exactly
 // the preamble that stops a status page being read. A page that persists has
 // the opposite economics, so src/tui.h asks for it unconditionally.
+// What to call the radio a row came through. `tag` is DeviceRow::radio, so
+// empty means this machine's own.
+//
+// Here rather than in each caller because a row is tagged with its radio's
+// identifier and shows its radio's label, and those are two different strings
+// as soon as anybody renames a radio -- so every place that prints one has to
+// do the same translation, and doing it twice is how the window and the
+// terminal end up disagreeing about what the dongle is called. Falls back to
+// the tag, and to "this Mac" for a local radio in a view that has no radios
+// in it at all.
+std::string radio_label_for(const DeviceView& v, const std::string& tag);
+
 std::string render_devices(const DeviceView& v, bool verbose, bool color,
                            bool always_radios = false);
 

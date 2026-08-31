@@ -109,6 +109,7 @@ bool box_votes_for(const CamConf* conf, const DeviceSnapshot& d,
 RadioView radio_view(const DeviceSources& from, const std::string& radio) {
   RadioView rv;
   rv.name = radio;
+  rv.label = radio;
   if (!radio.empty()) {
     // The defaults on the struct describe the local radio, which is the one
     // that needs no describing. Anything else starts as unreachable and
@@ -223,6 +224,14 @@ double age_from(double last_wall, double reported_age, double now) {
   return age < 0.0 ? 0.0 : age;
 }
 
+// What to print for a radio. build_device_view always fills the label in, but a
+// view assembled by hand -- the TUI's test harness, the app's previews -- has
+// only ever set a name, and a blank cell where a radio's name goes is a worse
+// answer than the name it had before labels existed.
+const std::string& radio_shown(const RadioView& rv) {
+  return rv.label.empty() ? rv.name : rv.label;
+}
+
 // How a radio is reached, as a person reads it. The wire spellings are
 // lower-case words chosen for a protocol; these are chosen for a column.
 const char* link_way_label(const std::string& way) {
@@ -304,6 +313,10 @@ DeviceView build_device_view(const DeviceSources& from) {
   here.name = (from.bench != nullptr && !from.bench->host.empty())
                   ? from.bench->host
                   : std::string("this Mac");
+  // The local radio's rows are joined by carrying no radio tag at all, so
+  // there is no identifier here to keep separate from the label. octomancerd
+  // has already applied any rename to `host`.
+  here.label = here.name;
   here.way = "local";
   here.answering = from.bench != nullptr;
   // How stale the answer this row was built from is.
@@ -374,6 +387,9 @@ DeviceView build_device_view(const DeviceSources& from) {
       for (const RadioLink& l : from.bench->radio_link) {
         if (l.name != rv.name) continue;
         rv.way = l.way;
+        // Falling back to the name, which is what a daemon too old to send a
+        // label leaves us with and is exactly what it used to show.
+        rv.label = l.label.empty() ? rv.name : l.label;
         rv.answering = l.answering;
         // An age outlives the answering. "How old is what this radio told me"
         // is a question a radio that has gone quiet has the most interesting
@@ -699,6 +715,19 @@ std::string radio_complaint(const std::string& radio) {
   return "the radio reports \"" + radio + "\".";
 }
 
+std::string radio_label_for(const DeviceView& v, const std::string& tag) {
+  for (const RadioView& rv : v.radios) {
+    if (tag.empty() ? rv.local : (!rv.local && rv.name == tag)) {
+      return radio_shown(rv);
+    }
+  }
+  // A row whose radio is not in the list. For a local row that is a view built
+  // without one, which the app does for its previews; for a dongle's it would
+  // mean a snapshot that mentioned a radio on its rows and not in its links,
+  // and the tag is the only name anybody has for it either way.
+  return tag.empty() ? std::string("this Mac") : tag;
+}
+
 std::string render_devices(const DeviceView& v, bool verbose, bool color,
                            bool always_radios) {
   const Style st = style_for(color);
@@ -731,10 +760,7 @@ std::string render_devices(const DeviceView& v, bool verbose, bool color,
   // only exists when there is more than one radio, and in that situation an
   // empty cell is the one thing on the page that has to be inferred. Every row
   // says where it came from, or the column is not there at all.
-  std::string local_name = "this Mac";
-  for (const RadioView& rv : v.radios) {
-    if (rv.local) { local_name = rv.name; break; }
-  }
+  const std::string local_name = radio_label_for(v, std::string());
 
   // What is wrong with *this Mac's* radio, when we are hearing nothing on it.
   //
@@ -820,7 +846,7 @@ std::string render_devices(const DeviceView& v, bool verbose, bool color,
         rv.has_canonical && rv.canonical_spread_s > kWarnOffset ? st.yellow
                                                                 : live;
     out += fmt("%s%-18s%s %s%-14s%s %s%6s%s %s%10s%s %s%8d%s %s%7d%s\n",
-               live, fit_label(rv.name, 18, false).c_str(), st.off,
+               live, fit_label(radio_shown(rv), 18, false).c_str(), st.off,
                live, link_way_label(rv.way), st.off,
                live, age.c_str(), st.off,
                spread_colour, spread.c_str(), st.off,
@@ -950,9 +976,9 @@ std::string render_devices(const DeviceView& v, bool verbose, bool color,
       // what it means is "not being heard". A greyed-out radio name beside a
       // bright age says the box is live and the radio that heard it is not,
       // which is not a state that exists.
-      out += fmt("%s %-14.14s%s", live,
-                 r.radio.empty() ? local_name.c_str() : r.radio.c_str(),
-                 st.off);
+      const std::string via =
+          r.radio.empty() ? local_name : radio_label_for(v, r.radio);
+      out += fmt("%s %-14.14s%s", live, via.c_str(), st.off);
     }
     out += fmt(" %s%6s%s %s%10s%s %s%8s%s",
                age_colour, age.c_str(), st.off,

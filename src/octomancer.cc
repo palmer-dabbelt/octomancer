@@ -38,6 +38,7 @@
 #include "devices.h"
 #include "hciport.h"
 #include "loop.h"
+#include "naming.h"
 #include "proto.h"
 #include "server.h"
 #include "timeutil.h"
@@ -58,6 +59,7 @@ struct Options {
   std::string bench_socket_path = octo::default_socket_path();
   std::vector<std::string> cameras;
   std::vector<std::string> boxes;
+  std::vector<std::string> radios;
   bool all_cameras = false;
   std::string daemon = "all";
   double timeout = 180.0;
@@ -290,8 +292,11 @@ void usage(FILE* out) {
       "                        back to whatever it calls itself. A name given\n"
       "                        here outranks anything the device says, and\n"
       "                        survives the device being switched off for a\n"
-      "                        week. One device at a time, with --box or\n"
-      "                        --camera.\n"
+      "                        week. One at a time, with --box, --camera or\n"
+      "                        --radio. A radio has no name of its own worth\n"
+      "                        keeping -- `dongle` is what the firmware calls\n"
+      "                        itself -- so this is how a cart with two of\n"
+      "                        them tells them apart.\n"
       "  refresh               forget what a device said it was called, so it\n"
       "                        is asked again. For a device that has been\n"
       "                        renamed at its own end. A name given with\n"
@@ -311,6 +316,10 @@ void usage(FILE* out) {
       "                        following.\n"
       "  --box NAME|ID         which timecode box, repeatable. enable,\n"
       "                        disable and warn take this.\n"
+      "  --radio NAME          which radio, for `name`. `local` is this\n"
+      "                        machine's; a dongle answers to whatever the\n"
+      "                        RADIO section calls it, before or after you\n"
+      "                        rename it.\n"
       "  --daemon WHICH        `all` (the default), `bench` for octomancerd,\n"
       "                        or `sync` for octomancer-sync. Only start,\n"
       "                        stop and restart look at this.\n"
@@ -706,6 +715,60 @@ std::vector<Target> resolve_boxes(const octo::Snapshot* snap,
       }
     }
     targets.emplace_back(id, name);
+  }
+  return targets;
+}
+
+// The same, for radios, which are not devices and do not live in the camera
+// configuration -- so the snapshot is the only place to look.
+//
+// Matched against the label as well as the name, because the label is what was
+// on the screen when somebody decided to rename it: having to look up the
+// firmware's own name in order to change a name you already chose would be a
+// trick, not an interface.
+//
+// The identifier a radio keys under is not the string that gets typed, so this
+// returns the key rather than the match. See radio_name_key in src/naming.h.
+std::vector<Target> resolve_radios(const octo::Snapshot* snap,
+                                   const std::vector<std::string>& want,
+                                   bool* ok) {
+  std::vector<Target> targets;
+  for (const std::string& which : want) {
+    if (snap == nullptr) {
+      std::fprintf(stderr,
+                   "octomancer: cannot name a radio without octomancerd --"
+                   " it is the only thing that knows which radios there are\n");
+      *ok = false;
+      return {};
+    }
+    // This machine's own. "local" is what the LINK column calls it, so it is
+    // what somebody will type when the hostname is awkward to spell.
+    if (which == "local" || (!snap->host.empty() && which == snap->host)) {
+      targets.emplace_back(octo::radio_name_key(std::string()), snap->host);
+      continue;
+    }
+    bool found = false;
+    for (const octo::RadioLink& l : snap->radio_link) {
+      if (l.name != which && l.label != which) continue;
+      targets.emplace_back(octo::radio_name_key(l.name),
+                           l.label.empty() ? l.name : l.label);
+      found = true;
+      break;
+    }
+    if (found) continue;
+
+    // Worth listing them rather than saying no. There are never many, and the
+    // most likely mistake is typing the name of a box or of a radio that is
+    // not plugged in.
+    std::string known = "local";
+    if (!snap->host.empty()) known += ", " + snap->host;
+    for (const octo::RadioLink& l : snap->radio_link) {
+      known += ", " + (l.label.empty() ? l.name : l.label);
+    }
+    std::fprintf(stderr, "octomancer: no radio called '%s'. There is: %s\n",
+                 which.c_str(), known.c_str());
+    *ok = false;
+    return {};
   }
   return targets;
 }
@@ -1162,9 +1225,14 @@ std::vector<Target> naming_targets(const Options& opt, const octo::CamConf& conf
        resolve_cameras(have_status ? &status : nullptr, conf, opt.cameras)) {
     out.push_back(t);
   }
+  for (const Target& t :
+       resolve_radios(have_bench ? &snap : nullptr, opt.radios, ok)) {
+    out.push_back(t);
+  }
+  if (!*ok) return {};
   if (out.empty()) {
     std::fprintf(stderr,
-                 "octomancer: say which device, with --box or --camera\n");
+                 "octomancer: say which, with --box, --camera or --radio\n");
     *ok = false;
   }
   return out;
@@ -1188,6 +1256,13 @@ int run_name_command(const Options& opt, const std::string& argument,
   }
 
   const std::string id = targets[0].first;
+  // What to call it back. A radio's identifier is a key with a prefix on it
+  // and nobody typed that; the label they did type is the second half of the
+  // target, and echoing the key instead would read as the program having
+  // renamed something else.
+  const std::string said =
+      octo::is_radio_key(id) && !targets[0].second.empty() ? targets[0].second
+                                                           : id;
   std::string reply, err;
   const std::string ask =
       argument.empty() ? "name " + id : "name " + id + " " + argument;
@@ -1197,10 +1272,10 @@ int run_name_command(const Options& opt, const std::string& argument,
   }
   if (argument.empty()) {
     std::printf("%s%s%s is back to whatever it calls itself\n", p(kGreen),
-                id.c_str(), p(kReset));
+                said.c_str(), p(kReset));
   } else {
-    std::printf("%s%s%s is now called %s\n", p(kGreen), id.c_str(), p(kReset),
-                argument.c_str());
+    std::printf("%s%s%s is now called %s\n", p(kGreen), said.c_str(),
+                p(kReset), argument.c_str());
   }
   return 0;
 }
@@ -1209,6 +1284,18 @@ int run_refresh_command(const Options& opt, const Paint& p) {
   octo::CamConf conf;
   std::string cerr;
   conf.load(octo::default_camera_config_path(), &cerr);
+
+  // Nothing is ever learned about a radio's name -- there is no advertisement
+  // to hear one in and nothing to connect to and ask -- so there is nothing to
+  // forget, and "refreshed" would be a lie about work not done. `name` with no
+  // argument is the verb that means what somebody asking this wants.
+  if (!opt.radios.empty()) {
+    std::fprintf(stderr,
+                 "octomancer: a radio has no name to forget -- nothing tells"
+                 " us one. Use `octomancer name --radio %s` with no name to"
+                 " drop the one you gave it.\n", opt.radios.front().c_str());
+    return 2;
+  }
 
   bool ok = false;
   const std::vector<Target> targets = naming_targets(opt, conf, &ok);
@@ -1428,12 +1515,14 @@ int main(int argc, char** argv) {
   opt.color = isatty(1);
 
   enum {
-    kCamera = 1000, kBox, kAllCameras, kSocket, kBenchSocket, kTimeout, kJson,
+    kCamera = 1000, kBox, kRadio, kAllCameras, kSocket, kBenchSocket, kTimeout,
+    kJson,
     kNoColor, kNoWait, kVerbose, kDaemon, kVersion, kHelp,
   };
   static const struct option longs[] = {
       {"camera", required_argument, nullptr, kCamera},
       {"box", required_argument, nullptr, kBox},
+      {"radio", required_argument, nullptr, kRadio},
       {"all", no_argument, nullptr, kAllCameras},
       {"daemon", required_argument, nullptr, kDaemon},
       {"socket", required_argument, nullptr, kSocket},
@@ -1453,6 +1542,7 @@ int main(int argc, char** argv) {
     switch (c) {
       case kCamera: opt.cameras.push_back(optarg); break;
       case kBox: opt.boxes.push_back(optarg); break;
+      case kRadio: opt.radios.push_back(optarg); break;
       case kAllCameras: opt.all_cameras = true; break;
       case kDaemon: opt.daemon = optarg; break;
       case kSocket: opt.socket_path = optarg; break;

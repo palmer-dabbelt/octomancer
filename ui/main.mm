@@ -960,14 +960,11 @@ struct ScanHit {
       if (r.kind != octo::DeviceKind::kTentacle) continue;
       NSString* where = @"";
       if (view.radios.size() > 1) {
-        std::string whose = r.radio;
-        if (whose.empty()) {
-          whose = "this Mac";
-          for (const octo::RadioView& rv : view.radios) {
-            if (rv.local) { whose = rv.name; break; }
-          }
-        }
-        where = [NSString stringWithFormat:@" (%@)", ns(whose)];
+        // Its label, not the tag on the row: those differ the moment anybody
+        // renames a radio, and the terminal already translates.
+        where = [NSString stringWithFormat:
+                              @" (%@)", ns(octo::radio_label_for(view,
+                                                                 r.radio))];
       }
       NSString* line =
           [NSString stringWithFormat:@"%@%@%@  %@", r.alerting ? @"⚠ " : @"",
@@ -2414,10 +2411,8 @@ const CGFloat kWindowWidth = 460.0;
     _canonicalLine.textColor = [NSColor systemOrangeColor];
   }
 
-  std::string local_radio = "this Mac";
-  for (const octo::RadioView& rv : view.radios) {
-    if (rv.local) { local_radio = rv.name; break; }
-  }
+  const std::string local_radio =
+      octo::radio_label_for(view, std::string());
 
   NSMutableArray<NSString*>* keys = [NSMutableArray array];
   for (const octo::DeviceRow& r : view.rows) {
@@ -2466,9 +2461,11 @@ const CGFloat kWindowWidth = 460.0;
     // a reader would have to infer.
     NSString* via = @"";
     if (view.radios.size() > 1) {
-      via = [NSString stringWithFormat:@" (via %@)",
-                                       ns(r.radio.empty() ? local_radio
-                                                          : r.radio)];
+      via = [NSString stringWithFormat:
+                          @" (via %@)",
+                          ns(r.radio.empty()
+                                 ? local_radio
+                                 : octo::radio_label_for(view, r.radio))];
     }
     cells[0].stringValue =
         [[ns(r.name) stringByAppendingString:via] stringByAppendingString:mark];

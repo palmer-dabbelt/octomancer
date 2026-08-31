@@ -94,17 +94,18 @@ class ZephyrScanner : public Scanner {
     source_ = loop_->add_source(
         handle, kRead, [this](int) { drain(); }, [](const std::string&) {});
 
-    // Passive, for the reason src/scanner_hci.cc gives: the clock is in the
-    // advertisement, so there is never a reason to provoke a scan response and
-    // announce ourselves. FILTER_DUPLICATE is off because a Tentacle's whole
-    // content is that it changes every time.
-    struct bt_le_scan_param param = {};
-    param.type = BT_HCI_LE_SCAN_PASSIVE;
-    param.options = BT_LE_SCAN_OPT_NONE;
-    param.interval = BT_GAP_SCAN_FAST_INTERVAL;
-    param.window = BT_GAP_SCAN_FAST_WINDOW;
-
-    const int rc = bt_le_scan_start(&param, &ZephyrScanner::scan_cb);
+    // Passive to begin with, for the reason src/scanner_hci.cc gives: the
+    // clock is in the advertisement, so there is usually no reason to provoke
+    // a scan response and announce ourselves. FILTER_DUPLICATE is off because
+    // a Tentacle's whole content is that it changes every time.
+    //
+    // "Usually" is the change. A Tentacle puts its clock in the advertisement
+    // and its *name* in the scan response, so a purely passive radio knows
+    // exactly what time every box thinks it is and cannot name any of them --
+    // which is why every device a dongle reported used to be listed by its
+    // hardware address. See set_active(): the radio asks when it has something
+    // to learn and goes quiet again once it has learned it.
+    const int rc = restart(false);
     if (rc != 0) {
       loop_->remove_source(source_);
       source_ = kNoSource;
@@ -120,6 +121,27 @@ class ZephyrScanner : public Scanner {
     report("poweredOn");
     return true;
   }
+
+  // Switch the scan between passive and active, which means stopping and
+  // starting it -- there is no way to change the type of a running scan.
+  //
+  // Cheap but not free, and it drops whatever was in flight, which is why
+  // src/naming.h damps how often it may happen rather than deciding afresh on
+  // every advertisement.
+  void set_active(bool active) override {
+    if (!started_ || active == active_) return;
+    bt_le_scan_stop();
+    if (restart(active) != 0) {
+      // Back to what was working. A radio that has stopped scanning is a room
+      // that has gone silent, and that is much worse than one whose devices
+      // are listed by address.
+      restart(active_);
+      return;
+    }
+    active_ = active;
+  }
+
+  bool active() const { return active_; }
 
   void stop() override {
     if (!started_) return;
@@ -158,6 +180,15 @@ class ZephyrScanner : public Scanner {
   }
 
   // Loop thread.
+  int restart(bool active) {
+    struct bt_le_scan_param param = {};
+    param.type = active ? BT_HCI_LE_SCAN_ACTIVE : BT_HCI_LE_SCAN_PASSIVE;
+    param.options = BT_LE_SCAN_OPT_NONE;
+    param.interval = BT_GAP_SCAN_FAST_INTERVAL;
+    param.window = BT_GAP_SCAN_FAST_WINDOW;
+    return bt_le_scan_start(&param, &ZephyrScanner::scan_cb);
+  }
+
   void drain() {
     RawReport r;
     while (k_msgq_get(&g_reports, &r, K_NO_WAIT) == 0) {
@@ -167,7 +198,27 @@ class ZephyrScanner : public Scanner {
 
   void handle(const RawReport& r) {
     const AdvertMatch m = classify_ad(r.data, r.len);
-    if (!m.is_box && !m.is_camera) return;
+    if (!m.is_box && !m.is_camera) {
+      // A scan response, which is a separate packet from the advertisement it
+      // answers: a Tentacle puts its clock in the advertisement and its name
+      // in the response, so this report has a name in it and no service data
+      // at all. That is the only reason to scan actively, and dropping it
+      // here is why every device this dongle reported was listed by its
+      // hardware address.
+      //
+      // Passed on as a name and nothing else. The registry ignores names for
+      // devices it does not already hold, so a named stranger walking past
+      // does not become a row.
+      if (!m.name.empty() && on_advert_) {
+        Advert named;
+        named.id = hci::address_to_string(to_address(r.addr));
+        named.name = m.name;
+        named.rssi = r.rssi;
+        named.name_only = true;
+        on_advert_(named);
+      }
+      return;
+    }
 
     // The instant the packet arrived, not the instant it reached here. An
     // advertisement can wait in the queue while the loop finishes something
@@ -212,6 +263,7 @@ class ZephyrScanner : public Scanner {
   SightingHandler on_camera_;
   StateHandler on_state_;
   bool started_ = false;
+  bool active_ = false;
 };
 
 }  // namespace

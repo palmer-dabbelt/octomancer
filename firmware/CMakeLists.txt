@@ -54,6 +54,7 @@ target_sources(app PRIVATE
   ${OCTO}/escape.cc
   ${OCTO}/hci.cc
   ${OCTO}/loop.cc
+  ${OCTO}/naming.cc
   ${OCTO}/registry.cc
   ${OCTO}/syncd.cc
   ${OCTO}/tentacle.cc

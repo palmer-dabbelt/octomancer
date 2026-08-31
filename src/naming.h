@@ -110,6 +110,32 @@ class NameBook {
   std::map<std::string, DeviceName> names_;
 };
 
+// Whether a radio should be scanning actively rather than passively.
+//
+// A passive listener hears advertisements and nothing else. A Tentacle puts
+// its clock in the advertisement -- which is the whole reason this project can
+// listen to a whole bench at once without connecting to anything -- and its
+// *name* in the scan response, which only an active scan asks for. So a
+// passive radio knows exactly what time every box thinks it is and has no idea
+// what any of them are called.
+//
+// Active scanning is not free: it transmits a scan request for every
+// advertisement it hears, which costs power and puts this device on the air in
+// a room that has not asked to hear from it. So it is switched on when there
+// is something to learn and off again once there is not, rather than left on.
+//
+// `unnamed_live` is how many devices we are currently hearing and cannot name.
+// `since_change` is how long the current setting has been in force; a radio
+// that flipped on every advertisement would spend its time restarting scans
+// rather than doing either.
+bool want_active_scan(bool active_now, int unnamed_live, double since_change);
+
+// How long a scan setting is left alone before it may change again. Long
+// enough that a box appearing and disappearing at the edge of range does not
+// restart the radio every second; short enough that a new box is named while
+// somebody is still looking at the screen.
+inline constexpr double kScanSettleSeconds = 20.0;
+
 // The stand-ins a snapshot uses when a device has not said what it is called.
 // Not names, and storing one as though it were would put "(unnamed)" on a row
 // that a probe could have named properly.

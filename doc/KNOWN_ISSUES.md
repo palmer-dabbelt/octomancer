@@ -211,20 +211,18 @@ mid-run has never been observed**, because provoking it means pulling the
 cable, and the handover code is what would run. It is written, and it is the
 one path in this arrangement that no evidence covers.
 
-### A dongle's boxes have no names
+### Nothing performs a name probe
 
-A dongle scans passively, which is deliberate: a Tentacle puts its timecode in
-the advertisement, so nothing has to be asked for, and a passive listener has
-no limit on how many boxes it can hear at once. But a Tentacle puts its *name*
-in the scan response, which only an active scan collects. So every box a
-dongle reports is listed by its hardware address.
+`src/naming.h` has three sources for a device's label -- a person, a probe,
+and an advertisement -- and only two of them exist. Nothing connects to a
+device to read its GAP name, so `probed` is never set by anything but the
+dongle's active scan.
 
-The rows are therefore hard to relate to the named rows from this Mac's radio
-by eye, even when they are obviously the same boxes. Two ways out, and neither
-has been chosen: scan actively on the dongle, which costs power and puts
-requests on the air in a room that may not want them; or have octomancerd
-supply names, which it cannot do by address because CoreBluetooth will not
-show it one (see "The rows cannot be merged" in `doc/box-notes.md`).
+It matters least where it sounds worst. The dongle now collects names from
+scan responses and CoreBluetooth collects them for this Mac, so in practice a
+device that has a name gets one. What is missing is the case of a device whose
+name never appears in any advertisement or scan response at all; today that is
+listed by its identifier until somebody renames it by hand.
 
 
 ### The dongle's camera half is driven, but only as far as the scan

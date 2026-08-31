@@ -175,6 +175,36 @@ void test_an_emptied_record_does_not_linger() {
   CHECK_EQ(static_cast<int>(book.size()), 0);
 }
 
+// A passive radio knows exactly what time every box thinks it is and has no
+// idea what any of them are called: a Tentacle's clock is in the
+// advertisement and its name is in the scan response, which only an active
+// scan asks for. So the radio goes active when there is a name to learn, and
+// back to passive when there is not -- rather than transmitting a scan request
+// for every advertisement in the room forever.
+void test_a_radio_scans_actively_only_while_there_is_a_name_to_learn() {
+  // Nothing unnamed: stay passive.
+  CHECK(!octo::want_active_scan(false, 0, 1000.0));
+  // Something unnamed: go active.
+  CHECK(octo::want_active_scan(false, 1, 1000.0));
+  // Once everything is named, go back.
+  CHECK(!octo::want_active_scan(true, 0, 1000.0));
+  // ...and stay active while there is still something to learn.
+  CHECK(octo::want_active_scan(true, 2, 1000.0));
+}
+
+// A box at the edge of range appears and disappears. Without damping, that
+// restarts the radio's scan every time it does -- and a radio spending its
+// time restarting scans is a radio doing neither kind of listening well.
+void test_the_scan_setting_settles_before_it_changes_again() {
+  // A change is wanted, but not yet.
+  CHECK(!octo::want_active_scan(false, 1, 0.0));
+  CHECK(!octo::want_active_scan(false, 1, octo::kScanSettleSeconds - 0.1));
+  CHECK(octo::want_active_scan(false, 1, octo::kScanSettleSeconds));
+  // ...and the same going the other way.
+  CHECK(octo::want_active_scan(true, 0, 1.0));
+  CHECK(!octo::want_active_scan(true, 0, octo::kScanSettleSeconds));
+}
+
 void test_name_source_names() {
   CHECK_STR(octo::name_source_name(NameSource::kUser), "user");
   CHECK_STR(octo::name_source_name(NameSource::kProbed), "probed");
@@ -196,6 +226,8 @@ int main() {
   test_refresh_keeps_the_name_a_person_chose();
   test_refreshing_an_unknown_device_is_quiet();
   test_an_emptied_record_does_not_linger();
+  test_a_radio_scans_actively_only_while_there_is_a_name_to_learn();
+  test_the_scan_setting_settles_before_it_changes_again();
   test_name_source_names();
   return octotest::report("test_naming");
 }

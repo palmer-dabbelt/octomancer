@@ -903,6 +903,13 @@ double SyncDaemon::error_from(const CameraView& view, int fps) const {
 // -------------------------------------------------------------------- radio
 
 void SyncDaemon::observe_advert(const Advert& advert) {
+  // A scan response: a name and no reading. Not an advertisement that failed
+  // to decode, and counting it as one would make every box look like it was
+  // losing half its packets.
+  if (advert.name_only) {
+    registry_->observe_name(advert.id, advert.name);
+    return;
+  }
   registry_->observe(advert.id, advert.name, advert.rssi, advert.data.data(),
                      advert.data.size(), advert.mono, advert.wall);
   drain_events();

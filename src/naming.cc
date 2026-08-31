@@ -13,6 +13,16 @@ const char* name_source_name(NameSource source) {
   return "none";
 }
 
+bool want_active_scan(bool active_now, int unnamed_live, double since_change) {
+  const bool want = unnamed_live > 0;
+  if (want == active_now) return active_now;
+  // Hysteresis in time rather than in count, because the thing being damped is
+  // the cost of restarting the scan, and that cost is per restart however many
+  // devices provoked it.
+  if (since_change < kScanSettleSeconds) return active_now;
+  return want;
+}
+
 bool is_placeholder_name(const std::string& name) {
   // src/registry.cc substitutes the first when a device has never said what it
   // is called, and it travels over the wire looking exactly like a name --

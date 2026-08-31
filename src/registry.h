@@ -229,6 +229,15 @@ class Registry {
   Registry(Policy policy, double start_mono);
 
   // One advertisement. `data` is the raw FDAC service-data payload.
+  // A name, from a report that carried no reading -- a scan response. Updates
+  // a device that already exists and creates nothing: a name is not a
+  // sighting, and a roster that grew a row for every named device in the
+  // building would be a different program.
+  //
+  // Returns whether anything was updated, which is the only thing a caller
+  // could usefully do with the answer.
+  bool observe_name(const std::string& id, const std::string& name);
+
   void observe(const std::string& id, const std::string& name, int rssi,
                const uint8_t* data, size_t len, double mono, double wall);
 

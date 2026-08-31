@@ -109,6 +109,15 @@ void Registry::update_alert(Device* dev, double mono, double wall) {
   }
 }
 
+bool Registry::observe_name(const std::string& id, const std::string& name) {
+  if (id.empty() || name.empty()) return false;
+  const auto it = devices_.find(id);
+  if (it == devices_.end()) return false;
+  if (it->second.name == name) return false;
+  it->second.name = name;
+  return true;
+}
+
 void Registry::observe(const std::string& id, const std::string& name, int rssi,
                        const uint8_t* data, size_t len, double mono,
                        double wall) {

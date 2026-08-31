@@ -738,7 +738,11 @@ std::string render_devices(const DeviceView& v, bool verbose, bool color,
   // Never a heading over nothing: build_device_view always supplies this
   // machine's radio, but a view assembled by hand need not have.
   if (!v.radios.empty() && (always_radios || verbose || v.radios.size() > 1)) {
-  out += fmt("%s%-10s %-10s %6s %9s %8s %7s%s\n", st.head, "RADIO", "LINK",
+  // Fourteen, the same width the DEVICE column gets, because a hostname is
+  // about as long as a device name and this one held "Palmers-Mini" cut to
+  // "Palmers-Mi" -- which reads as a machine nobody has heard of rather than
+  // as a truncation.
+  out += fmt("%s%-14s %-10s %6s %9s %8s %7s%s\n", st.head, "RADIO", "LINK",
              "AGE", "SPREAD", "TIMECODE", "CAMERAS", st.off);
   for (const RadioView& rv : v.radios) {
     const char* live = rv.answering ? "" : st.dim;
@@ -750,8 +754,8 @@ std::string render_devices(const DeviceView& v, bool verbose, bool color,
     const char* spread_colour =
         rv.has_canonical && rv.canonical_spread_s > kWarnOffset ? st.yellow
                                                                 : live;
-    out += fmt("%s%-10s%s %s%-10s%s %s%6s%s %s%9s%s %s%8d%s %s%7d%s\n",
-               live, fit_label(rv.name, 10, false).c_str(), st.off,
+    out += fmt("%s%-14s%s %s%-10s%s %s%6s%s %s%9s%s %s%8d%s %s%7d%s\n",
+               live, fit_label(rv.name, 14, false).c_str(), st.off,
                live, link_way_label(rv.way), st.off,
                live, age.c_str(), st.off,
                spread_colour, spread.c_str(), st.off,
@@ -780,7 +784,7 @@ std::string render_devices(const DeviceView& v, bool verbose, bool color,
   // that can drift apart are two tables somebody has to learn separately, and
   // the whole point of one renderer is that there is only ever one to learn.
   out += fmt("%s%-14s%s", st.head, "DEVICE", st.off);
-  if (show_via) out += fmt("%s %-10s%s", st.head, "VIA", st.off);
+  if (show_via) out += fmt("%s %-14s%s", st.head, "VIA", st.off);
   out += fmt("%s %6s %10s %-11s %5s%s", st.head, "AGE",
              "OFFSET", "LINK", "RSSI", st.off);
   if (verbose) {
@@ -842,7 +846,7 @@ std::string render_devices(const DeviceView& v, bool verbose, bool color,
       // Every row says which radio heard it, our own included. The column
       // only exists when there is more than one radio, and in that situation a
       // blank cell is the one thing on the page a reader has to infer.
-      out += fmt("%s %-10.10s%s", st.dim,
+      out += fmt("%s %-14.14s%s", st.dim,
                  r.radio.empty() ? local_name.c_str() : r.radio.c_str(),
                  st.off);
     }

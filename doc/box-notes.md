@@ -564,6 +564,30 @@ invites exactly the cross-radio comparison the section below refuses to make.
 `SPREAD` is the figure that survives, because a spread is a difference and
 whatever origin a radio invented cancels out of it.
 
+The two tables are laid out column for column, because they are read together
+and most of the pairs mean the same kind of thing: RADIO/DEVICE is what it is
+called, LINK/VIA is where it came from, AGE is AGE, SPREAD/OFFSET are both a
+distance in milliseconds.
+
+**There is no LINK column on the device table.** Whether a device is being
+heard is already in its age and in whether the row is drawn dim, and a column
+repeating that was a third copy of one fact. One state does not survive the
+reasoning and keeps a word in the AGE column: `held` means a camera we are
+talking to continuously, which stops advertising *because* we are connected --
+so rendering it as `0s` would be indistinguishable from a camera heard this
+instant, and those two want opposite reactions.
+
+**The protocol sends a timestamp, not an age.** A snapshot is a photograph, and
+every interface here holds one and redraws from it, so an age computed by the
+daemon is frozen at the instant it answered -- a device that has gone quiet
+keeps rendering as though it were still being heard, which is the one thing the
+column exists to rule out. So `last_wall` travels for devices and for radios,
+and the reader subtracts it from the current time. The age is still sent and is
+still the fallback: for a device restored from disk, whose last sighting
+predates this process, and for a daemon too old to send a stamp.
+`octomancer-sync` already did this for cameras, with a comment giving the same
+reasoning; it was `octomancerd`'s rows that were frozen.
+
 The one-shot `octomancer status` shows the section only when there is more than
 one radio, or on `--verbose`. A three-line block listing a single radio is the
 kind of preamble that stops a status page being read. The TUI shows it always:

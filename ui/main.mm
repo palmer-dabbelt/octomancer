@@ -371,6 +371,7 @@ struct ScanHit {
   NSButton* _writesEnabled;
   NSButton* _cameraWarn;
   NSButton* _removeCameraButton;
+  NSButton* _refreshCameraButton;
   NSTextField* _cameraNote;
 
   // --- the Details page, timecode-box half ------------------------------
@@ -386,6 +387,7 @@ struct ScanHit {
   NSButton* _boxEnabled;
   NSButton* _boxWarn;
   NSButton* _removeBoxButton;
+  NSButton* _refreshBoxButton;
 
   // The configuration file, read on the polling queue and kept here. The draw
   // path runs every two seconds and must not touch a disk to do it.
@@ -1119,6 +1121,12 @@ const CGFloat kWindowWidth = 460.0;
   _removeCameraButton = [NSButton buttonWithTitle:@"Remove…"
                                            target:self
                                            action:@selector(removeDevice:)];
+  // No ellipsis: this asks nothing and destroys nothing a person chose. It
+  // forgets what the device said it was called so the device is asked again,
+  // which is what somebody wants after renaming it at its own end.
+  _refreshCameraButton = [NSButton buttonWithTitle:@"Refresh Name"
+                                            target:self
+                                            action:@selector(refreshDevice:)];
   _activity = dim_label(@"");
   // Whatever the last action had to say, which can be a sentence. It shares a
   // row with two buttons, so it truncates rather than wrapping -- and it gives
@@ -1136,7 +1144,9 @@ const CGFloat kWindowWidth = 460.0;
   cameraFlags.spacing = 18;
 
   NSStackView* actions = [NSStackView
-      stackViewWithViews:@[ _syncButton, _removeCameraButton, _activity ]];
+      stackViewWithViews:@[
+        _syncButton, _refreshCameraButton, _removeCameraButton, _activity
+      ]];
   actions.orientation = NSUserInterfaceLayoutOrientationHorizontal;
   actions.spacing = 12;
   actions.alignment = NSLayoutAttributeCenterY;
@@ -1209,6 +1219,9 @@ const CGFloat kWindowWidth = 460.0;
   _removeBoxButton = [NSButton buttonWithTitle:@"Remove…"
                                         target:self
                                         action:@selector(removeDevice:)];
+  _refreshBoxButton = [NSButton buttonWithTitle:@"Refresh Name"
+                                         target:self
+                                         action:@selector(refreshDevice:)];
 
   NSStackView* boxFlags =
       [NSStackView stackViewWithViews:@[ _boxEnabled, _boxWarn ]];
@@ -1216,7 +1229,7 @@ const CGFloat kWindowWidth = 460.0;
   boxFlags.spacing = 18;
 
   NSStackView* boxActions =
-      [NSStackView stackViewWithViews:@[ _removeBoxButton ]];
+      [NSStackView stackViewWithViews:@[ _refreshBoxButton, _removeBoxButton ]];
   boxActions.orientation = NSUserInterfaceLayoutOrientationHorizontal;
   boxActions.spacing = 12;
 
@@ -1787,6 +1800,7 @@ const CGFloat kWindowWidth = 460.0;
   [self setFlags:_writesEnabled
             warn:_cameraWarn
           remove:_removeCameraButton
+         refresh:_refreshCameraButton
               to:entry
               at:which];
   [self updateCameraNote:entry];
@@ -1894,15 +1908,17 @@ const CGFloat kWindowWidth = 460.0;
 - (void)setFlags:(NSButton*)enabled
             warn:(NSButton*)warn
           remove:(NSButton*)remove
+         refresh:(NSButton*)refresh
               to:(const ConfigEntry*)entry
               at:(NSInteger)which {
-  for (NSButton* b in @[ enabled, warn, remove ]) b.tag = which;
+  for (NSButton* b in @[ enabled, warn, remove, refresh ]) b.tag = which;
   if (entry == nullptr) {
     enabled.state = NSControlStateValueOff;
     warn.state = NSControlStateValueOff;
     enabled.enabled = NO;
     warn.enabled = NO;
     remove.enabled = NO;
+    refresh.enabled = NO;
     return;
   }
   enabled.state = entry->enabled ? NSControlStateValueOn : NSControlStateValueOff;
@@ -1915,6 +1931,10 @@ const CGFloat kWindowWidth = 460.0;
   // would lose what they asked for.
   warn.enabled = _confLoaded && !_busy && entry->enabled;
   remove.enabled = !_busy;
+  // Needs octomancerd rather than octomancer-sync, whichever kind of device
+  // this is: the name book lives there, because it has to cover devices heard
+  // by a dongle and octomancer-sync has never seen one of those.
+  refresh.enabled = !_busy && _benchUp;
 }
 
 // What the two settings on the camera half actually mean, said in words,
@@ -1967,6 +1987,7 @@ const CGFloat kWindowWidth = 460.0;
   [self setFlags:_boxEnabled
             warn:_boxWarn
           remove:_removeBoxButton
+         refresh:_refreshBoxButton
               to:entry
               at:which];
 
@@ -2599,6 +2620,44 @@ const CGFloat kWindowWidth = 460.0;
 // advertisement puts it straight back on the list at its defaults. That is the
 // honest thing to promise, and it is also why removing something that is still
 // in the room is a temporary condition rather than a mistake.
+// Forget what a device said it was called, so it is asked again.
+//
+// No confirmation, deliberately: this destroys nothing a person chose. A name
+// somebody typed here is kept -- see src/naming.h, where the reasoning is --
+// and everything else it drops is re-learned within seconds of the device
+// being heard again. A dialog guarding an action that cannot lose anything
+// teaches people to click through dialogs.
+- (void)refreshDevice:(id)sender {
+  const NSInteger which = ((NSButton*)sender).tag;
+  if (which < 0 || static_cast<size_t>(which) >= _configEntries.size()) return;
+  const ConfigEntry entry = _configEntries[static_cast<size_t>(which)];
+  NSString* label = ns(entry.name.empty() ? entry.id : entry.name);
+
+  // Always octomancerd, whichever kind of device it is: the name book lives
+  // there because it has to cover devices heard by a dongle as well as by this
+  // Mac, and octomancer-sync has never seen one of those.
+  const std::string benchPath = _benchSocket;
+  const std::string id = entry.id;
+
+  _busy = true;
+  dispatch_async(_queue, ^{
+    std::string reply, err;
+    const bool told =
+        octo::query(benchPath, "refresh " + id, &reply, &err, 5.0);
+    dispatch_async(dispatch_get_main_queue(), ^{
+      self->_busy = false;
+      if (!told) {
+        [self complain:@"Could not refresh that device."
+                  info:ns(err)];
+        return;
+      }
+      self->_activity.stringValue = [NSString
+          stringWithFormat:@"%@ will be asked again what it is called", label];
+      [self refresh];
+    });
+  });
+}
+
 - (void)removeDevice:(id)sender {
   const NSInteger which = ((NSButton*)sender).tag;
   if (which < 0 || static_cast<size_t>(which) >= _configEntries.size()) return;

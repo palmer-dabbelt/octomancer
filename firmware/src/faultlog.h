@@ -78,6 +78,10 @@ std::string describe_fault(const FaultRecord& fault);
 // timeout and the reset -- so the note has to already be there.
 void note_watchdog_state(const std::string& starved);
 
+// Forget that recent boots went badly. For a deliberate reflash: the failures
+// belonged to the image being replaced.
+void forget_boot_failures();
+
 // Reboot into the bootloader, which then waits in DFU mode instead of starting
 // this image. The one escape hatch a dongle has that does not need a person
 // holding a button while they plug it in.

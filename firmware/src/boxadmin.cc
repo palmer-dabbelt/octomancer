@@ -68,6 +68,13 @@ bool handle_box_admin(const std::string& line, CdcPeer* peer) {
     // shorter than a person's patience.
     k_sleep(K_MSEC(100));
 
+    // A person replacing the image is a person saying the old one's troubles
+    // are over. Without this, a box that failed its way into safe mode stays
+    // in safe mode across the reflash that was meant to fix it -- the count
+    // lives in memory that a soft reset does not clear -- and the only way out
+    // is a power cycle, which is the trip to the desk this whole mechanism
+    // exists to avoid.
+    forget_boot_failures();
     enter_bootloader();
     return true;  // not reached
   }

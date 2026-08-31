@@ -20,6 +20,10 @@
 #   tools/flash-dongle.sh --info               ask a bootloader what is on it
 #   tools/flash-dongle.sh --dfu [PORT]         ask a running octomancer dongle
 #                                              to reboot into its bootloader
+#   tools/flash-dongle.sh --replace PKG.zip    all of the above at once: ask it
+#                                              into DFU, catch the bootloader,
+#                                              and write. The ordinary way to
+#                                              replace a working image.
 #
 # There are two images, and they are for two different arrangements:
 #
@@ -50,7 +54,7 @@ die() {
 }
 
 usage() {
-    sed -n '3,41p' "$0" | sed 's/^# \{0,1\}//'
+    sed -n '3,45p' "$0" | sed 's/^# \{0,1\}//'
     exit "${1:-0}"
 }
 
@@ -290,12 +294,69 @@ enter_dfu() {
     fi
     [ -n "$port" ] || die "no serial port found"
     echo "asking $port to reboot into its bootloader ..."
-    # The reply is read back rather than discarded: an `err` here means the
-    # image on the dongle is not this firmware, and saying so beats waiting
-    # for a bootloader that is never going to appear.
-    printf 'dfu confirm=1\r\n' > "$port"
+
+    # Opening the port is not the same as the dongle noticing. It sees DTR on
+    # a tenth-of-a-second control poll, and *resets its line reader* when it
+    # does -- so a command written immediately is discarded along with the
+    # greeting, the dongle stays in its application, and the next step flashes
+    # whatever port it can find. That was an hour.
+    #
+    # The redirection below holds the port open for the wait, which is what
+    # keeps DTR asserted; writing and closing in one step would drop it again
+    # before the dongle had looked.
+    {
+        sleep 1.2
+        printf 'dfu confirm=1\r\n'
+        sleep 0.3
+    } > "$port"
+
     echo "if the dongle was running octomancer-sync it is now in DFU mode."
     echo "check with: $0 --info"
+}
+
+# Replace the image on a dongle that is running this firmware: ask it into its
+# bootloader, catch that bootloader, and write. One operation because the join
+# is the hard part.
+#
+# The bootloader is only on the bus for a few seconds before it starts the
+# application again, which is far less than a transfer takes -- so this polls
+# twenty times a second and hands the port it finds straight to the flasher.
+# Doing it as three commands typed in sequence loses the race almost every
+# time, and loses it *silently*: the scan finds the application's port, nrfutil
+# talks to a dongle that is not listening, and it fails halfway through with a
+# TypeError from inside a Python traceback.
+#
+# The new port is identified by not having been there before, rather than by
+# name. Bootloader and application enumerate with different serial numbers and
+# neither is fixed.
+replace() {
+    pkg=$1
+    [ -n "$pkg" ] || die "--replace needs a .zip package"
+    [ -f "$pkg" ] || die "$pkg: no such file"
+
+    before=" $(ls /dev/cu.usbmodem* /dev/ttyACM* 2>/dev/null | tr '\n' ' ')"
+    enter_dfu "${2:-}"
+
+    i=0
+    while [ $i -lt 200 ]; do
+        for p in /dev/cu.usbmodem* /dev/ttyACM*; do
+            [ -e "$p" ] || continue
+            case "$before" in *" $p "*) continue ;; esac
+            echo "bootloader appeared at $p"
+            # Straight in. The bootloader's inactivity timeout is the budget
+            # and it is not generous: measured on this dongle, the bootloader
+            # is on the bus from about 2.8 seconds after the reboot until about
+            # 15, so there are twelve seconds to get a transfer started. Every
+            # check between here and the flasher spends some of that.
+            flash "$pkg" "$p"
+            return 0
+        done
+        i=$((i + 1))
+        sleep 0.05
+    done
+
+    die "no bootloader appeared. The dongle may not be running this firmware --
+    check with --info, and see README.md for the button."
 }
 
 
@@ -347,7 +408,12 @@ flash() {
     # Worth checking rather than discovering halfway through a write: a dongle
     # that is not in DFU mode still has a serial port, and it will simply not
     # answer.
-    if command -v ioreg >/dev/null 2>&1; then
+    #
+    # Skipped when the caller named the port, and not only to avoid repeating
+    # itself: --replace has just watched this exact port appear, and the
+    # bootloader is on the bus for a few seconds at most. Spending a chunk of
+    # that on an ioreg scan loses the race it was called to win.
+    if [ -z "$2" ] && command -v ioreg >/dev/null 2>&1; then
         if ! ioreg -l -w 0 | grep -q "Open DFU Bootloader"; then
             echo "warning: no 'Open DFU Bootloader' on the USB bus." >&2
             echo "         The dongle is probably running its application," >&2
@@ -379,6 +445,7 @@ case "${1:-}" in
     --dfu)     shift; enter_dfu "$@" ;;
     --package) shift; package "$@" ;;
     --flash)   shift; flash "$@" ;;
+    --replace) shift; replace "$@" ;;
     --help|-h|"") usage 0 ;;
     *) die "unknown option $1 (try --help)" ;;
 esac

@@ -178,7 +178,11 @@ int run_dongle(const std::string& device, bool verbose) {
       return;
     }
 
-    if (msg.verb == "done") {
+    // `end`, not `done` -- src/syncd.cc. Worth being exact about: a client that
+    // waits for the wrong terminator gets every device, prints them, and then
+    // reports a timeout, which reads as a broken dongle rather than a broken
+    // client.
+    if (msg.verb == "end") {
       std::printf("  %d device%s\n", devices, devices == 1 ? "" : "s");
       exit_code = 0;
       finished = true;

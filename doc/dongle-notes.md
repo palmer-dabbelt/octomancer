@@ -643,12 +643,35 @@ that was simply absent from the bus.
 
 ### What the bootloader window is worth knowing
 
-A dongle oscillating between its bootloader and a failing app cannot be caught
-by retrying `--flash` in a loop. Measured here: the bootloader is present for
-roughly three seconds at a time, `nrfutil` takes longer than that just to
-start, and the transfer is another ten or twenty. Every attempt failed with
-`FileNotFoundError` on a port that existed when the loop checked and was gone
-by the time the tool opened it.
+Measured on this dongle, by watching `/dev/cu.usbmodem*` at fifty hertz across
+a software-triggered reboot:
 
-The button holds DFU open indefinitely, which is what it is for. There is no
-host-side trick that substitutes for it.
+```
+  0.00s  the application's port
+  1.85s  (none)              -- the reboot
+  2.81s  the bootloader's port
+ 14.96s  (none)              -- the bootloader gives up
+ 16.12s  the application's port again
+```
+
+So there are **about twelve seconds** to get a transfer started, and the
+bootloader's serial number differs from the application's, so the port to use
+is the one that was not there before.
+
+Twelve seconds is not obviously tight, and the reason it is: `nrfutil` against
+a port it cannot open takes **forty seconds** to give up, at almost no CPU --
+it is retrying, not starting. So an attempt that misses the opening does not
+fail fast, it fails long after the window has closed, and reports
+`FileNotFoundError` on a path that certainly existed when the script looked.
+That reads as a lost race and gives no hint that the tool was the slow part.
+
+`--replace` does the whole handoff as one operation for this reason: ask the
+dongle into DFU, poll at twenty hertz for a port that was not there before, and
+go straight to the flasher with it. Nothing may be added between those steps.
+An earlier version reached the flasher through an `ioreg` check that took about
+a second and worked; a later one had an explicit `sleep 1` and did not. It is
+that marginal, and it will sometimes lose.
+
+**The button is still the reliable route**, and that is what it is for: DFU
+entered by holding the button stays open indefinitely rather than for twelve
+seconds. Use `--replace` for the ordinary case and the button when it matters.

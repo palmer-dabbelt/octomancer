@@ -75,16 +75,44 @@ static_assert(K_ERR_STACK_CHK_FAIL == 2, "K_ERR_STACK_CHK_FAIL moved");
 static_assert(K_ERR_KERNEL_OOPS == 3, "K_ERR_KERNEL_OOPS moved");
 static_assert(K_ERR_KERNEL_PANIC == 4, "K_ERR_KERNEL_PANIC moved");
 
+// The architecture's own reasons matter more than the portable ones here.
+// Everything this firmware has actually died of has been an ARM code, and
+// reporting those as "unknown" wasted an evening: a stack overflow and a null
+// dereference are different problems with different fixes, and the number that
+// distinguishes them was being thrown away at the point of writing it down.
+static_assert(K_ERR_ARCH_START == 16, "K_ERR_ARCH_START moved");
+static_assert(K_ERR_ARM_MEM_STACKING == K_ERR_ARCH_START + 1,
+              "the ARM fault reasons have been renumbered");
+
 const char* reason_name(uint32_t reason) {
   switch (reason) {
     case K_ERR_CPU_EXCEPTION: return "cpu-exception";
     case K_ERR_SPURIOUS_IRQ: return "spurious-irq";
-    // The one worth naming precisely. It is what a recursion or a big local
-    // buffer looks like from here, and the fix is a number in prj.conf rather
-    // than anything in the code the backtrace points at.
     case K_ERR_STACK_CHK_FAIL: return "stack-overflow";
     case K_ERR_KERNEL_OOPS: return "kernel-oops";
     case K_ERR_KERNEL_PANIC: return "kernel-panic";
+
+    // A memory fault while *stacking* is the MPU guard catching a push that
+    // ran off the end of a thread's stack. It reads as a fault inside whatever
+    // function was being entered, which is misleading in a specific way: the
+    // named function is the victim, not the culprit, and the fix is a number in
+    // prj.conf rather than anything at the address reported.
+    case K_ERR_ARM_MEM_STACKING: return "stack-overflow (stacking)";
+    case K_ERR_ARM_MEM_UNSTACKING: return "stack-overflow (unstacking)";
+    case K_ERR_ARM_USAGE_STACK_OVERFLOW: return "stack-overflow";
+    case K_ERR_ARM_MEM_GENERIC: return "memory-fault";
+    case K_ERR_ARM_MEM_DATA_ACCESS: return "bad-data-address";
+    case K_ERR_ARM_MEM_INSTRUCTION_ACCESS: return "bad-instruction-address";
+    case K_ERR_ARM_BUS_GENERIC: return "bus-fault";
+    case K_ERR_ARM_BUS_PRECISE_DATA_BUS: return "bus-fault (precise)";
+    case K_ERR_ARM_BUS_IMPRECISE_DATA_BUS: return "bus-fault (imprecise)";
+    case K_ERR_ARM_BUS_INSTRUCTION_BUS: return "bus-fault (instruction)";
+    case K_ERR_ARM_USAGE_GENERIC: return "usage-fault";
+    case K_ERR_ARM_USAGE_DIV_0: return "divide-by-zero";
+    case K_ERR_ARM_USAGE_UNALIGNED_ACCESS: return "unaligned-access";
+    case K_ERR_ARM_USAGE_NO_COPROCESSOR: return "no-coprocessor";
+    case K_ERR_ARM_USAGE_ILLEGAL_EXC_RETURN: return "illegal-exception-return";
+    case K_ERR_ARM_USAGE_ILLEGAL_EPSR: return "illegal-epsr";
     default: return "unknown";
   }
 }
@@ -96,9 +124,14 @@ K_TIMER_DEFINE(g_settle_timer, settled, nullptr);
 
 void note_watchdog_state(const std::string& starved) {
   g_retained.starved_magic = kStarvedMagic;
+  // A name, or the marker for "everything was fine when I last looked". The
+  // two are different findings and an empty string cannot hold both: it also
+  // means "this never ran at all", which is a third. Writing the marker keeps
+  // the absence meaningful.
+  const std::string& text = starved.empty() ? std::string("ok") : starved;
   size_t i = 0;
-  for (; i < kStarvedMax && i < starved.size(); ++i) {
-    g_retained.starved[i] = starved[i];
+  for (; i < kStarvedMax && i < text.size(); ++i) {
+    g_retained.starved[i] = text[i];
   }
   g_retained.starved[i] = '\0';
 }
@@ -155,6 +188,11 @@ void mark_run_settled() {
   g_retained.boot_attempts = 0;
 }
 
+void forget_boot_failures() {
+  g_retained.boot_attempts = 0;
+  g_retained.count = 0;
+}
+
 void enter_bootloader() {
   nrf_power_gpregret_set(NRF_POWER, 0, kBootloaderDfuStart);
   sys_reboot(SYS_REBOOT_COLD);
@@ -165,26 +203,37 @@ std::string describe_fault(const FaultRecord& fault) {
   if (!fault.valid) return std::string();
   char buf[192];
   if (fault.watchdog) {
-    if (!fault.starved.empty()) {
+    if (fault.starved == "ok") {
+      // The most interesting of the three. Every check was passing the last
+      // time anything looked, so whatever stopped did so between two feeds and
+      // took the feeder with it -- which points at the loop itself rather than
+      // at anything the loop was watching.
+      std::snprintf(buf, sizeof buf,
+                    "last run stopped: the watchdog fired, and every check was"
+                    " passing when it was last looked at -- so the loop itself"
+                    " stopped between one feed and the next");
+    } else if (!fault.starved.empty()) {
       std::snprintf(buf, sizeof buf,
                     "last run stopped: the watchdog fired because '%s' had"
                     " stopped answering",
                     fault.starved.c_str());
     } else {
       std::snprintf(buf, sizeof buf,
-                    "last run stopped: the watchdog fired, and the loop that"
-                    " would have said why had stopped too");
+                    "last run stopped: the watchdog fired before it had"
+                    " looked at anything even once");
     }
     return buf;
   }
   if (fault.count > 1) {
     std::snprintf(buf, sizeof buf,
-                  "last run died: %s at pc=0x%08x lr=0x%08x "
+                  "last run died: %s (%u) at pc=0x%08x lr=0x%08x "
                   "(%u in a row -- this box is not staying up)",
-                  reason_name(fault.reason), fault.pc, fault.lr, fault.count);
+                  reason_name(fault.reason), fault.reason, fault.pc, fault.lr,
+                  fault.count);
   } else {
-    std::snprintf(buf, sizeof buf, "last run died: %s at pc=0x%08x lr=0x%08x",
-                  reason_name(fault.reason), fault.pc, fault.lr);
+    std::snprintf(buf, sizeof buf,
+                  "last run died: %s (%u) at pc=0x%08x lr=0x%08x",
+                  reason_name(fault.reason), fault.reason, fault.pc, fault.lr);
   }
   return buf;
 }

@@ -55,6 +55,20 @@ ZephyrScanner* g_scanner = nullptr;
 
 volatile uint32_t g_dropped = 0;
 
+// What a device is called in the roster. One function because two spellings of
+// the same device's identifier is a device the registry cannot match to
+// itself: the advertisement creates the row and the scan response carries the
+// name, and they have to agree.
+//
+// Same marking as the Mac's dongle path: a resolvable private address rotates
+// every fifteen minutes or so, and nothing can make it stable, so a roster
+// full of one-sighting entries explains itself.
+std::string advert_id(const hci::Address& addr) {
+  std::string id = hci::address_to_string(addr);
+  if (!hci::address_is_stable(addr)) id += " (private)";
+  return id;
+}
+
 hci::Address to_address(const bt_addr_le_t& in) {
   hci::Address out;
   // Zephyr holds an address the way it travels, least significant byte first.
@@ -211,7 +225,13 @@ class ZephyrScanner : public Scanner {
       // does not become a row.
       if (!m.name.empty() && on_advert_) {
         Advert named;
-        named.id = hci::address_to_string(to_address(r.addr));
+        // Built exactly as the advertisement's is, suffix and all. The
+        // registry matches a name to a device by identifier and creates
+        // nothing, so an identifier that differs by so much as " (private)"
+        // is a name that silently goes nowhere -- and it would do so only for
+        // devices with rotating addresses, which is the hardest case to
+        // notice by looking at a table.
+        named.id = advert_id(to_address(r.addr));
         named.name = m.name;
         named.rssi = r.rssi;
         named.name_only = true;
@@ -227,12 +247,7 @@ class ZephyrScanner : public Scanner {
     const double mono = static_cast<double>(k_ticks_to_us_floor64(r.ticks)) * 1e-6;
     const double wall = clock_->wall_at(mono);
 
-    const hci::Address addr = to_address(r.addr);
-    std::string id = hci::address_to_string(addr);
-    // Same marking as the Mac's dongle path: a resolvable private address
-    // rotates every fifteen minutes or so, and nothing can make it stable, so
-    // a roster full of one-sighting entries explains itself.
-    if (!hci::address_is_stable(addr)) id += " (private)";
+    const std::string id = advert_id(to_address(r.addr));
 
     if (m.is_camera && on_camera_) {
       Sighting seen;

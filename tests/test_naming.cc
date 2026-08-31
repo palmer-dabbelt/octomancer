@@ -242,7 +242,41 @@ void test_a_heard_name_is_worth_keeping() {
   CHECK(octo::DeviceName().empty());
 }
 
+// The bug this rule was changed for: a box at the edge of range is heard every
+// minute or two and is stale in between, so it was almost never live at the
+// moment the decision was made. The count came out zero, the radio stayed
+// passive, and the box kept its hardware address forever -- while the boxes
+// near enough to be continuously live were exactly the ones already named.
+//
+// So the caller counts devices heard *lately*, and this is the rule that makes
+// that worth doing: one is enough to put the radio on the air.
+void test_one_unnamed_device_is_enough_to_scan_actively() {
+  CHECK(octo::want_active_scan(false, 1, 1000.0));
+  // ...and none is enough to stop, once the setting has settled.
+  CHECK(!octo::want_active_scan(true, 0, 1000.0));
+}
+
+// Hysteresis in time, because the cost being damped is restarting the scan and
+// that cost is per restart however many devices provoked it. A box flickering
+// in and out at the edge of range must not be able to restart the radio every
+// second.
+void test_a_scan_setting_is_left_alone_for_a_while() {
+  CHECK(!octo::want_active_scan(false, 1, octo::kScanSettleSeconds - 1.0));
+  CHECK(octo::want_active_scan(false, 1, octo::kScanSettleSeconds + 1.0));
+  CHECK(octo::want_active_scan(true, 0, octo::kScanSettleSeconds - 1.0));
+  CHECK(!octo::want_active_scan(true, 0, octo::kScanSettleSeconds + 1.0));
+}
+
+// The window has to be several times a distant box's advertising gap, or the
+// rule above is back to being about devices that happen to be live.
+void test_the_naming_window_outlasts_a_slow_box() {
+  CHECK(octo::kNameWithin > 60.0);
+}
+
 int main() {
+  test_one_unnamed_device_is_enough_to_scan_actively();
+  test_a_scan_setting_is_left_alone_for_a_while();
+  test_the_naming_window_outlasts_a_slow_box();
   test_a_heard_name_is_worth_keeping();
   test_an_unknown_device_is_called_by_its_id();
   test_the_order_is_person_then_probe_then_advertisement();

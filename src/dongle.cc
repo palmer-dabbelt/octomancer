@@ -233,7 +233,20 @@ std::vector<DeviceSnapshot> DongleView::devices(double now_mono) const {
   if (!attached_) return {};
   if (current_.empty() && current_mono_ == 0.0) return {};
   if (now_mono - current_mono_ > kStaleAfter) return {};
-  return current_;
+
+  // Aged forward to *now*, not left at what the dongle said when the batch was
+  // assembled. A batch arrives every kPollEvery seconds and the ages in it are
+  // true at the instant it was built, so handing them back unchanged makes
+  // every dongle row's age advance in five-second steps and sit up to five
+  // seconds short in between.
+  //
+  // This is the same rule the local registry follows -- an age is always "how
+  // long ago, right now" -- and it has to be applied here rather than by the
+  // caller, because the caller has no way to know when the batch arrived.
+  const double since = now_mono - current_mono_;
+  std::vector<DeviceSnapshot> out = current_;
+  for (DeviceSnapshot& d : out) d.age += since;
+  return out;
 }
 
 }  // namespace octo

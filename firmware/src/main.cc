@@ -366,9 +366,13 @@ int main() {
   loop->every(5.0, [&registry, &scanner, lp, &clock]() {
     if (!scanner) return;
     const octo::Snapshot snap = registry.snapshot(lp->now(), clock.wall());
+    // Heard lately, not heard right now. A box at the edge of range is stale
+    // between advertisements and was therefore almost never live at the
+    // moment this ran, so it never got asked its name -- see src/naming.h.
     int unnamed = 0;
     for (const octo::DeviceSnapshot& d : snap.device) {
-      if (d.live && octo::is_placeholder_name(d.name)) ++unnamed;
+      if (!octo::is_placeholder_name(d.name)) continue;
+      if (d.heard_this_run && d.age <= octo::kNameWithin) ++unnamed;
     }
     static bool active = false;
     static double changed_at = 0.0;

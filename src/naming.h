@@ -124,17 +124,42 @@ class NameBook {
 // a room that has not asked to hear from it. So it is switched on when there
 // is something to learn and off again once there is not, rather than left on.
 //
-// `unnamed_live` is how many devices we are currently hearing and cannot name.
+// `unnamed_recent` is how many devices we have heard lately and cannot name --
+// **lately**, not *this instant*, and the difference is the whole of a bug that
+// made some boxes impossible to name rather than slow to name.
+//
+// The rule used to count only devices that were live. A box at the edge of
+// range is heard every minute or two and is stale in between, so it was
+// almost never live at the moment the decision was made; the count came out
+// zero, the radio stayed passive, and the box kept its hardware address
+// forever. The boxes near enough to be continuously live were exactly the
+// boxes that already had names. See kNameWithin.
+//
 // `since_change` is how long the current setting has been in force; a radio
 // that flipped on every advertisement would spend its time restarting scans
 // rather than doing either.
-bool want_active_scan(bool active_now, int unnamed_live, double since_change);
+bool want_active_scan(bool active_now, int unnamed_recent, double since_change);
 
 // How long a scan setting is left alone before it may change again. Long
 // enough that a box appearing and disappearing at the edge of range does not
 // restart the radio every second; short enough that a new box is named while
 // somebody is still looking at the screen.
 inline constexpr double kScanSettleSeconds = 20.0;
+
+// How recently a device must have been heard for its missing name to be worth
+// putting the radio on the air for.
+//
+// Long enough to cover a distant box's advertising gap several times over --
+// a Tentacle at -84 dBm can genuinely go minutes between packets, and the
+// point of this rule is to still be scanning actively when its next one
+// arrives. Short enough that a box carried out of the building stops costing
+// airtime within a setup break rather than for the rest of the day.
+//
+// It terminates because everything in a sync daemon's roster is a Tentacle --
+// nothing else gets that far -- and a Tentacle always answers a scan request
+// with its name. So the radio goes quiet once it has asked everything present,
+// rather than staying active forever on a device that will never answer.
+inline constexpr double kNameWithin = 300.0;
 
 // The stand-ins a snapshot uses when a device has not said what it is called.
 // Not names, and storing one as though it were would put "(unnamed)" on a row

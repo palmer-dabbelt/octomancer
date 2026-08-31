@@ -13,8 +13,9 @@ const char* name_source_name(NameSource source) {
   return "none";
 }
 
-bool want_active_scan(bool active_now, int unnamed_live, double since_change) {
-  const bool want = unnamed_live > 0;
+bool want_active_scan(bool active_now, int unnamed_recent,
+                      double since_change) {
+  const bool want = unnamed_recent > 0;
   if (want == active_now) return active_now;
   // Hysteresis in time rather than in count, because the thing being damped is
   // the cost of restarting the scan, and that cost is per restart however many

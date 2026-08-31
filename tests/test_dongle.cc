@@ -91,6 +91,28 @@ void test_a_finished_answer_becomes_rows() {
   CHECK_NEAR(c->age, 99.4, 1e-6);
 }
 
+// A batch arrives every kPollEvery seconds and the ages in it are true at the
+// instant the dongle built it. Handed back unchanged, every dongle row's age
+// advances in five-second steps and sits up to five seconds short in between --
+// which is what a person watching the table sees, and what they reported.
+//
+// The caller cannot fix this: it has no way to know when the batch arrived.
+void test_ages_advance_between_answers() {
+  DongleView v;
+  v.opened(1000.0);
+  answer(&v, {kBoxA, kBoxC}, 1001.0);
+
+  // Two seconds after the batch, everything in it is two seconds older.
+  const std::vector<DeviceSnapshot> later = v.devices(1003.0);
+  CHECK_NEAR(find(later, "C4:1E:AE:18:A7:01")->age, 2.4, 1e-6);
+  CHECK_NEAR(find(later, "C4:1E:AE:18:A7:03")->age, 101.4, 1e-6);
+
+  // And a fresh batch resets them to what the dongle actually measured,
+  // rather than to what we had extrapolated.
+  answer(&v, {kBoxA}, 1006.0);
+  CHECK_NEAR(find(v.devices(1006.0), "C4:1E:AE:18:A7:01")->age, 0.4, 1e-6);
+}
+
 // A `dev` list is a complete statement about the room, so showing it partway
 // through would report every box not yet mentioned as having gone away -- a
 // bench that flickered down to one box and back on every poll.
@@ -469,6 +491,7 @@ void test_link_way_names() {
 int main() {
   test_nothing_is_reported_before_the_dongle_is_attached();
   test_a_finished_answer_becomes_rows();
+  test_ages_advance_between_answers();
   test_a_half_arrived_answer_is_not_shown();
   test_an_empty_answer_clears_the_room();
   test_an_answer_that_goes_stale_is_dropped_not_aged();

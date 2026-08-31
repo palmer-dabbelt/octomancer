@@ -1319,6 +1319,44 @@ void test_the_table_says_which_radio_heard_each_row() {
   CHECK(contains(out, "dongle"));
 }
 
+// Grey means one thing on this page -- "not being heard" -- and the VIA cell
+// was drawn grey on every row regardless, because a radio's name looked like
+// context rather than a reading. It is not context: it sits between a bright
+// name and a bright age on a row that is being heard right now, and a greyed
+// cell there says the radio has gone quiet while the box it heard has not.
+void test_the_via_column_is_only_dim_when_the_row_is() {
+  CamConf conf = plain_conf();
+  Snapshot snap;
+  snap.device.push_back(box("A", "Tentacle_A", true, 0.000));
+  DeviceSnapshot gone = box("B", "Tentacle_B", false, 0.010);
+  gone.age = 3600.0;
+  snap.device.push_back(gone);
+  // A second radio is the only thing that makes the column exist at all.
+  snap.device.push_back(
+      heard_by("dongle", box("C", "Tentacle_C", true, 0.004), 39600.0));
+  const std::string out =
+      octo::render_devices(view_of(snap, &conf), false, true);
+  CHECK(contains(strip_escapes(out), "VIA"));
+
+  // DEVICE, VIA, AGE, OFFSET, RSSI.
+  const std::vector<std::string> heard = columns_of(row_for(out, "Tentacle_A"));
+  const std::vector<std::string> quiet = columns_of(row_for(out, "Tentacle_B"));
+  const std::vector<std::string> theirs = columns_of(row_for(out, "Tentacle_C"));
+  CHECK(heard.size() >= 5);
+  CHECK(quiet.size() >= 5);
+  CHECK(theirs.size() >= 5);
+  if (heard.size() < 5 || quiet.size() < 5 || theirs.size() < 5) return;
+
+  // Checked against the age beside it rather than on its own, because the
+  // rule is that the cell agrees with its row -- not that it is never dim.
+  CHECK(!dimmed(heard[1]));
+  CHECK(!dimmed(heard[2]));
+  CHECK(!dimmed(theirs[1]));
+  CHECK(!dimmed(theirs[2]));
+  CHECK(dimmed(quiet[1]));
+  CHECK(dimmed(quiet[2]));
+}
+
 // A box the dongle has never been told the name of is listed by its hardware
 // address, and every box from one manufacturer shares the first three bytes.
 // Cutting the column from the right would render four different boxes as four
@@ -1715,6 +1753,7 @@ int main() {
   test_a_radio_with_no_bench_of_its_own_quotes_no_offsets();
   test_the_table_is_unchanged_without_a_second_radio();
   test_the_table_says_which_radio_heard_each_row();
+  test_the_via_column_is_only_dim_when_the_row_is();
   test_unnamed_boxes_keep_the_end_of_their_address();
   test_a_radio_that_has_heard_nothing_still_says_it_is_there();
   test_a_radio_with_no_clock_quotes_no_absolute_time();

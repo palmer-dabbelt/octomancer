@@ -607,6 +607,16 @@ refreshed and every row on it is older than it looks. It replaces a line that
 used to say octomancerd was running, which said less -- a daemon can be running
 and still have stopped saying anything new.
 
+**Grey means one thing, so the `VIA` cell has to obey it.** Dim on this page is
+not decoration -- it says a row is a memory rather than a reading, and it is
+applied to a whole row at once so that half a line does not read as current
+while the other half does. The `VIA` column was exempt from that, drawn dim on
+every row, on the reasoning that the name of the radio is context rather than a
+measurement. It is not context: it sits between a bright name and a bright age
+on a box being heard right now, and a greyed cell in that position says the
+radio has gone quiet while the box it heard has not -- a state that does not
+exist. It follows its row like everything else.
+
 The one-shot `octomancer status` shows the section only when there is more than
 one radio, or on `--verbose`. A three-line block listing a single radio is the
 kind of preamble that stops a status page being read. The TUI shows it always:

@@ -925,7 +925,14 @@ std::string render_devices(const DeviceView& v, bool verbose, bool color,
       // Every row says which radio heard it, our own included. The column
       // only exists when there is more than one radio, and in that situation a
       // blank cell is the one thing on the page a reader has to infer.
-      out += fmt("%s %-14.14s%s", st.dim,
+      //
+      // It follows the row like every other column. This used to be dim
+      // always, on the reasoning that the radio's name is context rather than
+      // a measurement -- but dim already means something on this page, and
+      // what it means is "not being heard". A greyed-out radio name beside a
+      // bright age says the box is live and the radio that heard it is not,
+      // which is not a state that exists.
+      out += fmt("%s %-14.14s%s", live,
                  r.radio.empty() ? local_name.c_str() : r.radio.c_str(),
                  st.off);
     }

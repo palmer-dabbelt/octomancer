@@ -47,6 +47,7 @@ libocto_a_SOURCES = \
 	src/boxcdc.cc \
 	src/boxsock.cc \
 	src/boxcdc.h \
+	src/boxlink.h \
 	src/boxsock.h \
 	src/camasync.h \
 	src/camconf.cc \
@@ -151,7 +152,8 @@ if DARWIN
 bin_PROGRAMS += octomancerd octomancerctl octomancer-sync octomancer-report \
 	octomancer
 
-octomancerd_SOURCES = src/octomancerd.cc src/scanner_mac.mm src/scanner.h
+octomancerd_SOURCES = src/octomancerd.cc src/scanner_mac.mm src/scanner.h \
+	src/boxble_mac.mm src/boxble.h
 octomancerd_LDADD = libocto.a
 # The embedded Info.plist is what gives a plain executable an identity for the
 # Bluetooth permission prompt. Without it macOS has no name to show the user

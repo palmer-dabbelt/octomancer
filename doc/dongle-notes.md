@@ -837,3 +837,77 @@ could hear, and only then were the two sets compared like for like.
 
 Not shown, and not claimed: that the dongle would agree about FS7 if it could
 hear it. It cannot, from a USB port on this desk.
+
+
+## The afternoon the cable stopped being necessary
+
+2026-08-31. `octomancerd` now reaches a dongle over Bluetooth as well as over
+USB, which is the last piece of "put it in a phone charger and it works".
+
+Three states, all watched on the bench:
+
+```
+--peer-bluetooth auto,  cable present
+    a sync daemon answered on /dev/cu.usbmodem212401
+    now talking to the dongle over usb
+                                    ... and the radio is never touched
+
+--peer-bluetooth both,  cable present
+    a sync daemon answered on /dev/cu.usbmodem212401
+    now talking to the dongle over usb
+    a sync daemon answered over Bluetooth on octomancer (bluetooth)
+                                    ... both up, and the cable keeps the job
+
+no cable available
+    a sync daemon answered over Bluetooth on octomancer (bluetooth)
+    now talking to the dongle over bluetooth
+                                    ... remote_devices=3, with real medians
+```
+
+The third is the one that matters: three timecode boxes, measured by a dongle,
+delivered to a control daemon on a Mac entirely over the air. The whole chain
+-- CoreBluetooth central, Nordic UART Service, the box protocol, the firmware's
+sync daemon, and back through notifications into a snapshot -- with no cable in
+it anywhere.
+
+### Give the cable first refusal
+
+The first version of `auto` connected over the air on every single start and
+dropped it a second later. Not a bug in the rule, which is right: at the
+instant the daemon starts, the port has not been opened and no greeting has
+arrived, so "there is no cable" is what the evidence says. It is just evidence
+that is about to change.
+
+So the radio waits out one greeting window plus one port-retry before
+concluding there is no cable. It costs a few seconds before a genuinely
+cable-less dongle is found, and it saves a connection made and thrown away
+every time the daemon restarts -- which, for an agent that launchd restarts on
+login, is every day.
+
+### Exactly one link carries, and handing over forgets
+
+Both links can be up; only one talks to the roster. Two feeding one view would
+deliver every device list twice, and since a list replaces the last one
+wholesale that is not a doubled bench, it is a bench alternating between two
+answers on no schedule anybody chose.
+
+The subtle part is the handover. When the carrier changes, the view is closed
+and reopened rather than simply re-pointed, because a batch half-arrived over
+one link would otherwise be completed by the other link's `end` -- producing a
+room that never existed, assembled from two different moments. The greeting is
+replayed into the new view so the rows keep their name.
+
+### What is pinned to hardware, and what is not
+
+| Claim | How it was checked |
+| --- | --- |
+| A Mac can reach a dongle over BLE | `remote_devices=3`, real medians, no cable in use |
+| USB wins when both are up | both greeted; the carrier stayed `usb` |
+| `auto` declines the radio when a cable works | "the cable is enough; letting the radio link go" |
+| `auto` costs no wasted connection | with first refusal, the radio is never opened |
+| The debug mode does what it is for | both links up at once, on one bench, cable carrying |
+
+**Not checked: failing over from USB to Bluetooth mid-run.** Provoking it means
+pulling the cable, and the handover is exactly the code that would then run.
+Bluetooth-only works and both-at-once works; the transition between them is
+written and unobserved. See `doc/KNOWN_ISSUES.md`.

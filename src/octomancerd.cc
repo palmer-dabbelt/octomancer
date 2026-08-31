@@ -25,6 +25,7 @@
 #include <cstdlib>
 #include <string>
 
+#include "boxble.h"
 #include "boxcdc.h"
 #include "client.h"
 #include "dongle.h"
@@ -80,6 +81,8 @@ struct Options {
   // thing on screen it must not be confused with.
   std::string peer_port;
   bool use_peer = true;
+  // Whether to reach a dongle over the air; see BleUse in src/dongle.h.
+  octo::BleUse ble_use = octo::BleUse::kAuto;
   bool foreground = false;
   bool quiet = false;
   octo::Rotation rotation;
@@ -114,6 +117,14 @@ void usage(FILE* out) {
       "                        because nothing can prove two rows are the\n"
       "                        same box.\n"
       "  --no-peer             do not go looking for one\n"
+      "  --peer-bluetooth W    off, auto or both (default auto). `auto`\n"
+      "                        reaches a dongle over the air only when\n"
+      "                        there is no cable to it -- holding a\n"
+      "                        connection costs this Mac scan time, which\n"
+      "                        is the thing it is here to spend. `both`\n"
+      "                        brings the radio link up beside the cable\n"
+      "                        so it can be tested without unplugging the\n"
+      "                        only way of seeing what the box is doing.\n"
       "\n"
       "  --alert-threshold SEC a box this far from this Mac needs re-jamming\n"
       "                        (default 60)\n"
@@ -153,7 +164,7 @@ bool parse_args(int argc, char** argv, Options* opt) {
     kThreshold, kClear, kConfirm, kRenotify, kNotify,
     kWindow, kStale, kDriftSpan, kCameraGone,
     kRadio, kDongle, kHciTrace, kVersion, kHelp,
-    kDevices, kPeer, kNoPeer,
+    kDevices, kPeer, kNoPeer, kPeerBluetooth,
   };
   static const struct option longs[] = {
       {"socket", required_argument, nullptr, kSocket},
@@ -180,6 +191,7 @@ bool parse_args(int argc, char** argv, Options* opt) {
       {"dongle", required_argument, nullptr, kDongle},
       {"peer", required_argument, nullptr, kPeer},
       {"no-peer", no_argument, nullptr, kNoPeer},
+      {"peer-bluetooth", required_argument, nullptr, kPeerBluetooth},
       {"hci-trace", no_argument, nullptr, kHciTrace},
       {"version", no_argument, nullptr, kVersion},
       {"help", no_argument, nullptr, kHelp},
@@ -208,6 +220,14 @@ bool parse_args(int argc, char** argv, Options* opt) {
       case kDevices: opt->devices_path = optarg; break;
       case kPeer: opt->peer_port = optarg; opt->use_peer = true; break;
       case kNoPeer: opt->use_peer = false; break;
+      case kPeerBluetooth:
+        if (!octo::parse_ble_use(optarg, &opt->ble_use)) {
+          std::fprintf(stderr,
+                       "octomancerd: --peer-bluetooth wants off,"
+                       " auto or both, not '%s'\n", optarg);
+          return false;
+        }
+        break;
       case kWindow: opt->policy.window = std::atof(optarg); break;
       case kStale: opt->policy.stale_after = std::atof(optarg); break;
       case kDriftSpan: opt->policy.min_drift_span = std::atof(optarg); break;
@@ -348,41 +368,97 @@ class BoxPeer {
   // How long a port that did not greet us is left alone.
   static constexpr double kShyFor = 300.0;
 
-  BoxPeer(std::string named, bool quiet)
-      : named_(std::move(named)), quiet_(quiet), loop_(octo::make_loop()) {}
+  // How often to try the radio again after it has given up. Longer than the
+  // cable's retry: a failed connection over the air costs airtime in a room
+  // this daemon is trying to listen to, and a dongle that is not there will
+  // not be there a second later either.
+  static constexpr double kBleRetryEvery = 30.0;
+
+  BoxPeer(std::string named, octo::BleUse ble, bool quiet)
+      : named_(std::move(named)),
+        ble_use_(ble),
+        quiet_(quiet),
+        loop_(octo::make_loop()),
+        born_(octo::mono_now()) {}
 
   // Everything that has to happen on a tick: service the link, give up on a
   // port that never spoke, ask for devices when one is due, and go looking
   // when there is nothing attached.
   void pump(double now) {
     if (loop_) loop_->tick(0.0);
+    // CoreBluetooth delivers on a queue of its own; this is where what it left
+    // becomes this thread's work. Before anything reads the link's state, so
+    // that a disconnection noticed here is acted on in the same tick.
+    if (air_) air_->pump();
 
     // The link reported itself closed from inside its own callback, where it
     // could not be destroyed. This is the first safe moment.
     if (gone_) drop(now);
+    if (air_ && !air_->is_open()) {
+      say("the radio link to %s closed", air_name_.c_str());
+      air_.reset();
+      air_greeted_ = false;
+      next_air_try_ = now + kBleRetryEvery;
+    }
 
-    if (link_ && !view_.greeted() && now - opened_at_ > kGreetWithin) {
+    tend_radio(now);
+
+    if (link_ && !usb_greeted_ && now - opened_at_ > kGreetWithin) {
       say("%s did not answer the box protocol -- not a sync daemon, leaving"
           " it alone", port_name_.c_str());
       shy_[port_name_] = now;
       drop(now);
     }
 
-    if (link_) {
-      octo::Message ask;
-      if (view_.wants_poll(now, &ask)) {
-        link_->send(ask);
-        // A failed write closes the link rather than returning, so asking
-        // whether it is still open is how "did that go out" is spelled here.
-        if (link_->is_open()) view_.polled(now);
+    // Exactly one link carries the conversation, even when both are up. Two
+    // feeding one view would deliver every device list twice, and since a list
+    // replaces the last one wholesale, that is not a doubled bench -- it is a
+    // bench alternating between two radios' answers on no schedule anybody
+    // chose. src/dongle.h's carrier() is the rule; this is where it lands.
+    const octo::LinkWay was = carrying_;
+    carrying_ = octo::carrier(link_ != nullptr && usb_greeted_,
+                              air_ != nullptr && air_->ready() && air_greeted_);
+    if (carrying_ != was) {
+      // The view belongs to whichever link is speaking. Handing it over means
+      // forgetting what the other one said: the two radios are the same radio
+      // -- it is one dongle -- but a half-arrived batch from the old link
+      // would be completed by the new one's `end` and produce a room that
+      // never existed.
+      view_.closed(now);
+      if (carrying_ != octo::LinkWay::kNone) {
+        view_.opened(now);
+        view_.observe(greeting_, now);
       }
-      return;
+      say("now talking to the dongle over %s", octo::link_way_name(carrying_));
     }
 
+    octo::BoxTransport* voice = carrying_ == octo::LinkWay::kUsb
+                                    ? link_.get()
+                                    : carrying_ == octo::LinkWay::kBluetooth
+                                          ? air_.get()
+                                          : nullptr;
+    if (voice != nullptr) {
+      octo::Message ask;
+      if (view_.wants_poll(now, &ask)) {
+        voice->send(ask);
+        // A failed write closes the link rather than returning, so asking
+        // whether it is still open is how "did that go out" is spelled here.
+        if (voice->is_open()) view_.polled(now);
+      }
+    }
+
+    if (link_ != nullptr) return;
     if (now < next_try_) return;
     next_try_ = now + kRetryEvery;
     attach(now);
   }
+
+  // Whether the radio link is up, for the status line. Reported separately
+  // from which link is carrying, because "connected but not in charge" is the
+  // whole point of the debug mode and has to be visible as itself.
+  bool radio_attached() const { return air_ && air_->ready() && air_greeted_; }
+  octo::LinkWay carrying() const { return carrying_; }
+  const std::string& radio_name() const { return air_name_; }
 
   const octo::DongleView& view() const { return view_; }
 
@@ -414,13 +490,20 @@ class BoxPeer {
       link_ = octo::BoxLink::attach(loop_.get(), std::move(port));
       if (link_ == nullptr) continue;
       opened_at_ = now;
-      view_.opened(now);
+      usb_greeted_ = false;
       link_->on_message([this](const octo::Message& msg) {
-        const bool was = view_.greeted();
-        view_.observe(msg, octo::mono_now());
-        if (!was && view_.greeted()) {
-          say("a sync daemon answered on %s -- listing its boxes as \"%s\"",
-              port_name_.c_str(), view_.radio().c_str());
+        if (msg.verb == "hello") {
+          greeting_ = msg;
+          if (!usb_greeted_) {
+            usb_greeted_ = true;
+            say("a sync daemon answered on %s", port_name_.c_str());
+          }
+        }
+        // Only the carrier's messages reach the view; see pump().
+        if (carrying_ == octo::LinkWay::kUsb) {
+          view_.observe(msg, octo::mono_now());
+        } else {
+          ++usb_heard_;
         }
       });
       link_->on_closed([this](const std::string& why) {
@@ -434,15 +517,99 @@ class BoxPeer {
     }
   }
 
+  // Bring the radio link up, or leave it alone, per src/dongle.h's rule.
+  //
+  // The cost of getting this wrong is not a crash, it is a daemon that quietly
+  // spends the radio it is supposed to be listening with. So the rule is in a
+  // tested function and this only obeys it.
+  void tend_radio(double now) {
+    if (ble_use_ == octo::BleUse::kOff) return;
+
+    // Give the cable first refusal.
+    //
+    // At the instant this daemon starts, nothing knows whether there is a
+    // dongle in a USB port: the port has not been opened and no greeting has
+    // arrived. So `auto` would reason "no cable, bring up the radio", connect
+    // over the air, and drop it a second later when the cable introduced
+    // itself -- a connection made and thrown away on every single start, and
+    // airtime spent to learn something the next tick was going to say anyway.
+    if (!settled_) {
+      if (usb_greeted_) {
+        settled_ = true;              // the cable answered; no need to wait
+      } else if (now - born_ < kGreetWithin + kRetryEvery) {
+        return;                       // still time for it to
+      } else {
+        settled_ = true;              // long enough; there is no cable
+      }
+    }
+
+    const bool usb_ready = link_ != nullptr && usb_greeted_;
+    const bool want = octo::want_bluetooth(
+        usb_ready, ble_use_ == octo::BleUse::kBoth);
+
+    if (!want) {
+      if (air_) {
+        say("the cable is enough; letting the radio link go");
+        air_->close("usb is carrying");
+        air_.reset();
+        air_greeted_ = false;
+      }
+      return;
+    }
+
+    if (air_ || now < next_air_try_) return;
+    next_air_try_ = now + kBleRetryEvery;
+
+    std::string err;
+    air_ = octo::open_box_ble(named_.empty() ? std::string() : std::string(),
+                              &err);
+    if (!air_) {
+      // Only worth saying once: a host with no radio will have no radio next
+      // time either, and a daemon that repeats itself every thirty seconds is
+      // a log nobody reads.
+      if (!ble_complained_) {
+        ble_complained_ = true;
+        say("cannot look for a dongle over the air: %s", err.c_str());
+      }
+      return;
+    }
+    air_greeted_ = false;
+    air_name_ = "a dongle";
+    air_->on_message([this](const octo::Message& msg) {
+      if (msg.verb == "hello") {
+        air_greeted_ = true;
+        greeting_ = msg;
+        air_name_ = air_ ? air_->name() : std::string("a dongle");
+        say("a sync daemon answered over Bluetooth on %s", air_name_.c_str());
+      }
+      // Only the carrier's messages reach the view. The other link stays up in
+      // debug mode and is heard and discarded, which is what makes it possible
+      // to exercise the radio while the cable is still doing the work.
+      if (carrying_ == octo::LinkWay::kBluetooth) {
+        view_.observe(msg, octo::mono_now());
+      } else {
+        ++air_heard_;
+      }
+    });
+    air_->on_closed([this](const std::string& why) {
+      say("the radio link ended: %s", why.c_str());
+    });
+  }
+
   void drop(double now) {
     if (link_) link_->close("octomancerd let go");
     link_.reset();
-    view_.closed(now);
+    usb_greeted_ = false;
+    // Only if the cable was the one talking. Tearing down the view because a
+    // cable was unplugged, while the radio link is carrying, would blank a
+    // bench that is still being measured.
+    if (carrying_ == octo::LinkWay::kUsb) view_.closed(now);
     gone_ = false;
     port_name_.clear();
   }
 
   std::string named_;
+  octo::BleUse ble_use_ = octo::BleUse::kAuto;
   bool quiet_;
   std::unique_ptr<octo::Loop> loop_;
   std::unique_ptr<octo::BoxLink> link_;
@@ -450,8 +617,29 @@ class BoxPeer {
   std::map<std::string, double> shy_;
   std::string port_name_;
   double opened_at_ = 0.0;
+  bool usb_greeted_ = false;
+  uint64_t usb_heard_ = 0;
   double next_try_ = 0.0;
   bool gone_ = false;
+
+  // The radio half.
+  std::unique_ptr<octo::BoxTransport> air_;
+  std::string air_name_;
+  bool air_greeted_ = false;
+  bool ble_complained_ = false;
+  double next_air_try_ = 0.0;
+  // When this object was made, and whether the cable has been given its
+  // chance yet. See tend_radio.
+  double born_ = 0.0;
+  bool settled_ = false;
+  // Messages heard over the radio while the cable was in charge. The debug
+  // mode's whole output: a number that goes up is a link that works.
+  uint64_t air_heard_ = 0;
+
+  octo::LinkWay carrying_ = octo::LinkWay::kNone;
+  // The greeting, kept so that a handover can tell the view what it is talking
+  // to without waiting for the box to introduce itself again.
+  octo::Message greeting_;
 };
 
 void log_snapshot(octo::JsonLog* log, const octo::Snapshot& s) {
@@ -690,7 +878,9 @@ int main(int argc, char** argv) {
   // call a box and nothing in a Tentacle advertisement would settle it. See
   // src/dongle.h.
   std::unique_ptr<BoxPeer> box;
-  if (opt.use_peer) box.reset(new BoxPeer(opt.peer_port, opt.quiet));
+  if (opt.use_peer) {
+    box.reset(new BoxPeer(opt.peer_port, opt.ble_use, opt.quiet));
+  }
 
   auto assemble = [&registry, &box]() {
     octo::Snapshot snap = registry.snapshot();

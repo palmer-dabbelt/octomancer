@@ -12,6 +12,31 @@ const char* link_way_name(LinkWay way) {
   return "none";
 }
 
+bool parse_ble_use(const std::string& text, BleUse* out) {
+  if (text == "off" || text == "no" || text == "never") {
+    if (out != nullptr) *out = BleUse::kOff;
+    return true;
+  }
+  if (text == "auto") {
+    if (out != nullptr) *out = BleUse::kAuto;
+    return true;
+  }
+  if (text == "both" || text == "debug") {
+    if (out != nullptr) *out = BleUse::kBoth;
+    return true;
+  }
+  return false;
+}
+
+const char* ble_use_name(BleUse use) {
+  switch (use) {
+    case BleUse::kOff: return "off";
+    case BleUse::kAuto: return "auto";
+    case BleUse::kBoth: return "both";
+  }
+  return "auto";
+}
+
 bool want_bluetooth(bool usb_ready, bool debug_both) {
   return debug_both || !usb_ready;
 }

@@ -27,6 +27,7 @@
 #include <memory>
 #include <string>
 
+#include "boxlink.h"
 #include "boxmsg.h"
 #include "hciport.h"
 #include "loop.h"
@@ -34,12 +35,8 @@
 
 namespace octo {
 
-class BoxLink : public MsgPeer {
+class BoxLink : public BoxTransport {
  public:
-  using LineHandler = std::function<void(const std::string& line)>;
-  using MessageHandler = std::function<void(const Message& msg)>;
-  // Why the link ended, in a form fit to show a person. Called at most once.
-  using ClosedHandler = std::function<void(const std::string& why)>;
 
   // Takes the port. Reading starts immediately: a box announces without being
   // asked -- that is the whole difference between this protocol and
@@ -54,24 +51,24 @@ class BoxLink : public MsgPeer {
 
   // MsgPeer. Adds the terminator, because framing is this file's job.
   void send(const std::string& line) override;
-  void send(const Message& msg);
+  void send(const Message& msg) override;
 
-  void on_line(LineHandler handler);
-  void on_message(MessageHandler handler);
-  void on_closed(ClosedHandler handler);
+  void on_line(LineHandler handler) override;
+  void on_message(MessageHandler handler) override;
+  void on_closed(ClosedHandler handler) override;
 
-  void close(const std::string& why);
-  bool is_open() const;
-  std::string name() const;
+  void close(const std::string& why) override;
+  bool is_open() const override;
+  std::string name() const override;
 
   // A line longer than the reader will hold, which is a box that has gone
   // wrong or a wire that has. Counted rather than reported per occurrence: it
   // arrives in floods when it arrives at all.
-  uint64_t long_lines() const { return long_lines_; }
+  uint64_t long_lines() const override { return long_lines_; }
   // Lines that arrived and did not decode. Distinct from long_lines: this is
   // a well-formed line that is not a well-formed message, which is a version
   // skew or a corrupted byte rather than a framing failure.
-  uint64_t bad_lines() const { return bad_lines_; }
+  uint64_t bad_lines() const override { return bad_lines_; }
 
  private:
   BoxLink() = default;

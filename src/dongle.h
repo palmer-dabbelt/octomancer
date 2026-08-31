@@ -43,6 +43,29 @@ namespace octo {
 // only which pipe the lines arrive through.
 enum class LinkWay { kNone, kUsb, kBluetooth };
 
+// Whether to look for a dongle over the air at all.
+//
+// `kAuto` is the ordinary setting: scan when there is no cable, stop when
+// there is. Scanning is nearly free in a process that is already scanning --
+// the radio is in receive either way, and a service filter only decides which
+// advertisements are delivered -- but *holding a connection* is not, because
+// a controller interleaving connection events hears fewer advertisements. So
+// the connection is what `auto` withholds while a cable is doing the job.
+//
+// `kBoth` is the debug setting the whole radio path needed. The obvious way to
+// test it -- unplug the cable -- tests it with no way left to see what the box
+// thinks is happening, which is how the last two firmware faults each stayed
+// invisible for a day. With `both`, the radio link comes up beside the cable
+// and is exercised while the cable is still carrying, so a failure is visible
+// on the wire that is not failing.
+enum class BleUse { kOff, kAuto, kBoth };
+
+// Parse the `--peer-bluetooth` argument. False for anything unrecognised,
+// rather than falling back to a default: a misspelling that silently means
+// "off" is a debug session spent testing nothing.
+bool parse_ble_use(const std::string& text, BleUse* out);
+const char* ble_use_name(BleUse use);
+
 const char* link_way_name(LinkWay way);
 
 // Whether to have a Bluetooth link at all, given whether USB is working.

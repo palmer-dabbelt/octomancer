@@ -196,23 +196,20 @@ uses, so a failure has somewhere to arrive.
 
 ## The dongle backend
 
-### The host cannot yet reach a dongle over Bluetooth
+### The radio link has not been left running for long
 
-The box protocol runs over a GATT characteristic on the dongle as of
-2026-08-30 -- `firmware/src/blepeer.h`, verified on hardware only as far as
-"the advertisement is on the air and macOS can see it at -40 dBm". Nothing on
-the host connects to it. `octomancerd` reaches a dongle over USB CDC and
-nothing else.
+`octomancerd` reaches a dongle over Bluetooth as of 2026-08-31, and it has
+been watched for about a minute at a time. What is not known is how it behaves
+over hours: whether CoreBluetooth drops the connection when the Mac sleeps and
+whether it comes back, what a dongle rebooting under a connected central looks
+like from this end, and whether the thirty-second retry is the right number
+when a dongle is genuinely absent rather than merely quiet.
 
-So the arrangement the whole design is aimed at -- a dongle in a phone charger
-across the room, doing its job with no cable -- is half built. The box end is
-there; the Mac end is not. The decision logic for when to use which link is
-written and tested (`want_bluetooth()` and `carrier()` in `src/dongle.h`), and
-the transport under it is missing.
-
-The debug mode those functions describe is likewise decided and not yet wired
-to anything: there is no `octomancerd` flag that turns it on, because there is
-nothing for it to turn on yet.
+The failover in the other direction is also unproven. Bluetooth-only works and
+USB-wins-over-both works, both demonstrated; **USB failing over to Bluetooth
+mid-run has never been observed**, because provoking it means pulling the
+cable, and the handover code is what would run. It is written, and it is the
+one path in this arrangement that no evidence covers.
 
 ### A dongle's boxes have no names
 

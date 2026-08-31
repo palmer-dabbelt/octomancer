@@ -370,6 +370,27 @@ void test_debug_brings_bluetooth_up_alongside_usb() {
   CHECK(octo::carrier(true, true) == octo::LinkWay::kUsb);
 }
 
+// A misspelling that silently means "off" is a debug session spent testing
+// nothing, so anything unrecognised is refused rather than defaulted.
+void test_the_bluetooth_setting_refuses_what_it_does_not_know() {
+  octo::BleUse use = octo::BleUse::kAuto;
+  CHECK(octo::parse_ble_use("off", &use));
+  CHECK(use == octo::BleUse::kOff);
+  CHECK(octo::parse_ble_use("auto", &use));
+  CHECK(use == octo::BleUse::kAuto);
+  CHECK(octo::parse_ble_use("both", &use));
+  CHECK(use == octo::BleUse::kBoth);
+  // A synonym a person would reasonably type for the debug setting.
+  CHECK(octo::parse_ble_use("debug", &use));
+  CHECK(use == octo::BleUse::kBoth);
+
+  octo::BleUse untouched = octo::BleUse::kAuto;
+  CHECK(!octo::parse_ble_use("yes", &untouched));
+  CHECK(!octo::parse_ble_use("", &untouched));
+  CHECK(!octo::parse_ble_use("BOTH", &untouched));
+  CHECK(untouched == octo::BleUse::kAuto);
+}
+
 void test_link_way_names() {
   CHECK_STR(octo::link_way_name(octo::LinkWay::kUsb), "usb");
   CHECK_STR(octo::link_way_name(octo::LinkWay::kBluetooth), "bluetooth");
@@ -401,6 +422,7 @@ int main() {
   test_exactly_one_link_carries_the_conversation();
   test_bluetooth_comes_up_only_when_it_is_needed();
   test_debug_brings_bluetooth_up_alongside_usb();
+  test_the_bluetooth_setting_refuses_what_it_does_not_know();
   test_link_way_names();
   return octotest::report("test_dongle");
 }

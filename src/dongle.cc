@@ -11,6 +11,21 @@ DeviceSnapshot device_from_message(const Message& msg,
   d.radio = radio;
   d.id = msg.get("id");
   d.name = msg.get("name");
+  // "(unnamed)" is not a name. src/registry.cc substitutes it for an empty
+  // one when it builds a snapshot, so a box that has never told us what it is
+  // called arrives over the wire wearing that string -- and four such boxes
+  // arrive wearing the same one, which renders as four identical rows.
+  //
+  // Translated back here, at the boundary, which is where a protocol's
+  // stand-ins belong. The better fix is at the sending end, and it needs the
+  // box reflashed; this one works against the firmware already on it.
+  //
+  // A dongle scans passively (src/tentacle.h explains why: the timecode is in
+  // the advertisement, so nothing has to be asked for), and a Tentacle puts
+  // its name in the scan response rather than the advertisement. So the
+  // dongle genuinely does not know what these boxes are called, and the row
+  // falls back to the hardware address.
+  if (d.name == "(unnamed)") d.name.clear();
   int64_t n = 0;
   if (msg.get_int("rssi", &n)) d.rssi = static_cast<int>(n);
   bool live = false;
@@ -42,8 +57,6 @@ DeviceSnapshot device_from_message(const Message& msg,
     d.has_drift = true;
     d.drift_ppm = ppm;
   }
-  bool alerting = false;
-  if (msg.get_bool("alerting", &alerting)) d.alerting = alerting;
   return d;
 }
 
@@ -97,7 +110,21 @@ void DongleView::observe(const Message& msg, double now_mono) {
       in_batch_ = true;
       pending_.clear();
     }
-    pending_.push_back(device_from_message(msg, radio_));
+    DeviceSnapshot d = device_from_message(msg, radio_);
+    // Whether the box is *alarmed* about this device is only worth importing
+    // from a box that knows what time it is.
+    //
+    // An alert means "this device is more than a minute from the truth", and a
+    // dongle nobody has told the time measures everything against a clock that
+    // started at zero when it was plugged in -- so every box it hears is four
+    // hours out by its own reckoning, and every row arrives alarmed. Four red
+    // rows describing a bench that is in perfect agreement is worse than no
+    // colour at all: it is the alarm that teaches somebody to ignore alarms.
+    if (clock_real_) {
+      bool alerting = false;
+      if (msg.get_bool("alerting", &alerting)) d.alerting = alerting;
+    }
+    pending_.push_back(std::move(d));
     return;
   }
 

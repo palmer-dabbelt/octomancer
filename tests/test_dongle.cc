@@ -179,6 +179,38 @@ void test_a_box_with_no_clock_has_no_time() {
   CHECK_EQ(rows[0].samples, 0);
 }
 
+// "(unnamed)" is what src/registry.cc puts in a snapshot when a device has
+// never said what it is called, so it arrives over the wire as though it were
+// a name -- and four boxes that have never said arrive wearing the same one.
+void test_the_registrys_stand_in_for_a_name_is_not_a_name() {
+  DongleView v;
+  v.opened(1000.0);
+  answer(&v, {"dev id=C4:1E:AE:18:A7:01 name=(unnamed) rssi=-50 live=1"
+              " age=0.3 median=39599.5 samples=240"}, 1001.0);
+  CHECK_STR(v.devices(1001.0)[0].name, "");
+}
+
+// An alert means "this device is more than a minute from the truth", which is
+// not a sentence a box with no idea what time it is can say. A dongle that
+// has never been told measures everything against a clock that started at
+// zero when it was plugged in, so by its own reckoning every box in the room
+// is hours out -- and every row would arrive red.
+void test_alarms_from_a_free_running_box_are_not_imported() {
+  DongleView v;
+  v.opened(1000.0);
+  const char* alarmed = "dev id=C4:1E:AE:18:A7:01 rssi=-50 live=1 age=0.3"
+                        " median=-14499.85 samples=240 alerting=1";
+  answer(&v, {alarmed}, 1001.0);
+  CHECK(!v.clock_is_real());
+  CHECK(!v.devices(1001.0)[0].alerting);
+
+  // Told the time, the same line is believed: now it is a claim the box is in
+  // a position to make.
+  v.observe(msg_of("status phase=idle clock=real"), 1002.0);
+  answer(&v, {alarmed}, 1002.0);
+  CHECK(v.devices(1002.0)[0].alerting);
+}
+
 void test_a_named_box_names_its_own_radio() {
   DongleView v;
   v.opened(1000.0);
@@ -311,6 +343,8 @@ int main() {
   test_an_answer_that_goes_stale_is_dropped_not_aged();
   test_unplugging_forgets_everything();
   test_a_box_with_no_clock_has_no_time();
+  test_the_registrys_stand_in_for_a_name_is_not_a_name();
+  test_alarms_from_a_free_running_box_are_not_imported();
   test_a_named_box_names_its_own_radio();
   test_the_clock_is_free_until_the_box_says_otherwise();
   test_what_the_box_said_is_kept();

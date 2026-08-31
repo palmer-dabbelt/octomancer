@@ -70,15 +70,16 @@ struct Options {
   double log_interval = 60.0;
   double probe_seconds = 0.0;
   // A sync daemon of our own to listen to, over the box protocol. Empty with
-  // use_box set means "find one"; --no-box turns the whole thing off.
+  // use_peer set means "find one"; --no-peer turns the whole thing off.
   //
-  // Deliberately not spelled --dongle, which is taken and means something
-  // else: --radio dongle --dongle PORT drives a dongle's radio over HCI from
-  // *this* process, which is the transitional arrangement radio.h argues
-  // against. This is the other thing -- a box running its own sync daemon,
-  // which octomancerd listens to rather than reaches through.
-  std::string box_port;
-  bool use_box = true;
+  // Called a peer rather than a dongle because both better words are taken and
+  // mean other things. --dongle already names the serial port for --radio
+  // dongle, which drives a dongle's radio over HCI from *this* process -- the
+  // transitional arrangement src/radio.h argues against, and the opposite of
+  // this. And --box means a Tentacle in the octomancer CLI, which is the one
+  // thing on screen it must not be confused with.
+  std::string peer_port;
+  bool use_peer = true;
   bool foreground = false;
   bool quiet = false;
   octo::Rotation rotation;
@@ -105,14 +106,14 @@ void usage(FILE* out) {
       "  --probe SEC           listen for SEC seconds, print a report, exit\n"
       "  --foreground          stay attached; the launchd agent uses this\n"
       "  --quiet               no chatter on stderr\n"
-      "  --box PORT            listen to a sync daemon of our own on PORT,\n"
-      "                        over the box protocol. Without this a\n"
-      "                        plugged-in dongle is found automatically.\n"
-      "                        Its boxes are listed beside ours, tagged\n"
-      "                        with which radio heard them; they are never\n"
-      "                        merged, because nothing can prove two rows\n"
-      "                        are the same box.\n"
-      "  --no-box              do not go looking for one\n"
+      "  --peer PORT           listen to a sync daemon of our own on PORT --\n"
+      "                        a dongle running this firmware. Without it,\n"
+      "                        one plugged in is found automatically. Its\n"
+      "                        boxes are listed beside ours, tagged with\n"
+      "                        which radio heard them; they are never merged,\n"
+      "                        because nothing can prove two rows are the\n"
+      "                        same box.\n"
+      "  --no-peer             do not go looking for one\n"
       "\n"
       "  --alert-threshold SEC a box this far from this Mac needs re-jamming\n"
       "                        (default 60)\n"
@@ -152,7 +153,7 @@ bool parse_args(int argc, char** argv, Options* opt) {
     kThreshold, kClear, kConfirm, kRenotify, kNotify,
     kWindow, kStale, kDriftSpan, kCameraGone,
     kRadio, kDongle, kHciTrace, kVersion, kHelp,
-    kDevices, kBox, kNoBox,
+    kDevices, kPeer, kNoPeer,
   };
   static const struct option longs[] = {
       {"socket", required_argument, nullptr, kSocket},
@@ -177,8 +178,8 @@ bool parse_args(int argc, char** argv, Options* opt) {
       {"devices", required_argument, nullptr, kDevices},
       {"radio", required_argument, nullptr, kRadio},
       {"dongle", required_argument, nullptr, kDongle},
-      {"box", required_argument, nullptr, kBox},
-      {"no-box", no_argument, nullptr, kNoBox},
+      {"peer", required_argument, nullptr, kPeer},
+      {"no-peer", no_argument, nullptr, kNoPeer},
       {"hci-trace", no_argument, nullptr, kHciTrace},
       {"version", no_argument, nullptr, kVersion},
       {"help", no_argument, nullptr, kHelp},
@@ -205,8 +206,8 @@ bool parse_args(int argc, char** argv, Options* opt) {
       case kRenotify: opt->policy.renotify_after = std::atof(optarg); break;
       case kNotify: opt->notify_command = optarg; break;
       case kDevices: opt->devices_path = optarg; break;
-      case kBox: opt->box_port = optarg; opt->use_box = true; break;
-      case kNoBox: opt->use_box = false; break;
+      case kPeer: opt->peer_port = optarg; opt->use_peer = true; break;
+      case kNoPeer: opt->use_peer = false; break;
       case kWindow: opt->policy.window = std::atof(optarg); break;
       case kStale: opt->policy.stale_after = std::atof(optarg); break;
       case kDriftSpan: opt->policy.min_drift_span = std::atof(optarg); break;
@@ -689,7 +690,7 @@ int main(int argc, char** argv) {
   // call a box and nothing in a Tentacle advertisement would settle it. See
   // src/dongle.h.
   std::unique_ptr<BoxPeer> box;
-  if (opt.use_box) box.reset(new BoxPeer(opt.box_port, opt.quiet));
+  if (opt.use_peer) box.reset(new BoxPeer(opt.peer_port, opt.quiet));
 
   auto assemble = [&registry, &box]() {
     octo::Snapshot snap = registry.snapshot();

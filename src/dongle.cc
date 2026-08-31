@@ -113,6 +113,11 @@ void DongleView::opened(double now_mono) {
   asked_mono_ = now_mono;
   in_batch_ = false;
   pending_.clear();
+  // Whatever the last dongle said is not evidence about this one. closed()
+  // keeps it so the page does not blank when a cable comes out; this is the
+  // point at which keeping it would start mixing two rooms together.
+  current_.clear();
+  current_mono_ = 0.0;
 }
 
 void DongleView::closed(double now_mono) {
@@ -125,10 +130,21 @@ void DongleView::closed(double now_mono) {
   // set a camera and will never be told why.
   dated_ = DateStamp();
   in_batch_ = false;
+  // A half-arrived batch goes, because it was never a complete statement
+  // about the room and now never will be.
   pending_.clear();
-  current_.clear();
-  current_mono_ = 0.0;
   clock_real_ = false;
+  // The last complete answer stays. Pulling the cable used to empty the page
+  // of every box the dongle had heard, which is a worse lie than keeping them:
+  // it says the room changed when the only thing that changed is what we are
+  // plugged into. The rows go on ageing and go dim, exactly as a box this
+  // Mac's own radio has stopped hearing does -- "we are not hearing this" is
+  // a state the table already has, and it is the true one.
+  //
+  // They do not survive a *re*-attach; see opened(). That is where the danger
+  // is, because the thing plugged back in need not be the same dongle, and
+  // showing the last one's boxes under the new one's name would be a bench
+  // assembled from two different rooms.
 }
 
 void DongleView::observe(const Message& msg, double now_mono) {
@@ -230,9 +246,7 @@ void DongleView::polled(double now_mono) {
 }
 
 std::vector<DeviceSnapshot> DongleView::devices(double now_mono) const {
-  if (!attached_) return {};
   if (current_.empty() && current_mono_ == 0.0) return {};
-  if (now_mono - current_mono_ > kStaleAfter) return {};
 
   // Aged forward to *now*, not left at what the dongle said when the batch was
   // assembled. A batch arrives every kPollEvery seconds and the ages in it are
@@ -244,8 +258,24 @@ std::vector<DeviceSnapshot> DongleView::devices(double now_mono) const {
   // long ago, right now" -- and it has to be applied here rather than by the
   // caller, because the caller has no way to know when the batch arrived.
   const double since = now_mono - current_mono_;
+
+  // Once the dongle stops answering -- or is unplugged -- its rows stop being
+  // reports and become memories, and they are handed over saying so rather
+  // than withheld. This used to drop them, on the argument that ageing a row
+  // makes a claim about when the *box* was last heard while the thing that has
+  // actually gone quiet is the dongle. But that is the same claim the local
+  // radio's rows make and nobody objects to it there: an age has always meant
+  // "how long since we heard this", never "how long since it transmitted", and
+  // a box we cannot hear because the receiver left the building is still a box
+  // we cannot hear. Clearing `live` is what says so -- everything downstream
+  // already draws a row that is not live dim and refuses to quote an offset
+  // for it, which is the whole of what an unplugged dongle should look like.
+  const bool fresh = attached_ && since <= kStaleAfter;
   std::vector<DeviceSnapshot> out = current_;
-  for (DeviceSnapshot& d : out) d.age += since;
+  for (DeviceSnapshot& d : out) {
+    d.age += since;
+    if (!fresh) d.live = false;
+  }
   return out;
 }
 

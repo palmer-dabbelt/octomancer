@@ -177,9 +177,16 @@ class DongleView {
   // write that failed does not start a poll interval that never ends.
   void polled(double now_mono);
 
-  // The rows, ready to append to a snapshot. Empty when there is nothing
-  // current to say -- not attached, nothing heard yet, or the last complete
-  // answer is older than kStaleAfter.
+  // The rows, ready to append to a snapshot. Empty only when nothing has ever
+  // been heard through this dongle, or when a fresh attach has cleared what
+  // the last one said.
+  //
+  // A dongle that has stopped answering, or been unplugged, still hands over
+  // its last complete answer -- aged forward, and with `live` cleared on every
+  // row, which is how the rest of the program is told these are memories. It
+  // is the same thing the local radio does with a box that has gone quiet, and
+  // for the same reason: a page that empties when a cable comes out says the
+  // room changed, when what changed is what we are plugged into.
   std::vector<DeviceSnapshot> devices(double now_mono) const;
 
   const std::string& radio() const { return radio_; }

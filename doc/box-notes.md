@@ -607,6 +607,31 @@ refreshed and every row on it is older than it looks. It replaces a line that
 used to say octomancerd was running, which said less -- a daemon can be running
 and still have stopped saying anything new.
 
+**Unplugging the dongle does not empty the page.** It used to: `DongleView`
+dropped its last complete answer the moment the cable came out, or the moment
+that answer went stale, on the argument that ageing a row makes a claim about
+when the *box* was last heard while the thing that had actually gone quiet was
+the dongle. That argument does not survive contact with the rest of the table,
+because it is the same claim every local row makes and nobody objects to it
+there. An age has always meant "how long since we heard this", never "how long
+since it transmitted", and a box we cannot hear because the receiver left the
+building is still a box we cannot hear. So the rows stay, ageing, with `live`
+cleared -- which is the state the table already knows how to draw: dim across,
+no offset quoted. A page that empties when a cable comes out says the room
+changed, when the only thing that changed is what we are plugged into.
+
+They do not survive a *re*-attach, and that is where the rule belongs. The
+thing plugged back in need not be the same dongle, and showing the last one's
+boxes under the new one's name would be a bench assembled from two rooms. A
+half-arrived batch is dropped at disconnect too, for the older reason: an
+incomplete `dev` list would report every box it had not reached yet as gone.
+
+The radio's own age had to follow. It was published only while the link was
+answering, so the moment its rows became worth dating, the one line that could
+date them went blank -- a table of dim boxes above a radio admitting nothing.
+It now carries an age whenever there has ever been an answer. A radio that has
+never said a word still shows a dash, because there a zero would be a claim.
+
 **The `AGE` column never says "held".** It used to, for a camera on a held
 link, and in green: a link state sitting in the one place a reader goes to find
 out how long ago something was last heard from. It was not even the state it

@@ -1023,7 +1023,12 @@ int main(int argc, char** argv) {
       link.way = octo::link_way_name(box->carrying());
       link.answering = box->view().greeted() && box->view().ever_answered();
       link.age = box->view().answer_age(now);
-      link.last_wall = link.answering ? wall - link.age : 0.0;
+      // Stamped whenever there has ever been an answer, not only while one is
+      // still coming. A dongle that has stopped answering keeps its rows now
+      // (see DongleView::devices), so the radio it heard them through has to
+      // keep the one number that says how old they are -- otherwise the page
+      // shows a table of dim boxes above a radio line admitting nothing.
+      link.last_wall = box->view().ever_answered() ? wall - link.age : 0.0;
       link.clock_is_real = box->view().clock_is_real();
       snap.radio_link.push_back(link);
     }

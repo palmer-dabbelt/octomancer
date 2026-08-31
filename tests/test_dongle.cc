@@ -146,28 +146,38 @@ void test_an_empty_answer_clears_the_room() {
 }
 
 // A dongle that greets us and then stops finishing batches is not a dongle
-// that is telling us about an empty room. Its last answer is dropped rather
-// than aged, because ageing the rows would be a claim about when each *box*
-// was last heard, when what has actually gone quiet is the dongle.
-void test_an_answer_that_goes_stale_is_dropped_not_aged() {
+// that is telling us about an empty room. Its last answer is kept and marked
+// dead rather than dropped: a row that vanishes says the box has gone, and
+// what has actually gone quiet is the dongle.
+void test_an_answer_that_goes_stale_stops_being_live() {
   DongleView v;
   v.opened(1000.0);
   answer(&v, {kBoxA, kBoxB}, 1001.0);
 
-  CHECK_EQ(static_cast<int>(v.devices(1001.0 + DongleView::kStaleAfter).size()),
-           2);
-  CHECK_EQ(static_cast<int>(
-               v.devices(1001.0 + DongleView::kStaleAfter + 0.1).size()),
-           0);
+  const std::vector<DeviceSnapshot> edge =
+      v.devices(1001.0 + DongleView::kStaleAfter);
+  CHECK_EQ(static_cast<int>(edge.size()), 2);
+  CHECK(edge[0].live);
+
+  const std::vector<DeviceSnapshot> past =
+      v.devices(1001.0 + DongleView::kStaleAfter + 0.1);
+  CHECK_EQ(static_cast<int>(past.size()), 2);
+  CHECK(!past[0].live);
+  CHECK(!past[1].live);
+  // And still ageing, which is what makes the row readable as a memory rather
+  // than as a reading that has stopped moving.
+  CHECK_NEAR(past[0].age, edge[0].age + 0.1, 1e-6);
+
   // Still attached: not answering and not being there are different, and a
   // caller may want to say which.
   CHECK(v.attached());
 }
 
-// The cable coming out mid-sentence. Everything it said goes, because a dongle
-// that is not there is not evidence and its last word about a box ages into a
-// lie with nothing to correct it.
-void test_unplugging_forgets_everything() {
+// The cable coming out mid-sentence. The half-arrived batch goes, because it
+// was never a complete statement about the room. The last complete one stays,
+// dead: emptying the page of every box the dongle had heard says the room
+// changed, when the only thing that changed is what we are plugged into.
+void test_unplugging_keeps_the_last_answer_but_kills_it() {
   DongleView v;
   v.opened(1000.0);
   answer(&v, {kBoxA, kBoxB}, 1001.0);
@@ -175,12 +185,18 @@ void test_unplugging_forgets_everything() {
 
   v.closed(1007.0);
   CHECK(!v.attached());
-  CHECK_EQ(static_cast<int>(v.devices(1007.0).size()), 0);
+  const std::vector<DeviceSnapshot> rows = v.devices(1007.0);
+  CHECK_EQ(static_cast<int>(rows.size()), 2);
+  CHECK(!rows[0].live);
+  CHECK(!rows[1].live);
+  // The one that was in flight is not among them: an incomplete `dev` list
+  // would report every box it had not reached yet as having gone away.
+  CHECK(find(rows, "C4:1E:AE:18:A7:03") == nullptr);
 
-  // And plugging it back in does not resurrect anything. This is not
-  // fussiness: the thing plugged back in need not be the same dongle, and
-  // showing the last one's boxes under the new one's name would be a bench
-  // assembled from two different rooms.
+  // Plugging it back in does clear them, and that is where the rule belongs.
+  // The thing plugged back in need not be the same dongle, and showing the
+  // last one's boxes under the new one's name would be a bench assembled from
+  // two different rooms.
   v.opened(1008.0);
   CHECK_EQ(static_cast<int>(v.devices(1008.0).size()), 0);
   v.observe(msg_of("end what=devices n=1"), 1008.0);
@@ -494,8 +510,8 @@ int main() {
   test_ages_advance_between_answers();
   test_a_half_arrived_answer_is_not_shown();
   test_an_empty_answer_clears_the_room();
-  test_an_answer_that_goes_stale_is_dropped_not_aged();
-  test_unplugging_forgets_everything();
+  test_an_answer_that_goes_stale_stops_being_live();
+  test_unplugging_keeps_the_last_answer_but_kills_it();
   test_a_box_with_no_clock_has_no_time();
   test_the_registrys_stand_in_for_a_name_is_not_a_name();
   test_alarms_from_a_free_running_box_are_not_imported();

@@ -1413,6 +1413,68 @@ void test_the_via_column_is_only_dim_when_the_row_is() {
   CHECK(dimmed(quiet[2]));
 }
 
+// A dongle that has stopped answering keeps its rows, so it has to keep the
+// number that says how old they are. Going blank at exactly the moment the age
+// becomes worth reading leaves a page of dim boxes over a radio line admitting
+// nothing about why.
+void test_a_radio_that_stopped_answering_keeps_its_age() {
+  CamConf conf = plain_conf();
+  Snapshot snap = two_radios(39600.0);
+  octo::RadioLink link;
+  link.name = "dongle";
+  link.way = "none";
+  link.answering = false;
+  link.last_wall = kNow - 95.0;
+  link.age = 95.0;
+  snap.radio_link.push_back(link);
+
+  DeviceSources from;
+  from.bench = &snap;
+  from.conf = &conf;
+  from.now_wall = kNow;
+  const DeviceView v = octo::build_device_view(from);
+
+  const octo::RadioView* dongle = nullptr;
+  for (const octo::RadioView& rv : v.radios) {
+    if (rv.name == "dongle") dongle = &rv;
+  }
+  CHECK(dongle != nullptr);
+  if (dongle == nullptr) return;
+  CHECK(!dongle->answering);
+  CHECK(dongle->has_age);
+  CHECK_NEAR(dongle->age_s, 95.0, 1e-6);
+  CHECK_STR(dongle->way, "none");
+}
+
+// The other half: a radio octomancerd knows about and has never heard a word
+// from has no age, and a zero there would be a claim rather than a blank.
+void test_a_radio_that_never_answered_has_no_age() {
+  CamConf conf = plain_conf();
+  Snapshot snap;
+  snap.device.push_back(box("A", "Tentacle_A", true, -0.5));
+  octo::RadioLink link;
+  link.name = "dongle";
+  link.way = "none";
+  link.answering = false;
+  link.last_wall = 0.0;
+  link.age = 0.0;
+  snap.radio_link.push_back(link);
+
+  DeviceSources from;
+  from.bench = &snap;
+  from.conf = &conf;
+  from.now_wall = kNow;
+  const DeviceView v = octo::build_device_view(from);
+
+  const octo::RadioView* dongle = nullptr;
+  for (const octo::RadioView& rv : v.radios) {
+    if (rv.name == "dongle") dongle = &rv;
+  }
+  CHECK(dongle != nullptr);
+  if (dongle == nullptr) return;
+  CHECK(!dongle->has_age);
+}
+
 // A box the dongle has never been told the name of is listed by its hardware
 // address, and every box from one manufacturer shares the first three bytes.
 // Cutting the column from the right would render four different boxes as four
@@ -1812,6 +1874,8 @@ int main() {
   test_the_table_is_unchanged_without_a_second_radio();
   test_the_table_says_which_radio_heard_each_row();
   test_the_via_column_is_only_dim_when_the_row_is();
+  test_a_radio_that_stopped_answering_keeps_its_age();
+  test_a_radio_that_never_answered_has_no_age();
   test_unnamed_boxes_keep_the_end_of_their_address();
   test_a_radio_that_has_heard_nothing_still_says_it_is_there();
   test_a_radio_with_no_clock_quotes_no_absolute_time();

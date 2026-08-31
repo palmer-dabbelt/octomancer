@@ -375,7 +375,13 @@ DeviceView build_device_view(const DeviceSources& from) {
         if (l.name != rv.name) continue;
         rv.way = l.way;
         rv.answering = l.answering;
-        rv.has_age = l.answering;
+        // An age outlives the answering. "How old is what this radio told me"
+        // is a question a radio that has gone quiet has the most interesting
+        // answer to, and its rows are still on the page below -- so the column
+        // says how stale they are rather than going blank at the moment that
+        // becomes worth knowing. Blank is kept for a radio that has never said
+        // anything at all, where there is genuinely no age to give.
+        rv.has_age = l.answering || l.last_wall > 0.0;
         rv.age_s = age_from(l.last_wall, l.age, now);
         rv.clock_is_real = l.clock_is_real;
         break;
